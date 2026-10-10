@@ -180,6 +180,21 @@ pub fn run_timeout(mut cmd: Command, stdin: Option<&[u8]>, secs: u64, cwd: &Path
     Ok((Output { status, stdout: collect(out), stderr: collect(err) }, killed))
 }
 
+/// Git Bash's path style back to a Windows path: /c/Users/x → C:/Users/x, /tmp/x → %TEMP%/x.
+/// None when it isn't one (and always on other systems).
+pub fn from_msys(path: &str) -> Option<String> {
+    if !cfg!(windows) || !path.starts_with('/') {
+        return None;
+    }
+    let b = path.as_bytes();
+    if b.len() >= 2 && b[1].is_ascii_alphabetic() && (b.len() == 2 || b[2] == b'/') {
+        return Some(format!("{}:/{}", (b[1] as char).to_ascii_uppercase(), path.get(3..).unwrap_or("")));
+    }
+    let rest = path.strip_prefix("/tmp")?;
+    (rest.is_empty() || rest.starts_with('/'))
+        .then(|| format!("{}{rest}", std::env::temp_dir().display().to_string().trim_end_matches(['\\', '/'])))
+}
+
 /// Read a line from the terminal without echoing it (API keys).
 pub fn read_hidden() -> String {
     use ratatui::crossterm::event::{read, Event, KeyCode, KeyEventKind, KeyModifiers};

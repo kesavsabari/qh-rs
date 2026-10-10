@@ -41,6 +41,8 @@ fn ferr(cwd: &Path, path: &str, e: std::io::Error) -> String {
 
 /// A path argument resolved against the session's working directory (`~` expanded).
 pub fn resolve(cwd: &Path, path: &str) -> PathBuf {
+    let msys = crate::platform::from_msys(path);
+    let path = msys.as_deref().unwrap_or(path);
     let p = if let Some(r) = path.strip_prefix('~') {
         crate::config::home().join(r.trim_start_matches(['/', '\\']))
     } else {
@@ -589,8 +591,10 @@ mod cwd_tests {
         assert_eq!(s1.canonicalize().unwrap(), root.join("a/c").canonicalize().unwrap());
         assert_eq!(s2, root, "another session's folder must not move");
         let out = bash(&mut s2, &json!({"cmd": "pwd"})).unwrap();
-        let norm = |x: &str| x.replace('\\', "/").to_lowercase();
-        assert!(norm(&out).contains(&norm(&root.display().to_string())) && !out.contains("QHCWD"), "{out}");
+        // Git Bash prints its own path style; what matters is that it maps back to the same folder
+        let shown = out.lines().nth(1).unwrap_or("").trim();
+        assert_eq!(resolve(&s2, shown).canonicalize().unwrap(), root.canonicalize().unwrap(), "{out}");
+        assert!(!out.contains("QHCWD"), "{out}");
         write_file(&s1, &json!({"path": "f.txt", "content": "x"})).unwrap();
         assert!(root.join("a/c/f.txt").exists());
     }

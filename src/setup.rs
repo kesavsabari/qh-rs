@@ -246,6 +246,21 @@ fn ollama_cloud_step(host: &str) -> Vec<String> {
 
 /// Key → test → models for one API provider. A saved key that still works is reused.
 fn provider_step(name: &str, site: &str) -> Vec<String> {
+    if name == "chatgpt" {
+        if !crate::chatgpt::signed_in() || !yes(&format!("Already signed in with ChatGPT as {}", crate::chatgpt::account().unwrap_or_default()),
+                                                "Keep it", "Sign in again") {
+            if let Err(e) = crate::chatgpt::login() {
+                println!("✗ ChatGPT: {e}");
+                return vec![];
+            }
+        }
+        providers::init(&crate::config::load()); // pick up the new sign-in
+        return match crate::chatgpt::models() {
+            Ok(m) => { println!("✓ ChatGPT ({}): {} models", crate::chatgpt::account().unwrap_or_default(), m.len());
+                       m.into_iter().map(|id| providers::display(name, &id)).collect() }
+            Err(e) => { println!("✗ ChatGPT signed in, but listing models failed: {e}"); vec![] }
+        };
+    }
     let works = |n: &str| providers::get(n).is_some_and(|p| !p.key.is_empty()) && providers::test(n).is_ok();
     if works(name) {
         println!("✓ {name}: using the saved key");
@@ -285,7 +300,8 @@ fn provider_step(name: &str, site: &str) -> Vec<String> {
         .map(|v| v.into_iter().map(|m| providers::display(name, &m.id)).collect()).unwrap_or_default()
 }
 
-const PROVIDERS: [(&str, &str, &str); 10] = [
+const PROVIDERS: [(&str, &str, &str); 11] = [
+    ("chatgpt", "ChatGPT Plus/Pro (sign in, uses your plan)", "browser sign-in"),
     ("openrouter", "OpenRouter", "https://openrouter.ai/keys"),
     ("groq", "Groq", "https://console.groq.com/keys"),
     ("openai", "OpenAI", "https://platform.openai.com/api-keys"),
@@ -325,7 +341,11 @@ pub fn run() -> bool {
     ];
     src[0].on = local.is_some();
     for (id, label, _) in PROVIDERS {
-        let mut it = item(label, if saved(id) { "key saved".to_string() } else { "API key".to_string() });
+        let note = match (id, saved(id)) {
+            ("chatgpt", true) => "signed in", ("chatgpt", false) => "browser sign-in, no key",
+            (_, true) => "key saved", _ => "API key",
+        };
+        let mut it = item(label, note);
         it.on = saved(id);
         src.push(it);
     }

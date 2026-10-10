@@ -8,7 +8,7 @@ use std::net::TcpListener;
 use std::time::{Duration, Instant};
 
 /// SHA-256 (FIPS 180-4), just for the PKCE challenge; not worth a dependency.
-fn sha256(data: &[u8]) -> [u8; 32] {
+pub(crate) fn sha256(data: &[u8]) -> [u8; 32] {
     const K: [u32; 64] = [
         0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
         0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
@@ -49,7 +49,7 @@ fn sha256(data: &[u8]) -> [u8; 32] {
     out
 }
 
-fn b64url(data: &[u8]) -> String {
+pub(crate) fn b64url(data: &[u8]) -> String {
     const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut s = String::new();
     for c in data.chunks(3) {
@@ -59,9 +59,23 @@ fn b64url(data: &[u8]) -> String {
     s
 }
 
+pub(crate) fn b64url_decode(s: &str) -> Vec<u8> {
+    let val = |c: u8| match c {
+        b'A'..=b'Z' => Some(c - b'A'), b'a'..=b'z' => Some(c - b'a' + 26), b'0'..=b'9' => Some(c - b'0' + 52),
+        b'-' | b'+' => Some(62), b'_' | b'/' => Some(63), _ => None,
+    };
+    let v: Vec<u8> = s.bytes().filter_map(val).collect();
+    let mut out = vec![];
+    for c in v.chunks(4) {
+        let n = c.iter().enumerate().fold(0u32, |n, (i, &x)| n | (x as u32) << (18 - 6 * i));
+        out.extend_from_slice(&n.to_be_bytes()[1..c.len()]);
+    }
+    out
+}
+
 /// 32 unpredictable bytes without a rand crate: the OS's randomness where there is a file for
 /// it, else hashed clocks, addresses and the process id.
-fn random() -> [u8; 32] {
+pub(crate) fn random() -> [u8; 32] {
     let mut seed = Vec::new();
     if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
         let mut b = [0u8; 32];
@@ -121,6 +135,7 @@ mod tests {
     #[test]
     fn sha256_and_b64url_match_known_vectors() {
         let hex: String = sha256(b"abc").iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(b64url_decode(&b64url(b"hello world!?")), b"hello world!?");
         assert_eq!(hex, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
         // RFC 7636 appendix B
         assert_eq!(b64url(&sha256(b"dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk")), "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM");

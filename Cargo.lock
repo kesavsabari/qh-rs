@@ -539,6 +539,7 @@ version = "0.1.0"
 dependencies = [
  "ratatui",
  "regex",
+ "ring",
  "serde_json",
  "toml",
  "unicode-width 0.2.0",

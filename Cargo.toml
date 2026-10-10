@@ -10,6 +10,7 @@ serde_json = "1"
 toml = { version = "0.8", default-features = false, features = ["parse"] }
 regex = { version = "1", default-features = false, features = ["std", "perf", "unicode-perl", "unicode-case"] }
 unicode-width = "0.2"
+ring = "0.17" # already in the tree via ureq's TLS; used to check ChatGPT ID-token signatures
 
 [profile.release]
 opt-level = 3

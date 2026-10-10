@@ -13,6 +13,7 @@ pub enum Kind {
     Ollama,
     OpenAI,
     Anthropic,
+    ChatGPT, // Sign in with ChatGPT: the user's plan, no key
 }
 
 #[derive(Clone, Debug)]
@@ -36,7 +37,8 @@ pub struct ModelInfo {
 // name, kind, base url, key env var, local
 // Anthropic's key var is deliberately not ANTHROPIC_API_KEY: exporting that globally switches
 // Claude Code itself to per-token billing.
-const PRESETS: [(&str, Kind, &str, &str, bool); 12] = [
+const PRESETS: [(&str, Kind, &str, &str, bool); 13] = [
+    ("chatgpt", Kind::ChatGPT, crate::chatgpt::API, "", false),
     ("openrouter", Kind::OpenAI, "https://openrouter.ai/api/v1", "OPENROUTER_API_KEY", false),
     ("ollama-cloud", Kind::Ollama, "https://ollama.com", "OLLAMA_API_KEY", false),
     ("openai", Kind::OpenAI, "https://api.openai.com/v1", "OPENAI_API_KEY", false),
@@ -126,6 +128,9 @@ pub fn init(cfg: &Config) {
     for p in v.iter_mut() {
         if let Some(k) = creds.get(&p.name) {
             p.key = k.clone();
+        }
+        if p.kind == Kind::ChatGPT && crate::chatgpt::signed_in() {
+            p.key = "(signed in)".into(); // a marker: the real token is fetched and refreshed per request
         }
         if p.name == "openrouter" && p.key.is_empty() {
             p.key = cfg.openrouter_key.clone();
@@ -228,6 +233,7 @@ fn fetch_models(p: &Provider) -> Result<Vec<ModelInfo>, String> {
     let base = p.base.trim_end_matches('/');
     let num = |v: &Value| v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0);
     match p.kind {
+        Kind::ChatGPT => Ok(crate::chatgpt::models()?.into_iter().map(|id| ModelInfo { id, ..Default::default() }).collect()),
         Kind::Ollama => {
             let v = get_json(p, &format!("{base}/api/tags"))?;
             Ok(v["models"].as_array().into_iter().flatten()

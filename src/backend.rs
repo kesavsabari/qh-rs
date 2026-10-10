@@ -356,6 +356,9 @@ fn explain(p: &Provider, e: Error) -> Error {
 #[allow(clippy::too_many_arguments)]
 fn chat_raw(p: &Provider, model: &str, messages: &[Value], tools: &[Value], think: bool, ctx: usize,
             keep_alive: &str, on: &mut dyn FnMut(bool, &str) -> bool) -> Result<Reply, Error> {
+    if p.kind == Kind::ChatGPT {
+        return crate::chatgpt::chat(model, messages, tools, think, on);
+    }
     if !p.local && p.key.is_empty() {
         return Err(Error::Other(format!("no key for {}: run /provider add {} (or qh login {})", p.name, p.name, p.name)));
     }
@@ -374,6 +377,7 @@ fn chat_raw(p: &Provider, model: &str, messages: &[Value], tools: &[Value], thin
         }
         Kind::OpenAI => openai(&p.base, &p.key, model, messages, tools, think, on),
         Kind::Anthropic => anthropic(&p.base, &p.key, model, messages, tools, think, on),
+        Kind::ChatGPT => unreachable!("handled above"),
     }
 }
 

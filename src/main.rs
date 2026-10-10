@@ -1,5 +1,6 @@
 mod backend;
 mod browser;
+mod chatgpt;
 mod checkpoints;
 mod config;
 mod context;
@@ -26,6 +27,7 @@ use std::path::PathBuf;
 
 const USAGE: &str = "qh [--resume [id|latest]] [--profile coding|general|all] [--model NAME|provider:MODEL] [--think] [--mode ask|auto-edit|auto|plan]
 qh setup                connect a model (local Ollama or a cloud API key)
+qh login chatgpt        sign in with your ChatGPT Plus/Pro plan (qh logout chatgpt)
 qh login <provider>     save an API key (openrouter, ollama-cloud, openai, groq, anthropic…)
 qh -p \"prompt\" [-p \"next turn\" ...] [-y] [--ctx N] [--stats FILE]
     run prompts as turns of one session without the UI and print the replies
@@ -69,6 +71,12 @@ fn parse() -> Args {
 
 /// `qh login <provider>`: read a key without echoing it, save it (chmod 600), test it.
 fn login(name: &str) -> i32 {
+    if name == "chatgpt" {
+        return match chatgpt::login() {
+            Ok(email) => { println!("✓ signed in with ChatGPT as {email}. Pick a model with /model chatgpt:"); 0 }
+            Err(e) => { eprintln!("✗ {e}"); 1 }
+        };
+    }
     let Some(p) = providers::get(name) else {
         let names: Vec<String> = providers::all().into_iter().map(|p| p.name).collect();
         eprintln!("no provider {name}. Known: {}", names.join(", "));
@@ -97,6 +105,11 @@ fn login(name: &str) -> i32 {
 }
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("logout") && std::env::args().nth(2).as_deref() == Some("chatgpt") {
+        chatgpt::sign_out();
+        println!("signed out of ChatGPT");
+        std::process::exit(0);
+    }
     if std::env::args().nth(1).as_deref() == Some("login") {
         providers::init(&config::load());
         let name = std::env::args().nth(2).unwrap_or_default();

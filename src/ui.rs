@@ -46,7 +46,7 @@ Alt+1..9 or Alt+←/→ switch · PgUp/PgDn scroll · Ctrl+O open last tool · C
 use crate::tools::DANGER;
 
 /// What the `/` autocomplete offers; custom commands are added from .qh/commands.
-const COMMANDS: [(&str, &str); 28] = [
+const COMMANDS: [(&str, &str); 29] = [
     ("/model", "pick this tab's model"), ("/provider", "connect providers: sign in, keys"),
     ("/new", "new session tab"), ("/close", "close this tab"), ("/mode", "ask · auto-edit · auto · plan"),
     ("/compact", "shrink the conversation"), ("/clear", "start this tab fresh"), ("/undo", "undo the agent's file changes"),
@@ -55,7 +55,7 @@ const COMMANDS: [(&str, &str); 28] = [
     ("/role", "give this tab a role"), ("/map", "map of sessions and messages"), ("/layout", "tabs or grid"),
     ("/msg", "message another tab"), ("/sessions", "saved sessions"), ("/allow", "auto-approve rules"),
     ("/release", "let held messages through"), ("/pause", "hold automatic messaging"), ("/resume", "resume messaging"),
-    ("/mcp", "MCP servers"), ("/commands", "your own /commands"), ("/help", "everything"),
+    ("/mcp", "MCP servers"), ("/team", "who's online in this repo · on · off"), ("/commands", "your own /commands"), ("/help", "everything"),
     ("/cd", "same as /cwd"), ("/providers", "same as /provider"),
 ];
 
@@ -249,6 +249,14 @@ pub fn run(hub: Arc<Hub>, tx: Sender<Ui>, rx: Receiver<Ui>) -> std::io::Result<(
     if let Some(n) = hub.names().first() {
         app.set_active(n);
     }
+    // presence comes back on in repos where it was turned on before
+    if hub.get(&app.active).is_some_and(|m| crate::team::enabled_for(&m.cwd())) {
+        let a = app.active.clone();
+        match app.start_team() {
+            Ok(s) => app.note(&a, s),
+            Err(e) => app.err(&a, format!("team presence: {e}")),
+        }
+    }
     let res = loop {
         if let Err(e) = term.draw(|f| app.draw(f)) {
             break Err(e);
@@ -279,6 +287,7 @@ pub fn run(hub: Arc<Hub>, tx: Sender<Ui>, rx: Receiver<Ui>) -> std::io::Result<(
     };
     let _ = execute!(std::io::stdout(), event::DisableBracketedPaste, event::DisableMouseCapture);
     ratatui::restore();
+    crate::team::stop_and_flush(); // tell teammates we left
     res
 }
 
@@ -1022,6 +1031,18 @@ impl App {
                 self.note(&a, if r.is_empty() { "no role yet: it is named from your first real request, or set one with /role <text>".into() } else { format!("role: {r}") });
             }
             "/mcp" => self.note(&a, crate::mcp::status()),
+            "/team" => match arg {
+                "on" => match self.start_team() {
+                    Ok(s) => self.note(&a, s),
+                    Err(e) => self.err(&a, e),
+                },
+                "off" => {
+                    if let Some((_, repo)) = crate::team::github_repo(&m.cwd()) { crate::team::remember(&repo, false) }
+                    crate::team::stop();
+                    self.note(&a, "team presence off (teammates see you go offline)");
+                }
+                _ => self.note(&a, crate::team::report()),
+            },
             "/commands" => {
                 let list = custom_commands(&m.cwd());
                 self.note(&a, if list.is_empty() {
@@ -1248,6 +1269,19 @@ $ARGUMENTS is replaced by what you type after the command".into()
         }
     }
 
+    /// Share this hub's sessions as presence on the active tab's repo.
+    fn start_team(&self) -> Result<String, String> {
+        let cwd = self.hub.get(&self.active).map(|m| m.cwd()).unwrap_or_default();
+        let (hub, hub2, a) = (self.hub.clone(), self.hub.clone(), self.active.clone());
+        let summary = Box::new(move || {
+            let sessions: Vec<Value> = lock(&hub.members).iter().map(|m| serde_json::json!({
+                "name": m.name, "status": m.status(), "role": lock(&m.purpose).clone()})).collect();
+            serde_json::json!({"sessions": sessions, "files": hub.claimed_files()})
+        });
+        let say = Box::new(move |s: String| hub2.emit(&a, Event::Notice(s)));
+        crate::team::start(&cwd, summary, say)
+    }
+
     fn status_line(&self) -> String {
         let Some(m) = self.hub.get(&self.active) else { return String::new() };
         let s = lock(&m.set);
@@ -1279,6 +1313,7 @@ $ARGUMENTS is replaced by what you type after the command".into()
         if busy > 0 { out += &format!(" · {busy} other busy") }
         if self.hub.paused.load(std::sync::atomic::Ordering::Relaxed) { out += " · PAUSED" }
         if m.status() == "held" { out += &format!(" · held (> {MAX_HOPS} hops): /release") }
+        if let Some(t) = crate::team::status_line() { out += &format!(" · {t}") }
         out
     }
 

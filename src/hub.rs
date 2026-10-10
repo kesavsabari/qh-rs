@@ -614,6 +614,11 @@ session tests). Messages from other sessions start with [from <name>].", prompt:
         None
     }
 
+    /// Files a session currently holds, for team presence.
+    pub fn claimed_files(&self) -> Vec<String> {
+        lock(&self.files).keys().cloned().collect()
+    }
+
     fn release_files(&self, name: &str) {
         lock(&self.files).retain(|_, o| o != name);
     }

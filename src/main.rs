@@ -16,6 +16,7 @@ mod providers;
 mod session;
 mod setup;
 mod skills;
+mod team;
 mod textcall;
 mod tier;
 mod tools;

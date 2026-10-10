@@ -195,6 +195,17 @@ pub fn from_msys(path: &str) -> Option<String> {
         .then(|| format!("{}{rest}", std::env::temp_dir().display().to_string().trim_end_matches(['\\', '/'])))
 }
 
+/// Open a URL in the default browser, best effort.
+pub fn open_url(url: &str) {
+    let _ = if cfg!(windows) {
+        Command::new("cmd").args(["/C", "start", "", url]).stdout(Stdio::null()).stderr(Stdio::null()).spawn()
+    } else if cfg!(target_os = "macos") {
+        Command::new("open").arg(url).stdout(Stdio::null()).stderr(Stdio::null()).spawn()
+    } else {
+        Command::new("xdg-open").arg(url).stdout(Stdio::null()).stderr(Stdio::null()).spawn()
+    };
+}
+
 /// Read a line from the terminal without echoing it (API keys).
 pub fn read_hidden() -> String {
     use ratatui::crossterm::event::{read, Event, KeyCode, KeyEventKind, KeyModifiers};

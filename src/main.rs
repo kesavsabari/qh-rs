@@ -5,6 +5,7 @@ mod config;
 mod context;
 mod engine;
 mod map;
+mod oauth;
 mod platform;
 mod mcp;
 mod hooks;

@@ -153,35 +153,65 @@ struct App {
 }
 
 /// Popup list (`/model`, `/provider`): type to filter, arrows to move, Enter runs `cmd value`.
+/// Items with a group are shown under a heading per group.
 struct Picker {
     title: &'static str,
     cmd: String,
-    all: Vec<(String, String)>, // (value passed to cmd, label shown)
+    all: Vec<(String, String, String)>, // (value passed to cmd, label shown, group heading or "")
     filter: String,
     sel: usize,
     cur: String,
 }
 
+fn picker(title: &'static str, cmd: &str, all: Vec<(String, String)>) -> Picker {
+    Picker { title, cmd: cmd.into(), all: all.into_iter().map(|(v, l)| (v, l, String::new())).collect(),
+             filter: String::new(), sel: 0, cur: String::new() }
+}
+
 impl Picker {
-    fn hits(&self) -> Vec<&(String, String)> {
+    fn hits(&self) -> Vec<&(String, String, String)> {
         let f = self.filter.to_lowercase();
-        self.all.iter().filter(|(_, l)| f.split_whitespace().all(|w| l.to_lowercase().contains(w))).collect()
+        self.all.iter().filter(|(_, l, g)| {
+            let hay = format!("{} {}", g.to_lowercase(), l.to_lowercase());
+            f.split_whitespace().all(|w| hay.contains(w))
+        }).collect()
+    }
+
+    /// Display rows: a heading (None, text) whenever the group changes, then items (Some(hit index), label).
+    fn rows(&self) -> Vec<(Option<usize>, String)> {
+        let mut out = vec![];
+        let mut last: Option<&str> = None;
+        for (i, (_, l, g)) in self.hits().into_iter().enumerate() {
+            if !g.is_empty() && last != Some(g.as_str()) {
+                out.push((None, g.clone()));
+            }
+            last = Some(g.as_str());
+            out.push((Some(i), l.clone()));
+        }
+        out
     }
 }
 
-/// Every model the user can pick: the local Ollama (plus Ollama's cloud catalog through it)
-/// and each provider that has a key. (value, label) pairs.
-fn model_list(hub: &Hub) -> Vec<(String, String)> {
+/// Every model the user can pick, grouped by where it runs: the local Ollama, Ollama's cloud
+/// catalog through it, then each provider that has a key or sign-in. (value, label, group).
+fn model_list(hub: &Hub) -> Vec<(String, String, String)> {
     let k = |c: Option<usize>| c.map(|c| format!(" · {}k", c / 1000)).unwrap_or_default();
-    let mut out: Vec<(String, String)> = crate::backend::list_models(&hub.cfg.host).into_iter()
-        .map(|n| { let cloud = if crate::backend::is_cloud(&n) { "  ☁" } else { "" }; (n.clone(), format!("{n}{cloud}")) }).collect();
+    let mut out: Vec<(String, String, String)> = crate::backend::list_models(&hub.cfg.host).into_iter()
+        .map(|n| {
+            let g = if crate::backend::is_cloud(&n) { "Ollama cloud" } else { "Local (Ollama)" };
+            (n.clone(), n, g.to_string())
+        }).collect();
+    out.sort_by_key(|(_, _, g)| g != "Local (Ollama)"); // stable: keeps each group's order
     for p in crate::providers::usable().into_iter().filter(|p| p.name != "ollama") {
         let Ok(models) = crate::providers::models(&p) else { continue };
+        let group = match p.name.as_str() {
+            "chatgpt" => "ChatGPT (your plan)".to_string(),
+            n => format!("{n}{}", if p.local { " (local)" } else { "" }),
+        };
         for mi in models {
             let v = crate::providers::display(&p.name, &mi.id);
             let price = if mi.price_in > 0.0 { format!(" · ${:.2}/${:.2} per M", mi.price_in, mi.price_out) } else { String::new() };
-            let loc = if p.local { "" } else { "  ☁" };
-            out.push((v.clone(), format!("{v}{}{price}{loc}", k(mi.ctx))));
+            out.push((v, format!("{}{}{price}", mi.id, k(mi.ctx)), group.clone()));
         }
     }
     out
@@ -829,13 +859,13 @@ impl App {
                 let mut note = String::new();
                 if arg != "local" {
                     let all = model_list(&self.hub);
-                    let exact = all.iter().any(|(v, _)| v == arg);
+                    let exact = all.iter().any(|(v, _, _)| v == arg);
                     let words: Vec<String> = arg.to_lowercase().split_whitespace().map(String::from).collect();
-                    let hits: Vec<&(String, String)> = all.iter()
-                        .filter(|(_, l)| words.iter().all(|w| l.to_lowercase().contains(w.as_str()))).collect();
+                    let hits: Vec<&(String, String, String)> = all.iter()
+                        .filter(|(v, _, _)| words.iter().all(|w| v.to_lowercase().contains(w.as_str()))).collect();
                     if !exact && (arg.is_empty() || hits.len() > 1) {
                         let cur = { let s = lock(&m.set); crate::providers::display(&s.provider, &s.model) };
-                        let sel = if arg.is_empty() { all.iter().position(|(v, _)| *v == cur).unwrap_or(0) } else { 0 };
+                        let sel = if arg.is_empty() { all.iter().position(|(v, _, _)| *v == cur).unwrap_or(0) } else { 0 };
                         self.picker = Some(Picker { title: "model", cmd: "/model".into(), all, filter: arg.to_string(), sel, cur });
                         return;
                     }
@@ -882,7 +912,7 @@ impl App {
                                 let all = vec![("test chatgpt".to_string(), "test the sign-in (lists your plan's models)".to_string()),
                                                ("signin chatgpt".to_string(), "sign in again".to_string()),
                                                ("signout chatgpt".to_string(), "sign out".to_string())];
-                                self.picker = Some(Picker { title: "ChatGPT", cmd: "/provider".into(), all, filter: String::new(), sel: 0, cur: String::new() });
+                                self.picker = Some(picker("ChatGPT", "/provider", all));
                             } else {
                                 self.command("/provider signin chatgpt");
                             }
@@ -894,7 +924,7 @@ impl App {
                             let all = vec![(format!("test {name}"), "test the key".to_string()),
                                            (format!("add {name}"), "replace the key".to_string()),
                                            (format!("remove {name}"), "remove the key".to_string())];
-                            self.picker = Some(Picker { title: "provider", cmd: "/provider".into(), all, filter: String::new(), sel: 0, cur: String::new() });
+                            self.picker = Some(picker("provider", "/provider", all));
                         }
                     }
                     (Some("signin"), Some("chatgpt"), _) => {
@@ -935,7 +965,7 @@ impl App {
                             };
                             (p.name.clone(), format!("{:<14}{state}", p.name))
                         }).collect();
-                        self.picker = Some(Picker { title: "providers", cmd: "/provider connect".into(), all, filter: String::new(), sel: 0, cur: String::new() });
+                        self.picker = Some(picker("providers", "/provider connect", all));
                     }
                 }
             }
@@ -1184,7 +1214,7 @@ $ARGUMENTS is replaced by what you type after the command".into()
                 if let Some(p) = self.picker.as_mut() {
                     if let Some((r, top)) = self.picker_rows {
                         if row >= r.y && row < r.y + r.height && col >= r.x && col < r.x + r.width {
-                            let i = top + (row - r.y) as usize;
+                            let i = p.rows().get(top + (row - r.y) as usize).and_then(|x| x.0).unwrap_or(usize::MAX);
                             if i < p.hits().len() {
                                 if p.sel == i {
                                     return self.key(KeyEvent::new(KeyCode::Enter, Mods::NONE));
@@ -1379,14 +1409,24 @@ fn draw_picker(f: &mut Frame, p: &Picker) -> (Rect, usize) {
     f.render_widget(block, r);
     let mut lines = vec![Line::from(vec![Span::styled("search: ", Style::new().fg(DIM)), Span::raw(p.filter.clone()), Span::styled("▏", Style::new().fg(ACCENT))])];
     let rows = inner.height.saturating_sub(1) as usize;
-    let top = p.sel.saturating_sub(rows.saturating_sub(1));
+    let all_rows = p.rows();
+    let at = all_rows.iter().position(|(i, _)| *i == Some(p.sel)).unwrap_or(0);
+    // keep the selection's heading in view when scrolling back up to a group's first item
+    let at = if at > 0 && all_rows[at - 1].0.is_none() { at - 1 } else { at };
+    let top = at.saturating_sub(rows.saturating_sub(1)).min(at);
     if hits.is_empty() {
         lines.push(Line::styled("no match", Style::new().fg(DIM)));
     }
-    for (i, (v, label)) in hits.iter().map(|h| (&h.0, &h.1)).enumerate().skip(top).take(rows) {
-        let mark = if *v == p.cur { "● " } else { "  " };
-        let st = if i == p.sel { Style::new().add_modifier(Modifier::REVERSED) } else { Style::new() };
-        lines.push(Line::styled(format!("{mark}{}", clip(label, w as usize - 4)), st));
+    for (i, label) in all_rows.iter().skip(top).take(rows) {
+        match i {
+            None => lines.push(Line::styled(format!("{label}"), Style::new().fg(ACCENT).add_modifier(Modifier::BOLD))),
+            Some(i) => {
+                let mark = if hits[*i].0 == p.cur { "● " } else { "  " };
+                let st = if *i == p.sel { Style::new().add_modifier(Modifier::REVERSED) } else { Style::new() };
+                let indent = if hits[*i].2.is_empty() { "" } else { "  " };
+                lines.push(Line::styled(format!("{indent}{mark}{}", clip(label, (w as usize).saturating_sub(6))), st));
+            }
+        }
     }
     f.render_widget(Paragraph::new(lines), inner);
     (Rect { y: inner.y + 1, height: inner.height.saturating_sub(1), ..inner }, top)

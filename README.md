@@ -11,13 +11,13 @@ side by side in tabs.
 **Windows** (PowerShell):
 
 ```powershell
-irm https://raw.githubusercontent.com/kesavsabari/qh-rs/main/install.ps1 | iex
+irm kesavsabari.github.io/qh | iex
 ```
 
 **Linux / macOS**:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/kesavsabari/qh-rs/main/install.sh | sh
+curl -fsSL kesavsabari.github.io/qh/sh | sh
 ```
 
 Open a **new** terminal afterwards so `qh` is on your PATH.

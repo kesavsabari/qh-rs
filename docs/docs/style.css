@@ -89,3 +89,10 @@ a.card:hover { border-top-color: var(--lamp); }
   td:first-child { white-space: normal; }
   table { display: block; overflow-x: auto; }
 }
+
+/* phones: code wraps instead of scrolling sideways, Copy sits in its own strip */
+@media (max-width: 860px) {
+  pre { white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: visible; padding: 40px 14px 14px; font-size: .9rem; }
+  .copy { top: 8px; right: 8px; }
+  p code, li code, td code { overflow-wrap: anywhere; }
+}

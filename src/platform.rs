@@ -195,7 +195,7 @@ pub fn from_msys(path: &str) -> Option<String> {
         .then(|| format!("{}{rest}", std::env::temp_dir().display().to_string().trim_end_matches(['\\', '/'])))
 }
 
-pub const DOCS: &str = "https://kesavsabari.github.io/qh-rs/";
+pub const DOCS: &str = "https://kesavsabari.github.io/qh-rs/docs/";
 
 /// Open a URL in the default browser, best effort.
 pub fn open_url(url: &str) {

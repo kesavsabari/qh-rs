@@ -1,0 +1,360 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>qh docs</title>
+<meta name="description" content="How to install and use qh, a terminal coding agent for local and cloud models: setup, models, commands, team mode and configuration.">
+<link rel="icon" href="../favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<a class="skip" href="#start">Skip to content</a>
+<div class="wrap">
+
+<aside class="side" id="side">
+  <a class="brand" href="../"><b>qh</b><span>docs</span></a>
+  <p class="tag">A coding agent for your terminal. Local models, cloud models, and your team.</p>
+  <button class="menu" type="button" aria-expanded="false" aria-controls="side">Contents</button>
+  <nav aria-label="Contents">
+    <div class="grp">Start</div>
+    <a href="#install">Install</a>
+    <a href="#setup">First run</a>
+    <a href="#basics">Using qh</a>
+    <div class="grp">Models</div>
+    <a href="#local">Local (Ollama)</a>
+    <a href="#ollama-cloud">Ollama cloud</a>
+    <a href="#chatgpt">ChatGPT plan</a>
+    <a href="#keys">API keys and coding plans</a>
+    <a href="#switch">Switching models</a>
+    <div class="grp">Work</div>
+    <a href="#modes">Modes and approvals</a>
+    <a href="#commands">Commands and keys</a>
+    <a href="#tabs">Several agents at once</a>
+    <a href="#undo">Undo and diff</a>
+    <div class="grp">Team</div>
+    <a href="#team">Team mode</a>
+    <a href="#team-start">Start a team</a>
+    <a href="#team-use">See and message teammates</a>
+    <a href="#team-safety">Privacy and safety</a>
+    <div class="grp">Make it yours</div>
+    <a href="#instructions">Project instructions</a>
+    <a href="#custom">Your own commands</a>
+    <a href="#skills">Skills</a>
+    <a href="#hooks">Hooks</a>
+    <a href="#mcp">MCP servers</a>
+    <a href="#config">Config reference</a>
+    <div class="grp">Help</div>
+    <a href="#trouble">Troubleshooting</a>
+  </nav>
+  <a class="gh" href="https://github.com/kesavsabari/qh-rs">Source on GitHub</a>
+</aside>
+
+<main id="start">
+<section>
+  <h1>qh docs</h1>
+  <p class="lede">qh is a coding agent in your terminal. It reads and edits your files, runs commands, browses the web, and runs several agents side by side. It works with free local models, with your ChatGPT plan, or with an API key, and you can work on a project together with friends.</p>
+  <div class="cards">
+    <a class="card" href="#install"><b>Install</b><span>One command on Windows, Linux or Mac.</span></a>
+    <a class="card" href="#setup"><b>Connect a model</b><span>Local, Ollama cloud, ChatGPT or an API key.</span></a>
+    <a class="card" href="#basics"><b>Use it</b><span>Ask in plain words; qh asks before it changes things.</span></a>
+    <a class="card" href="#team"><b>Work as a team</b><span>See who's online and what their agents are doing.</span></a>
+  </div>
+</section>
+
+<section id="install">
+  <h2>Install</h2>
+  <h3>Windows</h3>
+  <p>Open PowerShell and run:</p>
+  <pre><code>irm kesavsabari.github.io/qh | iex</code></pre>
+  <h3>Linux and macOS</h3>
+  <pre><code>curl -fsSL kesavsabari.github.io/qh/sh | sh</code></pre>
+  <p>Then open a <b>new</b> terminal, so <code>qh</code> is on your PATH. To update later, run the same command again.</p>
+  <div class="note">On Windows, qh runs commands with <a href="https://git-scm.com/download/win">Git Bash</a> if it's installed, otherwise PowerShell. Installing Git also gives you <code>git</code>, which team mode needs.</div>
+</section>
+
+<section id="setup">
+  <h2>First run</h2>
+  <p>Go to a project folder and type <code>qh</code>. The first time, a setup screen asks which models you want. Move with <kbd>↑</kbd> <kbd>↓</kbd>, tick with <kbd>Space</kbd>, continue with <kbd>Enter</kbd>. You can tick several.</p>
+  <table>
+    <tr><th>Choice</th><th>What you need</th><th>Good for</th></tr>
+    <tr><td>Local models (Ollama)</td><td>The free <a href="https://ollama.com/download">Ollama</a> app and a GPU with about 7&nbsp;GB of memory</td><td>Private, free, offline</td></tr>
+    <tr><td>Ollama cloud</td><td>The Ollama app and a free ollama.com account</td><td>Big models without a big GPU</td></tr>
+    <tr><td>ChatGPT Plus/Pro</td><td>A ChatGPT subscription</td><td>Using the plan you already pay for</td></tr>
+    <tr><td>OpenRouter, Groq, OpenAI, Anthropic, DeepSeek, Mistral</td><td>An API key from that site</td><td>Pay-per-use or free-tier cloud models</td></tr>
+    <tr><td>GLM, Kimi, MiniMax coding plans</td><td>That plan's key</td><td>Flat-price coding subscriptions</td></tr>
+  </table>
+  <p>Each choice gets one short step: download a model, sign in, or paste a key (it's tested straight away and never saved if it's wrong). Last, pick your default model from one list of everything you connected; type to search it.</p>
+  <p>Run <code>qh setup</code> any time to change this.</p>
+</section>
+
+<section id="basics">
+  <h2>Using qh</h2>
+  <p>Type what you want in plain words and press <kbd>Enter</kbd>:</p>
+  <pre><code>fix the failing test in tests/test_api.py
+add a --verbose flag to main.py
+what does src/engine.rs do?</code></pre>
+  <p>The agent reads files, runs commands and edits code to do it. Before it changes anything it asks you, showing exactly what it will do (see <a href="#modes">modes</a>).</p>
+  <ul>
+    <li>Attach a file to your message with <code>@path/to/file</code>.</li>
+    <li>Stop the agent at any moment with <kbd>Esc</kbd>.</li>
+    <li>Type <code>/</code> to see every command; keep typing to narrow the list, <kbd>Enter</kbd> runs the highlighted one.</li>
+    <li>Run one task without the full screen: <code>qh -p "explain this repo" -y</code>.</li>
+  </ul>
+</section>
+
+<section id="local">
+  <h2>Local models (Ollama)</h2>
+  <p>Install <a href="https://ollama.com/download">Ollama</a> (Windows: <code>winget install Ollama.Ollama</code>), start it, and run <code>qh setup</code>. Setup offers to download <code>qwen3.5:9b</code>, the model qh is tuned on. Any other Ollama model works too: <code>ollama pull &lt;name&gt;</code> and it shows up in <code>/model</code>.</p>
+  <p>qh sizes the model's memory (its context window) to fit your GPU automatically. <code>/tier</code> shows what it picked and why.</p>
+</section>
+
+<section id="ollama-cloud">
+  <h2>Ollama cloud</h2>
+  <p>Ollama can also run large models on its own servers. Sign the Ollama app in to your free ollama.com account (setup runs <code>ollama signin</code> for you, or use the app's settings). The <code>…-cloud</code> models then appear in <code>/model</code> under "Ollama cloud". No API key needed.</p>
+</section>
+
+<section id="chatgpt">
+  <h2>ChatGPT plan</h2>
+  <p>With ChatGPT Plus or Pro you can use your plan in qh instead of paying for an API key:</p>
+  <pre><code>qh login chatgpt</code></pre>
+  <p>Your browser opens; approve qh. Then pick a model with <code>/model chatgpt</code>. Inside qh you can also do it from <code>/provider</code> → chatgpt. Usage counts against your plan's allowance; you can cap how much qh may use in ChatGPT's settings. Sign out with <code>qh logout chatgpt</code>.</p>
+</section>
+
+<section id="keys">
+  <h2>API keys and coding plans</h2>
+  <p>Type <code>/provider</code> to see every provider and its status. Pick one and press <kbd>Enter</kbd> to add, test, replace or remove its key. Keys are typed hidden and saved only on your computer, readable only by you.</p>
+  <p>From the terminal: <code>qh login openrouter</code> (or any provider name).</p>
+  <table>
+    <tr><th>Provider</th><th>Get a key</th></tr>
+    <tr><td>OpenRouter</td><td><a href="https://openrouter.ai/keys">openrouter.ai/keys</a>: one key, hundreds of models, some free</td></tr>
+    <tr><td>Groq</td><td><a href="https://console.groq.com/keys">console.groq.com/keys</a>: fast, with a free tier</td></tr>
+    <tr><td>GLM Coding Plan</td><td>Your Z.ai coding-plan key</td></tr>
+    <tr><td>Kimi Code</td><td>Kimi Code console, with a Kimi membership</td></tr>
+    <tr><td>MiniMax Coding Plan</td><td>MiniMax platform → Account → Coding Plan</td></tr>
+    <tr><td>OpenAI, Anthropic, DeepSeek, Mistral</td><td>Each provider's API key page</td></tr>
+    <tr><td>LM Studio, llama.cpp</td><td>No key: runs on your machine</td></tr>
+  </table>
+</section>
+
+<section id="switch">
+  <h2>Switching models</h2>
+  <p><code>/model</code> opens a list of every model you can use, grouped by where it runs. Type to search and press <kbd>Enter</kbd>. Each tab can use a different model; <code>/model default &lt;name&gt;</code> sets the one new tabs start with.</p>
+</section>
+
+<section id="modes">
+  <h2>Modes and approvals</h2>
+  <p>Press <kbd>Shift</kbd>+<kbd>Tab</kbd> to cycle how much the agent asks:</p>
+  <table>
+    <tr><th>Mode</th><th>What happens</th></tr>
+    <tr><td><code>ask</code></td><td>Asks before anything that changes something (the default)</td></tr>
+    <tr><td><code>auto-edit</code></td><td>Edits files freely; still asks before running commands</td></tr>
+    <tr><td><code>auto</code></td><td>Runs everything except dangerous commands (rm, sudo, git push…) and pay or delete clicks</td></tr>
+    <tr><td><code>plan</code></td><td>Read-only: it explores and writes a plan; switch mode to let it act</td></tr>
+  </table>
+  <p>When it asks, you can allow once, deny, or "always" allow that kind of command. <code>/allow</code> lists the rules you've added.</p>
+</section>
+
+<section id="commands">
+  <h2>Commands and keys</h2>
+  <table>
+    <tr><th>Command</th><th>Does</th></tr>
+    <tr><td><code>/model</code></td><td>Pick this tab's model</td></tr>
+    <tr><td><code>/provider</code></td><td>Connect providers: sign in, add or test keys</td></tr>
+    <tr><td><code>/mode</code></td><td>ask · auto-edit · auto · plan</td></tr>
+    <tr><td><code>/new name</code> · <code>/close</code></td><td>Open or close a tab</td></tr>
+    <tr><td><code>/undo</code> · <code>/diff</code></td><td>Undo or show the agent's file changes</td></tr>
+    <tr><td><code>/compact</code> · <code>/clear</code></td><td>Shrink the conversation, or start the tab fresh</td></tr>
+    <tr><td><code>/cwd path</code></td><td>Change this tab's working folder</td></tr>
+    <tr><td><code>/team</code></td><td>Your team: who's online, read or message their sessions</td></tr>
+    <tr><td><code>/map</code></td><td>Live map of tabs and the messages between them</td></tr>
+    <tr><td><code>/mcp</code> · <code>/commands</code></td><td>MCP servers, and your own commands</td></tr>
+    <tr><td><code>/docs</code></td><td>Open this page</td></tr>
+    <tr><td><code>/help</code></td><td>Everything else</td></tr>
+  </table>
+  <table>
+    <tr><th>Key</th><th>Does</th></tr>
+    <tr><td><kbd>Esc</kbd></td><td>Stop the agent</td></tr>
+    <tr><td><kbd>Shift</kbd>+<kbd>Tab</kbd></td><td>Change mode</td></tr>
+    <tr><td><kbd>Ctrl</kbd>+<kbd>N</kbd> · <kbd>Ctrl</kbd>+<kbd>W</kbd></td><td>New tab · close tab</td></tr>
+    <tr><td><kbd>Alt</kbd>+<kbd>1</kbd>…<kbd>9</kbd>, <kbd>Alt</kbd>+<kbd>←</kbd>/<kbd>→</kbd></td><td>Switch tabs</td></tr>
+    <tr><td><kbd>Ctrl</kbd>+<kbd>G</kbd> · <kbd>Ctrl</kbd>+<kbd>B</kbd></td><td>Grid of tabs · agent map</td></tr>
+    <tr><td><kbd>Ctrl</kbd>+<kbd>O</kbd></td><td>Open the last tool output</td></tr>
+    <tr><td><kbd>PgUp</kbd> · <kbd>PgDn</kbd></td><td>Scroll</td></tr>
+    <tr><td><kbd>Ctrl</kbd>+<kbd>Q</kbd></td><td>Quit</td></tr>
+  </table>
+</section>
+
+<section id="tabs">
+  <h2>Several agents at once</h2>
+  <p>Each tab is its own agent with its own model and folder. They can work in parallel and talk to each other: one tab can ask another a question, hand it a job, or start a helper. Give a tab a job with <code>/role</code> (for example "tests"), and others send related work to it. <kbd>Ctrl</kbd>+<kbd>G</kbd> shows up to four tabs side by side; <kbd>Ctrl</kbd>+<kbd>B</kbd> shows the live map.</p>
+</section>
+
+<section id="undo">
+  <h2>Undo and diff</h2>
+  <p>qh keeps a copy of every file before the agent changes it. <code>/diff</code> shows everything the agent changed this session; <code>/undo</code> puts the last change back.</p>
+</section>
+
+<section id="team">
+  <h2>Team mode</h2>
+  <p>Work on one project with friends. Each person runs qh on their own computer; you see who's online, what their agents are doing, read their sessions, and send messages into them. There's no server and no sign-up: qh uses the project's GitHub repo as a shared notice board, and everyone who can push to the repo is on the team.</p>
+  <p>You need: a free GitHub account each, <code>git</code>, and a GitHub login on your computer (install the <a href="https://cli.github.com">GitHub CLI</a> and run <code>gh auth login</code>).</p>
+</section>
+
+<section id="team-start">
+  <h2>Start a team</h2>
+  <ol class="steps">
+    <li><b>You</b>, in the project folder: type <code>/team create</code> in qh (or <code>qh team create</code> in a terminal). Answer two questions: who can see the code (private or public), and your friends' GitHub usernames. Check the summary and say yes. qh puts the folder on GitHub if it isn't there, keeps secret files like <code>.env</code> out, and invites your friends.</li>
+    <li><b>Send your friend</b> the line qh prints, for example <code>qh join kesavsabari/webshop</code>.</li>
+    <li><b>Your friend</b> runs it. qh accepts the GitHub invite, downloads the project, and turns team mode on. Then <code>cd webshop</code> and <code>qh</code>.</li>
+  </ol>
+  <p>From then on, just run <code>qh</code> in the project: team mode comes back on by itself. If the project is already on GitHub and your friends already have access, each of you just types <code>/team on</code> once.</p>
+  <p>Change who can see the code any time with <code>/team private</code> or <code>/team public</code>.</p>
+</section>
+
+<section id="team-use">
+  <h2>See and message teammates</h2>
+  <p>The status bar shows who's online, like <code>👥 kesav · rahul ● · anu ○ 2h ago</code>. Notes appear when someone joins or leaves.</p>
+  <p>Type <code>/team</code> for a list of everyone's sessions. Pick one to:</p>
+  <ul>
+    <li><b>read</b> it: its recent conversation, read-only;</li>
+    <li><b>write</b> into it: your message goes to that session on their computer.</li>
+  </ul>
+  <p>Or type directly: <code>/team open rahul api</code> and <code>/team send rahul api add rate limiting to login</code>.</p>
+  <p>When a teammate writes into one of your sessions, you're asked first: <b>allow once</b>, <b>always allow</b> that person, or <b>deny</b>. The message waits until you answer, and waits for you if you're offline.</p>
+</section>
+
+<section id="team-safety">
+  <h2>Privacy and safety</h2>
+  <ul>
+    <li>Only people with push access to the repo can take part. Someone who just knows the repo's name gets nothing.</li>
+    <li>Everything qh shares (sessions, conversations, messages, file names) is encrypted with a key only the team has, so even on a public repo outsiders see noise. They can see team members' GitHub usernames and when each was last online.</li>
+    <li>A new member gets the key from a teammate who's already in, the next time that teammate is online.</li>
+    <li>Each agent runs on its owner's computer, with the owner's model and keys. A teammate's message never runs without the owner allowing it, and the owner approves every file change and command it leads to.</li>
+    <li><code>/team off</code> stops sharing; your teammates see you go offline.</li>
+  </ul>
+  <div class="note">Team mode needs the project on GitHub today. GitLab and Gitea support is planned.</div>
+</section>
+
+<section id="instructions">
+  <h2>Project instructions</h2>
+  <p>Put a <code>QH.md</code> file in your project with anything the agent should always know or follow ("use pytest", "never touch the migrations folder"). qh also reads <code>AGENTS.md</code> or <code>CLAUDE.md</code> if there's no <code>QH.md</code>. Instructions for every project go in <code>QH.md</code> in the <a href="#config">config folder</a>.</p>
+</section>
+
+<section id="custom">
+  <h2>Your own commands</h2>
+  <p>A markdown file becomes a command: <code>.qh/commands/review.md</code> in your project gives you <code>/review</code>. Its text is sent as your message; <code>$ARGUMENTS</code> in it is replaced by whatever you type after the command. Commands for every project go in <code>commands/</code> in the config folder. <code>/commands</code> lists them.</p>
+  <pre><code><span class="c"># .qh/commands/review.md</span>
+Review the changes in $ARGUMENTS for bugs and missing tests. Be brief.</code></pre>
+</section>
+
+<section id="skills">
+  <h2>Skills</h2>
+  <p>A skill is a set of instructions the agent loads only when a task needs it, so it doesn't cost context the rest of the time. Make a folder <code>.qh/skills/&lt;name&gt;/</code> with a <code>SKILL.md</code>:</p>
+  <pre><code>---
+name: release
+description: How to cut a release of this project
+---
+1. Bump the version in Cargo.toml
+2. Run the tests …</code></pre>
+</section>
+
+<section id="hooks">
+  <h2>Hooks</h2>
+  <p>Hooks run your own shell commands when the agent does something. Add them to <code>config.toml</code>:</p>
+  <pre><code><span class="c"># format after every edit</span>
+[[hooks]]
+event = "post_tool"
+match = "write_file|edit_file"
+cmd = "cargo fmt"
+
+<span class="c"># block a command: exit code 2 stops it, and the message goes to the agent</span>
+[[hooks]]
+event = "pre_tool"
+match = "bash"
+cmd = "grep -q 'rm -rf' &amp;&amp; { echo 'not allowed' &gt;&amp;2; exit 2; }; exit 0"</code></pre>
+  <table>
+    <tr><th>Event</th><th>When</th><th>Exit code 2</th></tr>
+    <tr><td><code>pre_tool</code></td><td>Before a tool runs</td><td>Blocks it</td></tr>
+    <tr><td><code>post_tool</code></td><td>After a tool runs; its output is added to the result</td><td>Same as success</td></tr>
+    <tr><td><code>stop</code></td><td>When the agent wants to finish</td><td>Sends the message back so it keeps working (for example, tests still failing)</td></tr>
+  </table>
+  <p>The event arrives as JSON on the command's input. <code>match</code> is a pattern for the tool's name; leave it out to match every tool.</p>
+</section>
+
+<section id="mcp">
+  <h2>MCP servers</h2>
+  <p>Connect any <a href="https://modelcontextprotocol.io">MCP</a> server and its tools become available to the agent:</p>
+  <pre><code>[mcp.github]
+cmd = "npx"
+args = ["-y", "@modelcontextprotocol/server-github"]
+env = { GITHUB_PERSONAL_ACCESS_TOKEN = "..." }
+trusted = false   <span class="c"># true: run its tools without asking</span></code></pre>
+  <p>Tools appear as <code>github__&lt;tool&gt;</code>. <code>/mcp</code> shows each server and how many tools it has.</p>
+</section>
+
+<section id="config">
+  <h2>Config reference</h2>
+  <p>The config file is <code>config.toml</code> in:</p>
+  <ul>
+    <li>Windows: <code>%APPDATA%\qwen-harness\</code></li>
+    <li>Linux and macOS: <code>~/.config/qwen-harness/</code></li>
+  </ul>
+  <p><code>qh setup</code> writes it for you; edit it for anything else.</p>
+  <table>
+    <tr><th>Setting</th><th>Meaning</th></tr>
+    <tr><td><code>model</code></td><td>Default model, e.g. <code>"qwen3.5:9b"</code></td></tr>
+    <tr><td><code>host</code></td><td>Where Ollama runs (default <code>http://127.0.0.1:11434</code>)</td></tr>
+    <tr><td><code>ctx</code></td><td>Context window for local models; leave out to size it to your GPU</td></tr>
+    <tr><td><code>cloud_ctx</code></td><td>Cap on cloud models' window (default 65536); every request resends it all</td></tr>
+    <tr><td><code>mode</code></td><td>Start mode: <code>ask</code>, <code>auto-edit</code>, <code>auto</code> or <code>plan</code></td></tr>
+    <tr><td><code>profile</code></td><td>Tool set: <code>coding</code>, <code>general</code>, <code>browser</code> or <code>all</code></td></tr>
+    <tr><td><code>allow</code></td><td>Commands that never need approval, e.g. <code>["cargo*", "npm test"]</code></td></tr>
+    <tr><td><code>browser_headless</code></td><td><code>true</code> hides the browser window the agent uses</td></tr>
+    <tr><td><code>mouse</code></td><td><code>true</code> enables clicks and scrolling</td></tr>
+    <tr><td><code>[[hooks]]</code>, <code>[mcp.name]</code></td><td>See <a href="#hooks">hooks</a> and <a href="#mcp">MCP</a></td></tr>
+  </table>
+</section>
+
+<section id="trouble">
+  <h2>Troubleshooting</h2>
+  <table>
+    <tr><th>You see</th><th>Do this</th></tr>
+    <tr><td>"Ollama isn't answering"</td><td>Start the Ollama app (or <code>ollama serve</code>), or pick a cloud model with <code>/model</code></td></tr>
+    <tr><td>"rejected the API key"</td><td><code>/provider</code> → pick it → add a new key</td></tr>
+    <tr><td>"out of credit"</td><td>Top up with that provider, or switch to a free or local model</td></tr>
+    <tr><td>ChatGPT "allowance used up"</td><td>Raise qh's cap in ChatGPT settings, wait for the reset, or switch model</td></tr>
+    <tr><td>"isn't on GitHub yet"</td><td><code>/team create</code> puts the project on GitHub</td></tr>
+    <tr><td>"no GitHub login found"</td><td>Install the GitHub CLI and run <code>gh auth login</code></td></tr>
+    <tr><td>🔒 "waiting to be let in"</td><td>A teammate who's already in needs to run qh once</td></tr>
+    <tr><td>Slow, or forgets things</td><td>Your GPU fits a small context; <code>/tier</code> explains. A cloud model avoids the limit</td></tr>
+  </table>
+  <p>Something else? <a href="https://github.com/kesavsabari/qh-rs/issues">Open an issue on GitHub</a>.</p>
+</section>
+</main>
+</div>
+
+<script>
+// copy buttons on code blocks
+document.querySelectorAll('pre').forEach(pre => {
+  const b = document.createElement('button');
+  b.className = 'copy'; b.type = 'button'; b.textContent = 'Copy';
+  b.addEventListener('click', () => {
+    const text = [...pre.querySelector('code').childNodes].filter(n => !(n.classList && n.classList.contains('c'))).map(n => n.textContent).join('').trim();
+    navigator.clipboard.writeText(text).then(() => { b.textContent = 'Copied'; setTimeout(() => b.textContent = 'Copy', 1500); });
+  });
+  pre.appendChild(b);
+});
+// mobile contents toggle
+const side = document.getElementById('side'), menu = side.querySelector('.menu');
+menu.addEventListener('click', () => { const o = side.classList.toggle('open'); menu.setAttribute('aria-expanded', o); });
+side.querySelectorAll('nav a').forEach(a => a.addEventListener('click', () => { side.classList.remove('open'); menu.setAttribute('aria-expanded', false); }));
+// highlight the section in view
+const links = new Map([...side.querySelectorAll('nav a')].map(a => [a.getAttribute('href').slice(1), a]));
+const spy = new IntersectionObserver(es => es.forEach(e => {
+  if (e.isIntersecting) { links.forEach(a => a.classList.remove('on')); links.get(e.target.id)?.classList.add('on'); }
+}), { rootMargin: '-20% 0px -70% 0px' });
+document.querySelectorAll('section[id]').forEach(s => spy.observe(s));
+</script>
+</body>
+</html>

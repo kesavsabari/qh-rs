@@ -3,358 +3,380 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>qh docs</title>
-<meta name="description" content="How to install and use qh, a terminal coding agent for local and cloud models: setup, models, commands, team mode and configuration.">
-<link rel="icon" href="favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="style.css">
+<title>qh: a switchboard of agents, local, cloud and team</title>
+<meta name="description" content="qh is an open-source agent harness for local LLMs. One 5 MB binary, about 1,200 tokens of overhead, local or cloud models, your ChatGPT plan, and team mode for working on a project with friends. Windows, macOS and Linux.">
+<meta property="og:title" content="qh: a switchboard of agents, local and cloud">
+<meta property="og:description" content="An open-source agent harness for small local models. Multi-session TUI, browser tools, MIT.">
+<meta property="og:image" content="img/qh-grid.webp">
+<link rel="icon" href="img/favicon.svg" type="image/svg+xml">
+<link rel="preload" href="fonts/big-shoulders-display-latin-800-normal.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="style.css?v=17">
 </head>
 <body>
-<a class="skip" href="#start">Skip to content</a>
-<div class="wrap">
+<a class="skip" href="#charges">Skip to content</a>
 
-<aside class="side" id="side">
-  <a class="brand" href="#start"><b>qh</b><span>docs</span></a>
-  <p class="tag">A coding agent for your terminal. Local models, cloud models, and your team.</p>
-  <button class="menu" type="button" aria-expanded="false" aria-controls="side">Contents</button>
-  <nav aria-label="Contents">
-    <div class="grp">Start</div>
+<header class="top">
+  <a class="plate" href="#" aria-label="qh home"><span>qh</span></a>
+  <nav aria-label="Sections">
+    <a href="#charges">Overhead</a>
+    <a href="#lines">Sessions</a>
+    <a href="#rules">Safety</a>
+    <a href="#calls">Evals</a>
+    <a href="#plans">Models</a>
+    <a href="#team">Team</a>
+    <a href="#next">Next</a>
     <a href="#install">Install</a>
-    <a href="#setup">First run</a>
-    <a href="#basics">Using qh</a>
-    <div class="grp">Models</div>
-    <a href="#local">Local (Ollama)</a>
-    <a href="#ollama-cloud">Ollama cloud</a>
-    <a href="#chatgpt">ChatGPT plan</a>
-    <a href="#keys">API keys and coding plans</a>
-    <a href="#switch">Switching models</a>
-    <div class="grp">Work</div>
-    <a href="#modes">Modes and approvals</a>
-    <a href="#commands">Commands and keys</a>
-    <a href="#tabs">Several agents at once</a>
-    <a href="#undo">Undo and diff</a>
-    <div class="grp">Team</div>
-    <a href="#team">Team mode</a>
-    <a href="#team-start">Start a team</a>
-    <a href="#team-use">See and message teammates</a>
-    <a href="#team-safety">Privacy and safety</a>
-    <div class="grp">Make it yours</div>
-    <a href="#instructions">Project instructions</a>
-    <a href="#custom">Your own commands</a>
-    <a href="#skills">Skills</a>
-    <a href="#hooks">Hooks</a>
-    <a href="#mcp">MCP servers</a>
-    <a href="#config">Config reference</a>
-    <div class="grp">Help</div>
-    <a href="#trouble">Troubleshooting</a>
+    <a href="docs/">Docs</a>
+    <a class="gh" href="https://github.com/kesavsabari/qh-rs">GitHub</a>
   </nav>
-  <a class="gh" href="https://github.com/kesavsabari/qh-rs">Source on GitHub</a>
-</aside>
+</header>
 
-<main id="start">
-<section>
-  <h1>qh docs</h1>
-  <p class="lede">qh is a coding agent in your terminal. It reads and edits your files, runs commands, browses the web, and runs several agents side by side. It works with free local models, with your ChatGPT plan, or with an API key, and you can work on a project together with friends.</p>
-  <div class="cards">
-    <a class="card" href="#install"><b>Install</b><span>One command on Windows, Linux or Mac.</span></a>
-    <a class="card" href="#setup"><b>Connect a model</b><span>Local, Ollama cloud, ChatGPT or an API key.</span></a>
-    <a class="card" href="#basics"><b>Use it</b><span>Ask in plain words; qh asks before it changes things.</span></a>
-    <a class="card" href="#team"><b>Work as a team</b><span>See who's online and what their agents are doing.</span></a>
+<main>
+<section id="top" class="board" aria-labelledby="hero-title">
+  <div class="board-copy">
+    <h1 id="hero-title" class="strip strip-hero">A whole switchboard of agents in 1,200&nbsp;tokens.</h1>
+    <p class="lede">qh is a coding agent for your terminal, built so small local models do real work. It runs several sessions that ask, answer and hand work to each other, uses local models, cloud models or your ChatGPT plan, and lets you work on one project with friends.</p>
+    <div class="dial" role="group" aria-label="Install command">
+      <code id="cmd">curl -fsSL kesavsabari.github.io/qh/sh | sh</code>
+      <button class="copy" type="button" data-copy="curl -fsSL kesavsabari.github.io/qh/sh | sh" aria-describedby="cmd">
+        <svg aria-hidden="true" viewBox="0 0 20 20"><rect x="6" y="6" width="10" height="11" rx="1.5"/><path d="M4 13V4.5A1.5 1.5 0 0 1 5.5 3H13"/></svg>
+        <span>Copy</span>
+      </button>
+    </div>
+    <p class="dial-note">Windows (PowerShell): <code>irm kesavsabari.github.io/qh | iex</code></p>
+    <p class="dial-links"><a class="gh-plate" href="docs/">Read the docs</a> <a class="gh-plate" href="https://github.com/kesavsabari/qh-rs">Source on GitHub</a></p>
+    <p class="dial-note">Then run <code>qh</code> in a project folder: a short setup connects a local model, your ChatGPT plan or an API key. One 5&nbsp;MB binary, nothing else to install.</p>
+  </div>
+
+  <figure class="field" aria-label="Animated switchboard: four sessions; main asks tests which test fails, tests answers, docs and web work alongside, one trunk line carries one call at a time">
+    <svg viewBox="0 0 640 470" class="jacks" role="img" aria-hidden="true">
+
+      <g class="trunk-plate">
+        <rect x="24" y="18" width="592" height="40" rx="3" class="strip-bg"/>
+        <text x="40" y="44" class="strip-text">TRUNK · ONE GPU</text>
+        <circle cx="362" cy="38" r="9" class="lamp trunk-lamp"/>
+        <text x="380" y="44" class="strip-text holder" id="holder">idle</text>
+      </g>
+
+      <g class="line" data-line="1" transform="translate(0,96)">
+        <rect x="24" y="0" width="210" height="56" rx="3" class="strip-bg"/>
+        <text x="40" y="35" class="strip-text"><tspan class="num">01</tspan> MAIN</text>
+        <circle cx="270" cy="28" r="11" class="lamp"/>
+        <circle cx="318" cy="28" r="16" class="rim"/><circle cx="318" cy="28" r="9" class="hole"/>
+      </g>
+      <g class="line" data-line="2" transform="translate(0,186)">
+        <rect x="24" y="0" width="210" height="56" rx="3" class="strip-bg"/>
+        <text x="40" y="35" class="strip-text"><tspan class="num">02</tspan> TESTS</text>
+        <circle cx="270" cy="28" r="11" class="lamp"/>
+        <circle cx="318" cy="28" r="16" class="rim"/><circle cx="318" cy="28" r="9" class="hole"/>
+      </g>
+      <g class="line" data-line="3" transform="translate(0,276)">
+        <rect x="24" y="0" width="210" height="56" rx="3" class="strip-bg"/>
+        <text x="40" y="35" class="strip-text"><tspan class="num">03</tspan> DOCS</text>
+        <circle cx="270" cy="28" r="11" class="lamp"/>
+        <circle cx="318" cy="28" r="16" class="rim"/><circle cx="318" cy="28" r="9" class="hole"/>
+      </g>
+      <g class="line" data-line="4" transform="translate(0,366)">
+        <rect x="24" y="0" width="210" height="56" rx="3" class="strip-bg"/>
+        <text x="40" y="35" class="strip-text"><tspan class="num">04</tspan> WEB</text>
+        <circle cx="270" cy="28" r="11" class="lamp"/>
+        <circle cx="318" cy="28" r="16" class="rim"/><circle cx="318" cy="28" r="9" class="hole"/>
+      </g>
+
+      <!-- cords: main (y=124) <-> tests (y=214) -->
+      <g class="cord cord-ask">
+        <path d="M318 124 C 470 128, 470 210, 318 214" pathLength="100"/>
+        <circle cx="318" cy="124" r="7" class="plug"/><circle cx="318" cy="214" r="7" class="plug"/>
+      </g>
+      <g class="cord cord-answer">
+        <path d="M318 214 C 560 222, 560 116, 318 124" pathLength="100"/>
+        <circle cx="318" cy="214" r="7" class="plug"/><circle cx="318" cy="124" r="7" class="plug"/>
+      </g>
+    </svg>
+
+    <figcaption class="log" aria-live="off">
+      <ol id="calllog">
+        <li><span class="who">01 main → 02 tests</span> Which test in test_cart.py is failing?</li>
+        <li><span class="who">02 tests → 01 main</span> test_total() fails on <code>assert total([10, 20], 0.1) == 33.0</code>.</li>
+        <li><span class="who">01 main</span> edits cart.py, then the tests pass.</li>
+      </ol>
+      <p class="log-note">These are real messages from a recorded qh session. The page replays the call; the screenshot is below.</p>
+    </figcaption>
+  </figure>
+</section>
+
+<div class="belt" aria-label="Tools qh ships with">
+  <ul class="belt-track"><li><span class="jack-dot"></span>read_file</li><li><span class="jack-dot"></span>edit_file</li><li><span class="jack-dot"></span>write_file</li><li><span class="jack-dot"></span>rename_symbol</li><li><span class="jack-dot"></span>find_references</li><li><span class="jack-dot"></span>grep</li><li><span class="jack-dot"></span>bash</li><li><span class="jack-dot"></span>remember</li><li><span class="jack-dot"></span>web_fetch</li><li><span class="jack-dot"></span>browse</li><li><span class="jack-dot"></span>snapshot</li><li><span class="jack-dot"></span>click</li><li><span class="jack-dot"></span>type</li><li><span class="jack-dot"></span>screenshot</li><li><span class="jack-dot"></span>ask</li><li><span class="jack-dot"></span>send_message</li><li><span class="jack-dot"></span>spawn</li><li><span class="jack-dot"></span>/undo</li><li><span class="jack-dot"></span>/diff</li><li><span class="jack-dot"></span>/model</li><li><span class="jack-dot"></span>/role</li><li><span class="jack-dot"></span>todo</li><li><span class="jack-dot"></span>skill</li><li><span class="jack-dot"></span>/team</li><li><span class="jack-dot"></span>/provider</li><li><span class="jack-dot"></span>mcp</li><li><span class="jack-dot"></span>hooks</li><li><span class="jack-dot"></span>qh -p</li></ul>
+  <ul class="belt-track" aria-hidden="true"><li><span class="jack-dot"></span>read_file</li><li><span class="jack-dot"></span>edit_file</li><li><span class="jack-dot"></span>write_file</li><li><span class="jack-dot"></span>rename_symbol</li><li><span class="jack-dot"></span>find_references</li><li><span class="jack-dot"></span>grep</li><li><span class="jack-dot"></span>bash</li><li><span class="jack-dot"></span>remember</li><li><span class="jack-dot"></span>web_fetch</li><li><span class="jack-dot"></span>browse</li><li><span class="jack-dot"></span>snapshot</li><li><span class="jack-dot"></span>click</li><li><span class="jack-dot"></span>type</li><li><span class="jack-dot"></span>screenshot</li><li><span class="jack-dot"></span>ask</li><li><span class="jack-dot"></span>send_message</li><li><span class="jack-dot"></span>spawn</li><li><span class="jack-dot"></span>/undo</li><li><span class="jack-dot"></span>/diff</li><li><span class="jack-dot"></span>/model</li><li><span class="jack-dot"></span>/role</li><li><span class="jack-dot"></span>todo</li><li><span class="jack-dot"></span>skill</li><li><span class="jack-dot"></span>/team</li><li><span class="jack-dot"></span>/provider</li><li><span class="jack-dot"></span>mcp</li><li><span class="jack-dot"></span>hooks</li><li><span class="jack-dot"></span>qh -p</li></ul>
+</div>
+
+<section id="charges" class="charges" aria-labelledby="charges-title">
+  <h2 id="charges-title" class="strip strip-section">Before you say a word</h2>
+  <div class="split">
+  <div class="split-text">
+  <p class="section-lede">A 9B model on an 8 GB card has a context window of 16–32k tokens. This is how much of it a harness uses up before your first message: the same model, the same "hi".</p>
+  <div class="charges-why">
+    <p>The saving comes from small, specific choices: a short system prompt, one-line tool descriptions, a repo map that skips ignored files and folds busy folders, and tools that only appear when they can matter: the browser's click and type after a page is open, session messaging once there is a second session. Big files come back as an outline until the model asks for lines, and compaction drops stale reads and old tool output before it ever summarises.</p>
+  </div>
+  </div>
+  <div class="split-visual">
+  <div class="tariff" role="img" aria-label="Context used on a 16,384-token window: qh about 1,200 tokens, a popular agent CLI about 14,000 tokens">
+    <div class="scale" aria-hidden="true">
+      <span style="--at:0">0</span><span style="--at:.25">4k</span><span style="--at:.5">8k</span><span style="--at:.75">12k</span><span style="--at:1">16k</span>
+    </div>
+    <div class="rate">
+      <div class="rate-label"><strong>qh</strong></div>
+      <div class="rate-bar"><i style="--w:.073"></i></div>
+      <div class="rate-num"><span class="num-strip">≈ 1,200</span></div>
+    </div>
+    <div class="rate other">
+      <div class="rate-label">a popular agent CLI</div>
+      <div class="rate-bar"><i style="--w:.855"></i></div>
+      <div class="rate-num"><span class="num-strip dim">≈ 14,000</span></div>
+    </div>
+  </div>
+    <p class="fine">qh measured 2026-10-10 on <code>qwen3.5:9b</code> (RTX 4060 laptop GPU, Ollama), "hi" in an empty folder, reply included. Your numbers will vary with model, tools and project size.</p>
+  </div>
   </div>
 </section>
 
-<section id="install">
-  <h2>Install</h2>
-  <h3>Windows</h3>
-  <p>Open PowerShell and run:</p>
-  <pre><code>irm kesavsabari.github.io/qh | iex</code></pre>
-  <h3>Linux and macOS</h3>
-  <pre><code>curl -fsSL kesavsabari.github.io/qh/sh | sh</code></pre>
-  <p>Then open a <b>new</b> terminal, so <code>qh</code> is on your PATH. To update later, run the same command again.</p>
-  <div class="note">On Windows, qh runs commands with <a href="https://git-scm.com/download/win">Git Bash</a> if it's installed, otherwise PowerShell. Installing Git also gives you <code>git</code>, which team mode needs.</div>
-</section>
+<div class="band band-cream"><p class="band-line">A popular CLI spends 14,000 tokens before you type. qh spends 1,200.</p><div class="band-side"><span class="band-big"><span data-count="12" data-from="1">12</span>×</span><span>less overhead, measured on qwen3.5:9b</span></div></div>
 
-<section id="setup">
-  <h2>First run</h2>
-  <p>Go to a project folder and type <code>qh</code>. The first time, a setup screen asks which models you want. Move with <kbd>↑</kbd> <kbd>↓</kbd>, tick with <kbd>Space</kbd>, continue with <kbd>Enter</kbd>. You can tick several.</p>
-  <table>
-    <tr><th>Choice</th><th>What you need</th><th>Good for</th></tr>
-    <tr><td>Local models (Ollama)</td><td>The free <a href="https://ollama.com/download">Ollama</a> app and a GPU with about 7&nbsp;GB of memory</td><td>Private, free, offline</td></tr>
-    <tr><td>Ollama cloud</td><td>The Ollama app and a free ollama.com account</td><td>Big models without a big GPU</td></tr>
-    <tr><td>ChatGPT Plus/Pro</td><td>A ChatGPT subscription</td><td>Using the plan you already pay for</td></tr>
-    <tr><td>OpenRouter, Groq, OpenAI, Anthropic, DeepSeek, Mistral</td><td>An API key from that site</td><td>Pay-per-use or free-tier cloud models</td></tr>
-    <tr><td>GLM, Kimi, MiniMax coding plans</td><td>That plan's key</td><td>Flat-price coding subscriptions</td></tr>
+<section id="weight" class="calls" aria-labelledby="weight-title">
+  <h2 id="weight-title" class="strip strip-section">Light on the line</h2>
+  <p class="section-lede">qh is written in Rust and ships as a single binary. The model gets the GPU and the RAM; the harness barely shows up in <code>top</code>.</p>
+  <div class="split">
+  <div class="split-text">
+  <table class="ledger" aria-describedby="weight-note">
+    <thead><tr><th scope="col">Harness</th><th scope="col" class="n">Install size</th><th scope="col" class="n">Memory, idle</th></tr></thead>
+    <tbody>
+      <tr><td><strong>qh</strong></td><td class="n hi"><span class="num-strip red">4.6 MB</span></td><td class="n hi"><span class="num-strip red">5 MB</span></td></tr>
+      <tr><td>Claude Code</td><td class="n">240 MB</td><td class="n">197 MB</td></tr>
+      <tr><td>Codex CLI</td><td class="n">430 MB</td><td class="n">334 MB</td></tr>
+      <tr><td>OpenCode</td><td class="n">178 MB</td><td class="n">697 MB</td></tr>
+    </tbody>
   </table>
-  <p>Each choice gets one short step: download a model, sign in, or paste a key (it's tested straight away and never saved if it's wrong). Last, pick your default model from one list of everything you connected; type to search it.</p>
-  <p>Run <code>qh setup</code> any time to change this.</p>
-</section>
-
-<section id="basics">
-  <h2>Using qh</h2>
-  <p>Type what you want in plain words and press <kbd>Enter</kbd>:</p>
-  <pre><code>fix the failing test in tests/test_api.py
-add a --verbose flag to main.py
-what does src/engine.rs do?</code></pre>
-  <p>The agent reads files, runs commands and edits code to do it. Before it changes anything it asks you, showing exactly what it will do (see <a href="#modes">modes</a>).</p>
-  <ul>
-    <li>Attach a file to your message with <code>@path/to/file</code>.</li>
-    <li>Stop the agent at any moment with <kbd>Esc</kbd>.</li>
-    <li>Type <code>/</code> to see every command; keep typing to narrow the list, <kbd>Enter</kbd> runs the highlighted one.</li>
-    <li>Run one task without the full screen: <code>qh -p "explain this repo" -y</code>.</li>
+  <p id="weight-note" class="fine ledger-note">Measured 2026-10-09 on one Linux laptop: Claude Code 2.1.292, Codex 0.161.0, OpenCode 1.18.35. Install size is the files on disk; memory is the TUI open and idle in tmux, two runs. Each tool does different things; this is weight, not capability.</p>
+  </div>
+  <div class="split-visual">
+  <h3 class="sub">Why it stays light</h3>
+  <ul class="rules-list compact">
+    <li>Streaming a 4,000-token reply costs 0.35 s of CPU, and 0.36 s with 50 tabs open.</li>
+    <li>9 MB of memory with 50 sessions open; starts in 3–5 ms.</li>
+    <li>Only the panes on screen are drawn, so open tabs cost nothing.</li>
+    <li>Streaming text is wrapped from the tail, not re-laid-out every token.</li>
+    <li>Frames are capped at 60 per second, however fast the model types.</li>
   </ul>
+  </div>
+  </div>
 </section>
 
-<section id="local">
-  <h2>Local models (Ollama)</h2>
-  <p>Install <a href="https://ollama.com/download">Ollama</a> (Windows: <code>winget install Ollama.Ollama</code>), start it, and run <code>qh setup</code>. Setup offers to download <code>qwen3.5:9b</code>, the model qh is tuned on. Any other Ollama model works too: <code>ollama pull &lt;name&gt;</code> and it shows up in <code>/model</code>.</p>
-  <p>qh sizes the model's memory (its context window) to fit your GPU automatically. <code>/tier</code> shows what it picked and why.</p>
+<section id="lines" class="lines" aria-labelledby="lines-title">
+  <h2 id="lines-title" class="strip strip-section">Four lines, one operator</h2>
+  <div class="split">
+  <div class="split-text">
+  <p class="section-lede">Open sessions like lines on a board. Put four side by side, give each its own job, and let them talk: <code>ask</code> waits for an answer, <code>send_message</code> doesn't, and <code>spawn</code> starts a worker that reports back.</p>
+  <ul class="rules-list compact">
+    <li>Each session names its own job from your first real request, or set one with <code>/role</code>. Roles show in pane headers and in what other sessions see.</li>
+    <li>Work reports back: whoever hands a job over hears when it's done. Reports never trigger replies, so two sessions can't ping-pong.</li>
+    <li>Spawned workers stay workers; they can't spawn more of themselves.</li>
+    <li>One GPU carries one generation at a time; ⏳ shows who is waiting. <code>ask</code> keeps waiting while the other session is busy, however long the queue.</li>
+    <li>Each tab can run its own model: <code>/model</code> opens a searchable list of your local and Ollama cloud models.</li>
+    <li>Automatic call chains stop after six hops, and a file being edited by one session is locked for the others until its turn ends.</li>
+  </ul>
+  </div>
+  <aside class="needs keys-card" aria-labelledby="keys-title">
+    <h3 id="keys-title" class="sub">At the board</h3>
+  <dl>
+    <div><dt><kbd>Ctrl</kbd><kbd>N</kbd></dt><dd>open a new session</dd></div>
+    <div><dt><kbd>Ctrl</kbd><kbd>G</kbd></dt><dd>tabs ↔ 2×2 grid</dd></div>
+    <div><dt><kbd>Alt</kbd><kbd>1</kbd>…<kbd>9</kbd></dt><dd>pick the line you type into</dd></div>
+    <div><dt><kbd>Shift</kbd><kbd>Tab</kbd></dt><dd>ask → auto-edit → auto → plan</dd></div>
+    <div><dt><kbd>Ctrl</kbd><kbd>L</kbd></dt><dd>log of every call between sessions</dd></div>
+    <div><dt><kbd>Ctrl</kbd><kbd>W</kbd></dt><dd>hang up the active session</dd></div>
+  </dl>
+  </aside>
+  </div>
+  <figure class="shot">
+    <img src="img/qh-grid.webp" width="2454" height="1445" loading="lazy" decoding="async"
+         alt="qh in grid view with four sessions. main, on the cloud model gpt-oss:20b-cloud, asked tests which test fails; tests, on local qwen3.5:9b, ran the tests and answered that test_total fails; main then fixed cart.py. docs, local, suggested a README sentence; web, on the cloud model, browsed example.com.">
+    <figcaption>A live run: main and web on a cloud model, tests and docs on local qwen3.5:9b, talking to each other.</figcaption>
+  </figure>
+
+
 </section>
 
-<section id="ollama-cloud">
-  <h2>Ollama cloud</h2>
-  <p>Ollama can also run large models on its own servers. Sign the Ollama app in to your free ollama.com account (setup runs <code>ollama signin</code> for you, or use the app's settings). The <code>…-cloud</code> models then appear in <code>/model</code> under "Ollama cloud". No API key needed.</p>
+<div class="band band-brass"><p class="band-line">Four agents. One 8&nbsp;GB GPU.</p><div class="band-side"><span class="band-keys"><kbd>Ctrl</kbd><kbd>G</kbd></span><span>opens the 2×2 grid</span></div></div>
+
+<section id="kit" class="kit" aria-labelledby="kit-title">
+  <h2 id="kit-title" class="strip strip-section">What's wired in</h2>
+  <ul class="bento"><li class="tile wide"><svg aria-hidden="true" viewBox="0 0 20 20"><path d="M4 16l6-6m2-6a4 4 0 1 0 4 4l-3 3-3-3z"/></svg><h3>Repairs small-model slips</h3><p>Wrong argument names, "3" for 3, edits that only miss on whitespace: qh fixes them instead of failing the turn.</p></li><li class="tile "><svg aria-hidden="true" viewBox="0 0 20 20"><path d="M3 5l5-2 4 2 5-2v12l-5 2-4-2-5 2z M8 3v12 M12 5v12"/></svg><h3>Repo map</h3><p>About 400 tokens that tell the model where everything is.</p></li><li class="tile "><svg aria-hidden="true" viewBox="0 0 20 20"><path d="M4 4h12M4 8h12M6 12h8M8 16h4"/></svg><h3>Staged compaction</h3><p>Stale reads and old output go first; a summary only when needed.</p></li><li class="tile "><svg aria-hidden="true" viewBox="0 0 20 20"><rect x="3" y="4" width="14" height="12" rx="1.5"/><path d="M3 8h14"/></svg><h3>Its own browser</h3><p>Drives your system Chromium over the DevTools protocol, in its own profile. No Playwright.</p></li><li class="tile "><svg aria-hidden="true" viewBox="0 0 20 20"><path d="M7 5L3 9l4 4M3 9h9a5 5 0 0 1 0 10h-2"/></svg><h3>Undo anything</h3><p>/undo and /diff for every change in the session.</p></li><li class="tile wide"><svg aria-hidden="true" viewBox="0 0 20 20"><path d="M4 16V9M9 16V5M14 16v-4"/></svg><h3>An eval suite that decides</h3><p>15 coding and 3 browser tasks, three runs each. A change stays only if the pass rate goes up: 96% on qwen3.5:9b.</p></li><li class="tile "><svg aria-hidden="true" viewBox="0 0 20 20"><path d="M4 6h12M4 10h8M4 14h10"/></svg><h3>Reads in whole lines</h3><p>Long files are cut on line boundaries with "start=613 to continue", so the model never invents the rest.</p></li><li class="tile "><svg aria-hidden="true" viewBox="0 0 20 20"><path d="M3 10h10m-4-4 4 4-4 4M15 4v12"/></svg><h3>Headless mode</h3><p><code>qh -p "prompt"</code> for scripts and CI; <code>--stats</code> writes tokens and calls.</p></li><li class="tile wide"><svg aria-hidden="true" viewBox="0 0 20 20"><path d="M10 3a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM10 7v3l2 2"/></svg><h3>Catches the quiet failures</h3><p>A reminder when the model states an answer but never writes the file. Links in page snapshots show where they go, and 404s are flagged, so it clicks instead of guessing URLs.</p></li><li class="tile "><svg aria-hidden="true" viewBox="0 0 20 20"><path d="M4 5h12M4 10h12M4 15h7"/></svg><h3>Plan mode</h3><p>Read-only: it explores and writes a plan; switch mode to let it act.</p></li><li class="tile "><svg aria-hidden="true" viewBox="0 0 20 20"><path d="M5 4h7l3 3v9H5z M8 9h4M8 12h4"/></svg><h3>QH.md</h3><p>Project instructions it always follows. Reads AGENTS.md or CLAUDE.md too.</p></li><li class="tile "><svg aria-hidden="true" viewBox="0 0 20 20"><path d="M5 6l2 2 3-4M5 13l2 2 3-4M12 6h4M12 13h4"/></svg><h3>A checklist</h3><p>The todo tool keeps multi-step work on track, even on a 9B model.</p></li><li class="tile wide"><svg aria-hidden="true" viewBox="0 0 20 20"><path d="M7 3v4M13 3v4M5 7h10v3a5 5 0 0 1-10 0zM10 15v3"/></svg><h3>Plugs for everything</h3><p><b>MCP</b> servers add tools; <b>hooks</b> run your commands before or after any tool (format on edit, block a command, keep going until tests pass); <b>skills</b> load instructions only when a task needs them; a markdown file becomes your own <b>/command</b>.</p></li><li class="tile "><svg aria-hidden="true" viewBox="0 0 20 20"><path d="M4 6h12M4 10h12M4 14h6"/><path d="M14 13l2 2-2 2"/></svg><h3>Type / for everything</h3><p>Every command in a list as you type; pickers for models and providers.</p></li></ul>
 </section>
 
-<section id="chatgpt">
-  <h2>ChatGPT plan</h2>
-  <p>With ChatGPT Plus or Pro you can use your plan in qh instead of paying for an API key:</p>
-  <pre><code>qh login chatgpt</code></pre>
-  <p>Your browser opens; approve qh. Then pick a model with <code>/model chatgpt</code>. Inside qh you can also do it from <code>/provider</code> → chatgpt. Usage counts against your plan's allowance; you can cap how much qh may use in ChatGPT's settings. Sign out with <code>qh logout chatgpt</code>.</p>
+<section id="rules" class="rules" aria-labelledby="rules-title">
+  <h2 id="rules-title" class="strip strip-section">The operator's rules</h2>
+  <div class="rules-grid">
+    <figure class="shot shot-small">
+      <img src="img/qh-confirm.webp" width="2454" height="1445" loading="lazy" decoding="async"
+           alt="qh's approval card in red: docs wants to run rm cart.py, with the warning that it touches 1 file main wrote, and allow or deny keys.">
+      <figcaption>Even in auto mode a delete asks, and it says whose work it would destroy.</figcaption>
+    </figure>
+    <ul class="rules-list">
+      <li><strong>It asks before it writes.</strong> Edits, new files, renames and shell commands wait for your yes. Read-only commands like <code>ls</code> and <code>git status</code> go straight through.</li>
+      <li><strong>Four modes, one key.</strong> <kbd>Shift</kbd><kbd>Tab</kbd> cycles ask → auto-edit → auto → plan (read-only). Even in auto, <code>rm</code>, <code>sudo</code>, <code>git push</code>, <code>curl | sh</code> and pay or delete clicks still ask.</li>
+      <li><strong>Agents can't wreck each other's work.</strong> If a dangerous command would touch files another session wrote, the card turns red and names that session and the files.</li>
+      <li><strong>Everything can be undone.</strong> <code>/undo</code> reverts the last change and <code>/diff</code> shows the whole session.</li>
+      <li><strong>"Always" stays narrow.</strong> It approves a command or folder for the current session only. In a chain, every part needs its own rule, and anything with <code>$(…)</code> or a redirect always asks.</li>
+      <li><strong>The browser is its own.</strong> It runs a separate Chromium profile, refuses <code>file://</code> and your local network, never types into password fields, and won't type into buttons or links.</li>
+    </ul>
+  </div>
 </section>
 
-<section id="keys">
-  <h2>API keys and coding plans</h2>
-  <p>Type <code>/provider</code> to see every provider and its status. Pick one and press <kbd>Enter</kbd> to add, test, replace or remove its key. Keys are typed hidden and saved only on your computer, readable only by you.</p>
-  <p>From the terminal: <code>qh login openrouter</code> (or any provider name).</p>
-  <table>
-    <tr><th>Provider</th><th>Get a key</th></tr>
-    <tr><td>OpenRouter</td><td><a href="https://openrouter.ai/keys">openrouter.ai/keys</a>: one key, hundreds of models, some free</td></tr>
-    <tr><td>Groq</td><td><a href="https://console.groq.com/keys">console.groq.com/keys</a>: fast, with a free tier</td></tr>
-    <tr><td>GLM Coding Plan</td><td>Your Z.ai coding-plan key</td></tr>
-    <tr><td>Kimi Code</td><td>Kimi Code console, with a Kimi membership</td></tr>
-    <tr><td>MiniMax Coding Plan</td><td>MiniMax platform → Account → Coding Plan</td></tr>
-    <tr><td>OpenAI, Anthropic, DeepSeek, Mistral</td><td>Each provider's API key page</td></tr>
-    <tr><td>LM Studio, llama.cpp</td><td>No key: runs on your machine</td></tr>
+<section id="calls" class="calls" aria-labelledby="calls-title">
+  <h2 id="calls-title" class="strip strip-section">Test calls</h2>
+  <p class="section-lede">qh ships with an eval suite of 15 coding tasks and 3 browser tasks, each run three times. Every change to the harness was kept only if the numbers went up, and every fix came from reading a failure transcript, not a guess.</p>
+  <div class="split">
+  <div class="split-text">
+  <table class="ledger" aria-describedby="ledger-note">
+    <thead><tr><th scope="col">Suite</th><th scope="col" class="n">Pass rate</th></tr></thead>
+    <tbody>
+      <tr><td>15 coding tasks × 3</td><td class="n"><span class="num-strip">96%</span></td></tr>
+      <tr><td>3 browser tasks × 3</td><td class="n"><span class="num-strip">100%</span></td></tr>
+      <tr><td>All 18 tasks, two full runs in a row</td><td class="n hi"><span class="num-strip red">96%</span></td></tr>
+    </tbody>
   </table>
+  <p id="ledger-note" class="fine ledger-note">Pass rate on all 18 tasks × 3 runs, <code>qwen3.5:9b</code>, self-measured on one machine.</p>
+  </div>
+  <div class="split-visual">
+  <h3 class="sub">What moved the number</h3>
+  <ul class="rules-list compact">
+    <li>The model often calls <code>bash</code> with <code>command</code> instead of <code>cmd</code>; qh maps the wrong name back instead of failing.</li>
+    <li>Edits that only miss on whitespace are matched anyway and re-indented, followed by a syntax check.</li>
+    <li>Renames go through <code>rename_symbol</code>, so a caller can't be forgotten.</li>
+    <li>Reads stop on whole lines and say where to continue; the model used to fill in rows it never saw.</li>
+  </ul>
+  <p class="fine">Run them yourself: <code>python3 evals/run.py --runs 3 --save</code>. The tasks are small, so treat these as regression numbers, not a benchmark.</p>
+  </div>
+  </div>
 </section>
 
-<section id="switch">
-  <h2>Switching models</h2>
-  <p><code>/model</code> opens a list of every model you can use, grouped by where it runs. Type to search and press <kbd>Enter</kbd>. Each tab can use a different model; <code>/model default &lt;name&gt;</code> sets the one new tabs start with.</p>
+<div class="band band-red"><p class="band-line"><span data-count="96" data-from="60">96</span>% on a 9B model.</p><div class="band-side"><span>pass rate on 18 tasks × 3 runs, qwen3.5:9b, self-measured</span></div></div>
+
+<section id="plans" class="lines" aria-labelledby="mix-title">
+  <h2 id="mix-title" class="strip strip-section">Bring your own model, or your own plan</h2>
+  <div class="split">
+  <div class="split-text">
+  <p class="section-lede">The first time you run qh, a short setup asks what you want to use: tick any mix, connect each in one step, pick a default. Every tab can then run its own model.</p>
+  <ul class="rules-list compact">
+    <li><strong>Your ChatGPT plan.</strong> <code>qh login chatgpt</code> signs in with ChatGPT Plus or Pro, so qh uses the subscription you already pay for, no API key.</li>
+    <li><strong>Ollama, local or cloud.</strong> Local models run free and private on your GPU; sign the Ollama app in and its big <code>-cloud</code> models run without a big GPU.</li>
+    <li><strong>Coding plans.</strong> GLM (Z.ai), Kimi Code and MiniMax subscriptions plug in with their plan key.</li>
+    <li><code>/model</code> opens one searchable list: your Ollama models, Ollama's cloud models, and every provider you've added, with context size and price.</li>
+    <li>Cloud tabs run in parallel; local tabs take turns on the GPU, in arrival order.</li>
+    <li>Each tab gets its model's own context window. Cloud windows are capped (64k by default) because every request resends the whole conversation.</li>
+    <li>Paid models show a running cost next to the token meter.</li>
+    <li><code>/provider</code> lists every provider with its status: pick one to sign in, or add, test and remove a key. Keys are checked straight away, never kept if they're wrong, and stored in a file only you can read. OpenRouter, OpenAI, Groq, DeepSeek, Mistral, Anthropic (API key), LM Studio and llama.cpp are built in; anything OpenAI-compatible can be added.</li>
+    <li>Models without native tool calling still work: qh switches to a text protocol for them.</li>
+    <li>With no <code>ctx</code> in the config, qh sizes the local window to your GPU: free VRAM over what one token of cache costs. <code>/tier</code> shows the sums.</li>
+  </ul>
+  </div>
+  <figure class="shot">
+    <img src="img/qh-models.webp" width="2454" height="1445" loading="lazy" decoding="async"
+         alt="qh's model picker over a grid of sessions: local qwen3.5:9b at the top, then Ollama cloud models such as deepseek, glm, gpt-oss and kimi marked with a cloud symbol.">
+    <figcaption><code>/model</code>: every model you can use in one list, grouped by where it runs.</figcaption>
+  </figure>
+  </div>
 </section>
 
-<section id="modes">
-  <h2>Modes and approvals</h2>
-  <p>Press <kbd>Shift</kbd>+<kbd>Tab</kbd> to cycle how much the agent asks:</p>
-  <table>
-    <tr><th>Mode</th><th>What happens</th></tr>
-    <tr><td><code>ask</code></td><td>Asks before anything that changes something (the default)</td></tr>
-    <tr><td><code>auto-edit</code></td><td>Edits files freely; still asks before running commands</td></tr>
-    <tr><td><code>auto</code></td><td>Runs everything except dangerous commands (rm, sudo, git push…) and pay or delete clicks</td></tr>
-    <tr><td><code>plan</code></td><td>Read-only: it explores and writes a plan; switch mode to let it act</td></tr>
-  </table>
-  <p>When it asks, you can allow once, deny, or "always" allow that kind of command. <code>/allow</code> lists the rules you've added.</p>
+<section id="map" class="lines" aria-labelledby="map-title">
+  <h2 id="map-title" class="strip strip-section">See the whole board</h2>
+  <div class="split">
+  <div class="split-text">
+  <p class="section-lede"><kbd>Ctrl</kbd><kbd>B</kbd> opens a live map of the workspace: every session, its status, role and model, the messages moving between them, and the folders they write to.</p>
+  <ul class="rules-list compact">
+    <li>A dot runs along a line when one session messages another; lines fade as the conversation moves on.</li>
+    <li>Press <kbd>F</kbd> for the folder layer. A folder two sessions are writing to turns red, before anyone overwrites anyone.</li>
+    <li>Each session works in its own folder, and workers start where the session that spawned them is.</li>
+    <li>Arrows or a click pick a session; <kbd>Enter</kbd> jumps to its tab. Mouse wheel and clicks work across the app.</li>
+  </ul>
+  </div>
+  <figure class="shot">
+    <img src="img/qh-map.webp" width="2454" height="1445" loading="lazy" decoding="async"
+         alt="qh's map view: nodes for main, tests, docs and web with their status and model; lines from main and docs to the folder /tmp/cart-demo, marked in red as shared.">
+    <figcaption>main and docs both wrote to the project folder, so the map flags it as shared.</figcaption>
+  </figure>
+  </div>
 </section>
 
-<section id="commands">
-  <h2>Commands and keys</h2>
-  <table>
-    <tr><th>Command</th><th>Does</th></tr>
-    <tr><td><code>/model</code></td><td>Pick this tab's model</td></tr>
-    <tr><td><code>/provider</code></td><td>Connect providers: sign in, add or test keys</td></tr>
-    <tr><td><code>/mode</code></td><td>ask · auto-edit · auto · plan</td></tr>
-    <tr><td><code>/new name</code> · <code>/close</code></td><td>Open or close a tab</td></tr>
-    <tr><td><code>/undo</code> · <code>/diff</code></td><td>Undo or show the agent's file changes</td></tr>
-    <tr><td><code>/compact</code> · <code>/clear</code></td><td>Shrink the conversation, or start the tab fresh</td></tr>
-    <tr><td><code>/cwd path</code></td><td>Change this tab's working folder</td></tr>
-    <tr><td><code>/team</code></td><td>Your team: who's online, read or message their sessions</td></tr>
-    <tr><td><code>/map</code></td><td>Live map of tabs and the messages between them</td></tr>
-    <tr><td><code>/mcp</code> · <code>/commands</code></td><td>MCP servers, and your own commands</td></tr>
-    <tr><td><code>/docs</code></td><td>Open this page</td></tr>
-    <tr><td><code>/help</code></td><td>Everything else</td></tr>
-  </table>
-  <table>
-    <tr><th>Key</th><th>Does</th></tr>
-    <tr><td><kbd>Esc</kbd></td><td>Stop the agent</td></tr>
-    <tr><td><kbd>Shift</kbd>+<kbd>Tab</kbd></td><td>Change mode</td></tr>
-    <tr><td><kbd>Ctrl</kbd>+<kbd>N</kbd> · <kbd>Ctrl</kbd>+<kbd>W</kbd></td><td>New tab · close tab</td></tr>
-    <tr><td><kbd>Alt</kbd>+<kbd>1</kbd>…<kbd>9</kbd>, <kbd>Alt</kbd>+<kbd>←</kbd>/<kbd>→</kbd></td><td>Switch tabs</td></tr>
-    <tr><td><kbd>Ctrl</kbd>+<kbd>G</kbd> · <kbd>Ctrl</kbd>+<kbd>B</kbd></td><td>Grid of tabs · agent map</td></tr>
-    <tr><td><kbd>Ctrl</kbd>+<kbd>O</kbd></td><td>Open the last tool output</td></tr>
-    <tr><td><kbd>PgUp</kbd> · <kbd>PgDn</kbd></td><td>Scroll</td></tr>
-    <tr><td><kbd>Ctrl</kbd>+<kbd>Q</kbd></td><td>Quit</td></tr>
-  </table>
+<section id="team" class="lines" aria-labelledby="team-title">
+  <h2 id="team-title" class="strip strip-section">A party line for your team</h2>
+  <div class="split">
+  <div class="split-text">
+  <p class="section-lede">Work on one project with friends, each on your own computer. See who's online, what their agents are doing, read their sessions and send work into them. No server and no sign-up: the project's GitHub repo is the switchboard, and everyone who can push to it is on the team.</p>
+  <ul class="rules-list compact">
+    <li><strong>Start in one line.</strong> <code>/team create</code> puts the folder on GitHub (private by default, secrets like <code>.env</code> left out) and invites friends by username. They run <code>qh join you/project</code>.</li>
+    <li><strong>See the board.</strong> The status bar shows <code>👥 you · rahul ● · anu ○ 2h ago</code>; notes appear when someone joins or leaves; <code>/team</code> lists everyone's sessions.</li>
+    <li><strong>Read and write.</strong> Open a teammate's session to follow along, or send a message into it. It runs on their machine only after they allow it, and they approve every edit it leads to.</li>
+    <li><strong>Encrypted.</strong> Sessions, messages and file names are sealed with a key only the team holds, so even a public repo shows outsiders nothing but noise.</li>
+    <li><strong>Picks up where you left off.</strong> Next day, <code>qh</code> in the project reconnects by itself.</li>
+  </ul>
+  </div>
+  <aside class="needs keys-card" aria-labelledby="team-keys-title">
+    <h3 id="team-keys-title" class="sub">Team commands</h3>
+  <dl>
+    <div><dt><code>/team create</code></dt><dd>share this project, invite friends</dd></div>
+    <div><dt><code>qh join</code></dt><dd>join a friend's project</dd></div>
+    <div><dt><code>/team</code></dt><dd>who's online, read or write sessions</dd></div>
+    <div><dt><code>/team private</code></dt><dd>or <code>public</code>: who sees the code</dd></div>
+    <div><dt><code>/team off</code></dt><dd>stop sharing</dd></div>
+  </dl>
+  </aside>
+  </div>
 </section>
 
-<section id="tabs">
-  <h2>Several agents at once</h2>
-  <p>Each tab is its own agent with its own model and folder. They can work in parallel and talk to each other: one tab can ask another a question, hand it a job, or start a helper. Give a tab a job with <code>/role</code> (for example "tests"), and others send related work to it. <kbd>Ctrl</kbd>+<kbd>G</kbd> shows up to four tabs side by side; <kbd>Ctrl</kbd>+<kbd>B</kbd> shows the live map.</p>
+<div class="band band-brass"><p class="band-line">Your team, on one board. No server.</p><div class="band-side"><span class="band-keys"><code>/team</code></span><span>who's online, and what they're doing</span></div></div>
+
+<section id="next" class="kit" aria-labelledby="next-title">
+  <h2 id="next-title" class="strip strip-section">Lines being laid</h2>
+  <p class="section-lede">Planned, not built yet. Nothing here ships until it's measured.</p>
+  <ul class="bento"><li class="tile wide"><svg aria-hidden="true" viewBox="0 0 20 20"><path d="M4 16V9M9 16V5M14 16v-4"/></svg><h3>A harder benchmark, in public</h3><p>A 60-task suite in Rust, TypeScript and Go, plus a public benchmark subset, with the same tasks run through other agents on the same model.</p></li><li class="tile "><svg aria-hidden="true" viewBox="0 0 20 20"><path d="M4 4h12v12H4zM4 10h12"/></svg><h3>Review by hunk</h3><p>Accept or reject each change, and rewind files and conversation together.</p></li><li class="tile "><svg aria-hidden="true" viewBox="0 0 20 20"><path d="M10 3l6 3v4c0 4-3 6-6 7-3-1-6-3-6-7V6z"/></svg><h3>Sandboxed commands</h3><p>Commands that can only touch the project, so auto mode is safe to leave on.</p></li><li class="tile wide"><svg aria-hidden="true" viewBox="0 0 20 20"><circle cx="5" cy="5" r="2"/><circle cx="15" cy="7" r="2"/><circle cx="8" cy="15" r="2"/><path d="M7 5.5l6 1M6 7l1.5 6M13.5 8.5l-4 5"/></svg><h3>Teams beyond GitHub</h3><p>Team mode on GitLab and Gitea, and removing a member rotates the team key.</p></li></ul>
 </section>
 
-<section id="undo">
-  <h2>Undo and diff</h2>
-  <p>qh keeps a copy of every file before the agent changes it. <code>/diff</code> shows everything the agent changed this session; <code>/undo</code> puts the last change back.</p>
-</section>
-
-<section id="team">
-  <h2>Team mode</h2>
-  <p>Work on one project with friends. Each person runs qh on their own computer; you see who's online, what their agents are doing, read their sessions, and send messages into them. There's no server and no sign-up: qh uses the project's GitHub repo as a shared notice board, and everyone who can push to the repo is on the team.</p>
-  <p>You need: a free GitHub account each, <code>git</code>, and a GitHub login on your computer (install the <a href="https://cli.github.com">GitHub CLI</a> and run <code>gh auth login</code>).</p>
-</section>
-
-<section id="team-start">
-  <h2>Start a team</h2>
+<section id="install" class="install" aria-labelledby="install-title">
+  <h2 id="install-title" class="strip strip-section">Get a line</h2>
+  <div class="split">
   <ol class="steps">
-    <li><b>You</b>, in the project folder: type <code>/team create</code> in qh (or <code>qh team create</code> in a terminal). Answer two questions: who can see the code (private or public), and your friends' GitHub usernames. Check the summary and say yes. qh puts the folder on GitHub if it isn't there, keeps secret files like <code>.env</code> out, and invites your friends.</li>
-    <li><b>Send your friend</b> the line qh prints, for example <code>qh join kesavsabari/webshop</code>.</li>
-    <li><b>Your friend</b> runs it. qh accepts the GitHub invite, downloads the project, and turns team mode on. Then <code>cd webshop</code> and <code>qh</code>.</li>
+    <li><span class="step-n">1</span><div><p>Install qh. Windows, in PowerShell:</p><div class="dial dial-sm"><code>irm kesavsabari.github.io/qh | iex</code><button class="copy" type="button" data-copy="irm kesavsabari.github.io/qh | iex"><svg aria-hidden="true" viewBox="0 0 20 20"><rect x="6" y="6" width="10" height="11" rx="1.5"/><path d="M4 13V4.5A1.5 1.5 0 0 1 5.5 3H13"/></svg><span>Copy</span></button></div></div></li>
+    <li><span class="step-n">2</span><div><p>Linux and macOS:</p><div class="dial dial-sm"><code>curl -fsSL kesavsabari.github.io/qh/sh | sh</code><button class="copy" type="button" data-copy="curl -fsSL kesavsabari.github.io/qh/sh | sh"><svg aria-hidden="true" viewBox="0 0 20 20"><rect x="6" y="6" width="10" height="11" rx="1.5"/><path d="M4 13V4.5A1.5 1.5 0 0 1 5.5 3H13"/></svg><span>Copy</span></button></div></div></li>
+    <li><span class="step-n">3</span><div><p>Open the board in your project; setup runs the first time.</p><div class="dial dial-sm"><code>cd my-project &amp;&amp; qh</code><button class="copy" type="button" data-copy="cd my-project && qh"><svg aria-hidden="true" viewBox="0 0 20 20"><rect x="6" y="6" width="10" height="11" rx="1.5"/><path d="M4 13V4.5A1.5 1.5 0 0 1 5.5 3H13"/></svg><span>Copy</span></button></div></div></li>
   </ol>
-  <p>From then on, just run <code>qh</code> in the project: team mode comes back on by itself. If the project is already on GitHub and your friends already have access, each of you just types <code>/team on</code> once.</p>
-  <p>Change who can see the code any time with <code>/team private</code> or <code>/team public</code>.</p>
+  <aside class="needs" aria-labelledby="needs-title">
+    <h3 id="needs-title" class="sub">What you need</h3>
+    <dl>
+      <div><dt>Models</dt><dd><a href="https://ollama.com">Ollama</a> (local or cloud), a ChatGPT plan, or an API key</dd></div>
+      <div><dt>Tested on</dt><dd><code>qwen3.5:9b</code></dd></div>
+      <div><dt>GPU</dt><dd>for local models: about 8 GB of VRAM for a 9B model at 32k; none for cloud</dd></div>
+      <div><dt>Team mode</dt><dd>git and a GitHub account</dd></div>
+      <div><dt>Browser</dt><dd>optional: Chromium, Chrome or Brave already installed</dd></div>
+      <div><dt>OS</dt><dd>Windows, macOS and Linux, native</dd></div>
+    </dl>
+  </aside>
+  </div>
+  <p class="fine">Browser tools use the Chrome, Edge, Brave or Chromium you already have. Every release is built and tested on Windows, macOS and Linux. Full guide: <a href="docs/">the docs</a>.</p>
+</section>
+<section id="faq" class="faq" aria-labelledby="faq-title">
+  <h2 id="faq-title" class="strip strip-section">Operator, a question</h2>
+  <div class="faq-list"><details><summary>Which models work?</summary><p>Ollama models (local, or Ollama's cloud after <code>ollama signin</code>), your ChatGPT Plus/Pro plan, OpenRouter, OpenAI, Anthropic, Groq, DeepSeek, Mistral, the GLM, Kimi and MiniMax coding plans, LM Studio, llama.cpp and anything OpenAI-compatible. It's tuned and tested on qwen3.5:9b; each tab can use a different model.</p></details><details><summary>How much GPU do I need?</summary><p>qwen3.5:9b with a 32k context fits in about 6 GB, so an 8 GB card runs it fully on the GPU.</p></details><details><summary>Does anything leave my machine?</summary><p>Not with a local model. qh talks to Ollama on localhost. Only web_fetch and the browser tools reach the internet, and only when the model calls them. If you pick a cloud model, that tab's conversation goes to the provider. In team mode, what you share is encrypted so only your team can read it.</p></details><details><summary>Does it work on Windows?</summary><p>Yes, natively. Install with one PowerShell line. Commands run in Git Bash if you have it, otherwise PowerShell.</p></details><details><summary>Can strangers join my team?</summary><p>No. Only people with push access to the project's GitHub repo can take part, and a message into your session never runs until you allow it.</p></details><details><summary>Can several sessions run at once?</summary><p>Yes, as many tabs as you like, four side by side in the grid. Local sessions share one GPU and take turns; cloud sessions run at the same time.</p></details><details><summary>Why Rust?</summary><p>One 5 MB file to install, a few megabytes of memory, and a UI that stays fast with fifty sessions open, so the GPU and RAM go to the model. The numbers are in "Light on the line" above.</p></details><details><summary>Is it free?</summary><p>Yes. qh is open source under the MIT license. You pay only for any cloud model you choose to use.</p></details></div>
 </section>
 
-<section id="team-use">
-  <h2>See and message teammates</h2>
-  <p>The status bar shows who's online, like <code>👥 kesav · rahul ● · anu ○ 2h ago</code>. Notes appear when someone joins or leaves.</p>
-  <p>Type <code>/team</code> for a list of everyone's sessions. Pick one to:</p>
-  <ul>
-    <li><b>read</b> it: its recent conversation, read-only;</li>
-    <li><b>write</b> into it: your message goes to that session on their computer.</li>
-  </ul>
-  <p>Or type directly: <code>/team open rahul api</code> and <code>/team send rahul api add rate limiting to login</code>.</p>
-  <p>When a teammate writes into one of your sessions, you're asked first: <b>allow once</b>, <b>always allow</b> that person, or <b>deny</b>. The message waits until you answer, and waits for you if you're offline.</p>
-</section>
-
-<section id="team-safety">
-  <h2>Privacy and safety</h2>
-  <ul>
-    <li>Only people with push access to the repo can take part. Someone who just knows the repo's name gets nothing.</li>
-    <li>Everything qh shares (sessions, conversations, messages, file names) is encrypted with a key only the team has, so even on a public repo outsiders see noise. They can see team members' GitHub usernames and when each was last online.</li>
-    <li>A new member gets the key from a teammate who's already in, the next time that teammate is online.</li>
-    <li>Each agent runs on its owner's computer, with the owner's model and keys. A teammate's message never runs without the owner allowing it, and the owner approves every file change and command it leads to.</li>
-    <li><code>/team off</code> stops sharing; your teammates see you go offline.</li>
-  </ul>
-  <div class="note">Team mode needs the project on GitHub today. GitLab and Gitea support is planned.</div>
-</section>
-
-<section id="instructions">
-  <h2>Project instructions</h2>
-  <p>Put a <code>QH.md</code> file in your project with anything the agent should always know or follow ("use pytest", "never touch the migrations folder"). qh also reads <code>AGENTS.md</code> or <code>CLAUDE.md</code> if there's no <code>QH.md</code>. Instructions for every project go in <code>QH.md</code> in the <a href="#config">config folder</a>.</p>
-</section>
-
-<section id="custom">
-  <h2>Your own commands</h2>
-  <p>A markdown file becomes a command: <code>.qh/commands/review.md</code> in your project gives you <code>/review</code>. Its text is sent as your message; <code>$ARGUMENTS</code> in it is replaced by whatever you type after the command. Commands for every project go in <code>commands/</code> in the config folder. <code>/commands</code> lists them.</p>
-  <pre><code><span class="c"># .qh/commands/review.md</span>
-Review the changes in $ARGUMENTS for bugs and missing tests. Be brief.</code></pre>
-</section>
-
-<section id="skills">
-  <h2>Skills</h2>
-  <p>A skill is a set of instructions the agent loads only when a task needs it, so it doesn't cost context the rest of the time. Make a folder <code>.qh/skills/&lt;name&gt;/</code> with a <code>SKILL.md</code>:</p>
-  <pre><code>---
-name: release
-description: How to cut a release of this project
----
-1. Bump the version in Cargo.toml
-2. Run the tests …</code></pre>
-</section>
-
-<section id="hooks">
-  <h2>Hooks</h2>
-  <p>Hooks run your own shell commands when the agent does something. Add them to <code>config.toml</code>:</p>
-  <pre><code><span class="c"># format after every edit</span>
-[[hooks]]
-event = "post_tool"
-match = "write_file|edit_file"
-cmd = "cargo fmt"
-
-<span class="c"># block a command: exit code 2 stops it, and the message goes to the agent</span>
-[[hooks]]
-event = "pre_tool"
-match = "bash"
-cmd = "grep -q 'rm -rf' &amp;&amp; { echo 'not allowed' &gt;&amp;2; exit 2; }; exit 0"</code></pre>
-  <table>
-    <tr><th>Event</th><th>When</th><th>Exit code 2</th></tr>
-    <tr><td><code>pre_tool</code></td><td>Before a tool runs</td><td>Blocks it</td></tr>
-    <tr><td><code>post_tool</code></td><td>After a tool runs; its output is added to the result</td><td>Same as success</td></tr>
-    <tr><td><code>stop</code></td><td>When the agent wants to finish</td><td>Sends the message back so it keeps working (for example, tests still failing)</td></tr>
-  </table>
-  <p>The event arrives as JSON on the command's input. <code>match</code> is a pattern for the tool's name; leave it out to match every tool.</p>
-</section>
-
-<section id="mcp">
-  <h2>MCP servers</h2>
-  <p>Connect any <a href="https://modelcontextprotocol.io">MCP</a> server and its tools become available to the agent:</p>
-  <pre><code>[mcp.github]
-cmd = "npx"
-args = ["-y", "@modelcontextprotocol/server-github"]
-env = { GITHUB_PERSONAL_ACCESS_TOKEN = "..." }
-trusted = false   <span class="c"># true: run its tools without asking</span></code></pre>
-  <p>Tools appear as <code>github__&lt;tool&gt;</code>. <code>/mcp</code> shows each server and how many tools it has.</p>
-</section>
-
-<section id="config">
-  <h2>Config reference</h2>
-  <p>The config file is <code>config.toml</code> in:</p>
-  <ul>
-    <li>Windows: <code>%APPDATA%\qwen-harness\</code></li>
-    <li>Linux and macOS: <code>~/.config/qwen-harness/</code></li>
-  </ul>
-  <p><code>qh setup</code> writes it for you; edit it for anything else.</p>
-  <table>
-    <tr><th>Setting</th><th>Meaning</th></tr>
-    <tr><td><code>model</code></td><td>Default model, e.g. <code>"qwen3.5:9b"</code></td></tr>
-    <tr><td><code>host</code></td><td>Where Ollama runs (default <code>http://127.0.0.1:11434</code>)</td></tr>
-    <tr><td><code>ctx</code></td><td>Context window for local models; leave out to size it to your GPU</td></tr>
-    <tr><td><code>cloud_ctx</code></td><td>Cap on cloud models' window (default 65536); every request resends it all</td></tr>
-    <tr><td><code>mode</code></td><td>Start mode: <code>ask</code>, <code>auto-edit</code>, <code>auto</code> or <code>plan</code></td></tr>
-    <tr><td><code>profile</code></td><td>Tool set: <code>coding</code>, <code>general</code>, <code>browser</code> or <code>all</code></td></tr>
-    <tr><td><code>allow</code></td><td>Commands that never need approval, e.g. <code>["cargo*", "npm test"]</code></td></tr>
-    <tr><td><code>browser_headless</code></td><td><code>true</code> hides the browser window the agent uses</td></tr>
-    <tr><td><code>mouse</code></td><td><code>true</code> enables clicks and scrolling</td></tr>
-    <tr><td><code>[[hooks]]</code>, <code>[mcp.name]</code></td><td>See <a href="#hooks">hooks</a> and <a href="#mcp">MCP</a></td></tr>
-  </table>
-</section>
-
-<section id="trouble">
-  <h2>Troubleshooting</h2>
-  <table>
-    <tr><th>You see</th><th>Do this</th></tr>
-    <tr><td>"Ollama isn't answering"</td><td>Start the Ollama app (or <code>ollama serve</code>), or pick a cloud model with <code>/model</code></td></tr>
-    <tr><td>"rejected the API key"</td><td><code>/provider</code> → pick it → add a new key</td></tr>
-    <tr><td>"out of credit"</td><td>Top up with that provider, or switch to a free or local model</td></tr>
-    <tr><td>ChatGPT "allowance used up"</td><td>Raise qh's cap in ChatGPT settings, wait for the reset, or switch model</td></tr>
-    <tr><td>"isn't on GitHub yet"</td><td><code>/team create</code> puts the project on GitHub</td></tr>
-    <tr><td>"no GitHub login found"</td><td>Install the GitHub CLI and run <code>gh auth login</code></td></tr>
-    <tr><td>🔒 "waiting to be let in"</td><td>A teammate who's already in needs to run qh once</td></tr>
-    <tr><td>Slow, or forgets things</td><td>Your GPU fits a small context; <code>/tier</code> explains. A cloud model avoids the limit</td></tr>
-  </table>
-  <p>Something else? <a href="https://github.com/kesavsabari/qh-rs/issues">Open an issue on GitHub</a>.</p>
-</section>
 </main>
-</div>
+<div class="cta-band"><p class="cta-line">Plug in your first line.</p><div class="dial"><code>curl -fsSL kesavsabari.github.io/qh/sh | sh</code><button class="copy" type="button" data-copy="curl -fsSL kesavsabari.github.io/qh/sh | sh"><svg aria-hidden="true" viewBox="0 0 20 20"><rect x="6" y="6" width="10" height="11" rx="1.5"/><path d="M4 13V4.5A1.5 1.5 0 0 1 5.5 3H13"/></svg><span>Copy</span></button></div></div>
 
-<script>
-// copy buttons on code blocks
-document.querySelectorAll('pre').forEach(pre => {
-  const b = document.createElement('button');
-  b.className = 'copy'; b.type = 'button'; b.textContent = 'Copy';
-  b.addEventListener('click', () => {
-    const text = [...pre.querySelector('code').childNodes].filter(n => !(n.classList && n.classList.contains('c'))).map(n => n.textContent).join('').trim();
-    navigator.clipboard.writeText(text).then(() => { b.textContent = 'Copied'; setTimeout(() => b.textContent = 'Copy', 1500); });
-  });
-  pre.appendChild(b);
-});
-// mobile contents toggle
-const side = document.getElementById('side'), menu = side.querySelector('.menu');
-menu.addEventListener('click', () => { const o = side.classList.toggle('open'); menu.setAttribute('aria-expanded', o); });
-side.querySelectorAll('nav a').forEach(a => a.addEventListener('click', () => { side.classList.remove('open'); menu.setAttribute('aria-expanded', false); }));
-// highlight the section in view
-const links = new Map([...side.querySelectorAll('nav a')].map(a => [a.getAttribute('href').slice(1), a]));
-const spy = new IntersectionObserver(es => es.forEach(e => {
-  if (e.isIntersecting) { links.forEach(a => a.classList.remove('on')); links.get(e.target.id)?.classList.add('on'); }
-}), { rootMargin: '-20% 0px -70% 0px' });
-document.querySelectorAll('section[id]').forEach(s => spy.observe(s));
-</script>
+<footer class="foot">
+  <a class="plate" href="#" aria-label="Back to top"><span>qh</span></a>
+  <p>MIT licensed. <a href="docs/">Docs</a> · <a href="https://github.com/kesavsabari/qh-rs">Source on GitHub</a>.</p>
+</footer>
+
+<script src="board.js?v=16" defer></script>
 </body>
 </html>

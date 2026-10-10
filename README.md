@@ -6,7 +6,7 @@ models through an API key. It's a single 4 MB binary with nothing else to instal
 It reads and edits your files, runs commands, browses the web, and can run several agents
 side by side in tabs.
 
-**Full guide: [kesavsabari.github.io/qh-rs](https://kesavsabari.github.io/qh-rs/)** (or run `qh docs`).
+**Website: [kesavsabari.github.io/qh-rs](https://kesavsabari.github.io/qh-rs/) · Guide: [docs](https://kesavsabari.github.io/qh-rs/docs/)** (or run `qh docs`).
 
 ## Install
 

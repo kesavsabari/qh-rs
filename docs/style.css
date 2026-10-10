@@ -57,7 +57,7 @@ p, li { color: var(--text); }
 code, kbd { font-family: var(--type); font-size: .93em; }
 p code, li code, td code { background: rgba(0,0,0,.24); padding: .06em .38em; border-radius: 3px; color: var(--strip); }
 kbd { background: var(--strip); color: var(--ink); padding: .02em .42em; border-radius: 3px; border-bottom: 2px solid #b9ad8e; font-weight: 700; }
-pre { position: relative; background: var(--ink); color: var(--strip); border-left: 4px solid var(--brass); padding: 14px 16px; border-radius: 0 4px 4px 0; overflow-x: auto; font: 400 .95rem/1.55 var(--type); margin: 12px 0 18px; padding-right: 72px; }
+pre { position: relative; background: var(--ink); color: var(--strip); border-left: 4px solid var(--brass); padding: 14px 16px; overflow-x: auto; font: 400 .95rem/1.55 var(--type); margin: 12px 0 18px; padding-right: 72px; }
 pre .c { color: #8f9a8a; }
 .copy { position: absolute; top: 8px; right: 8px; font: 600 .78rem/1 var(--body); background: var(--panel-edge); color: var(--strip); border: 0; padding: 6px 9px; border-radius: 3px; cursor: pointer; }
 .copy:hover { background: var(--brass-lo); }
@@ -68,11 +68,11 @@ th { font: 600 1rem/1.2 var(--display); letter-spacing: .1em; text-transform: up
 td:first-child { white-space: nowrap; }
 
 .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; margin: 18px 0 8px; }
-.card { background: var(--panel-deep); border: 1px solid var(--panel-edge); border-top: 4px solid var(--brass); padding: 16px 18px; border-radius: 3px; text-decoration: none; color: var(--text); }
+.card { background: var(--panel-deep); border: 1px solid var(--panel-edge); border-top: 4px solid var(--brass); padding: 16px 18px; text-decoration: none; color: var(--text); }
 .card b { display: block; font: 800 1.35rem/1.1 var(--display); letter-spacing: .03em; color: var(--strip); margin-bottom: 6px; }
 .card span { color: var(--text-soft); font-size: .95rem; }
 a.card:hover { border-top-color: var(--lamp); }
-.note { background: rgba(255,178,62,.08); border-left: 4px solid var(--lamp); padding: 10px 14px; margin: 14px 0; border-radius: 0 4px 4px 0; }
+.note { background: rgba(255,178,62,.08); border-left: 4px solid var(--lamp); padding: 10px 14px; margin: 14px 0; }
 .steps { counter-reset: s; list-style: none; padding: 0; }
 .steps > li { counter-increment: s; position: relative; padding-left: 46px; margin: 14px 0; }
 .steps > li::before { content: counter(s); position: absolute; left: 0; top: -2px; width: 32px; height: 32px; display: grid; place-items: center; background: var(--brass); color: var(--ink); font: 800 1.2rem/1 var(--display); border-radius: 50%; }

@@ -1,0 +1,115 @@
+{
+ "model": "local",
+ "runs": 3,
+ "pass": 0.9629629629629629,
+ "tasks": {
+  "fix_bug": {
+   "pass": 1.0,
+   "tokens": 1494,
+   "calls": 2.0,
+   "secs": 5.3
+  },
+  "new_file": {
+   "pass": 1.0,
+   "tokens": 1526,
+   "calls": 1.0,
+   "secs": 6.6
+  },
+  "find_usage": {
+   "pass": 1.0,
+   "tokens": 1486,
+   "calls": 2.0,
+   "secs": 4.5
+  },
+  "rename": {
+   "pass": 1.0,
+   "tokens": 1641,
+   "calls": 3.3,
+   "secs": 8.6
+  },
+  "add_test": {
+   "pass": 1.0,
+   "tokens": 2552,
+   "calls": 7.0,
+   "secs": 30.2
+  },
+  "multi_file": {
+   "pass": 1.0,
+   "tokens": 1964,
+   "calls": 6.0,
+   "secs": 15.6
+  },
+  "import_move": {
+   "pass": 1.0,
+   "tokens": 1894,
+   "calls": 6.3,
+   "secs": 13.6
+  },
+  "stack_trace": {
+   "pass": 0.6666666666666666,
+   "tokens": 1565,
+   "calls": 3.0,
+   "secs": 12.7
+  },
+  "pytest_fix": {
+   "pass": 1.0,
+   "tokens": 1740,
+   "calls": 3.7,
+   "secs": 9.2
+  },
+  "dont_touch": {
+   "pass": 1.0,
+   "tokens": 1817,
+   "calls": 6.3,
+   "secs": 11.1
+  },
+  "json_edit": {
+   "pass": 1.0,
+   "tokens": 1574,
+   "calls": 3.0,
+   "secs": 6.7
+  },
+  "count_lines": {
+   "pass": 1.0,
+   "tokens": 1487,
+   "calls": 2.0,
+   "secs": 4.5
+  },
+  "refactor_dup": {
+   "pass": 1.0,
+   "tokens": 1627,
+   "calls": 2.0,
+   "secs": 8.0
+  },
+  "cli_args": {
+   "pass": 1.0,
+   "tokens": 1545,
+   "calls": 2.3,
+   "secs": 6.4
+  },
+  "long_session": {
+   "pass": 1.0,
+   "tokens": 17014,
+   "calls": 6.7,
+   "secs": 29.0
+  },
+  "web_find": {
+   "pass": 1.0,
+   "tokens": 1782,
+   "calls": 3.0,
+   "secs": 6.6
+  },
+  "web_chain": {
+   "pass": 1.0,
+   "tokens": 1896,
+   "calls": 4.0,
+   "secs": 7.8
+  },
+  "web_form": {
+   "pass": 0.6666666666666666,
+   "tokens": 2439,
+   "calls": 7.0,
+   "secs": 14.6
+  }
+ }
+}

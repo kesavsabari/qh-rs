@@ -1,0 +1,205 @@
+mod backend;
+mod browser;
+mod checkpoints;
+mod config;
+mod context;
+mod engine;
+mod map;
+mod platform;
+mod mcp;
+mod hooks;
+mod hub;
+mod prompt;
+mod providers;
+mod session;
+mod skills;
+mod textcall;
+mod tier;
+mod tools;
+mod ui;
+
+use hub::{lock, Event, Hub};
+use std::io::Write;
+use std::path::PathBuf;
+
+const USAGE: &str = "qh [--resume [id|latest]] [--profile coding|general|all] [--model NAME|provider:MODEL] [--think] [--mode ask|auto-edit|auto|plan]
+qh login <provider>     save an API key (openrouter, ollama-cloud, openai, groq, anthropic…)
+qh -p \"prompt\" [-p \"next turn\" ...] [-y] [--ctx N] [--stats FILE]
+    run prompts as turns of one session without the UI and print the replies
+    -y approves every tool; --ctx overrides the context window (compacts at 88%);
+    --stats writes {tokens, calls, compacts} as JSON. QH_STATE_DIR isolates history.";
+
+struct Args {
+    resume: Option<String>,
+    profile: Option<String>,
+    model: Option<String>,
+    think: bool,
+    print: Vec<String>,
+    yes: bool,
+    ctx: Option<usize>,
+    stats: Option<String>,
+    mode: Option<String>,
+}
+
+fn parse() -> Args {
+    let mut a = Args { resume: None, profile: None, model: None, think: false, print: vec![], yes: false, ctx: None, stats: None, mode: None };
+    let mut it = std::env::args().skip(1).peekable();
+    while let Some(x) = it.next() {
+        match x.as_str() {
+            "--resume" | "-r" => a.resume = Some(it.next_if(|v| !v.starts_with('-')).unwrap_or_else(|| "latest".into())),
+            "--profile" => a.profile = it.next(),
+            "--model" | "-m" => a.model = it.next(),
+            "--think" => a.think = true,
+            "-p" | "--print" => a.print.extend(it.next()),
+            "--ctx" => a.ctx = it.next().and_then(|v| v.parse().ok()),
+            "--stats" => a.stats = it.next(),
+            "-y" | "--yes" => a.yes = true,
+            "--mode" => a.mode = it.next(),
+            _ => {
+                println!("{USAGE}");
+                std::process::exit(if x == "-h" || x == "--help" { 0 } else { 2 });
+            }
+        }
+    }
+    a
+}
+
+/// `qh login <provider>`: read a key without echoing it, save it (chmod 600), test it.
+fn login(name: &str) -> i32 {
+    let Some(p) = providers::get(name) else {
+        let names: Vec<String> = providers::all().into_iter().map(|p| p.name).collect();
+        eprintln!("no provider {name}. Known: {}", names.join(", "));
+        return 2;
+    };
+    if p.local {
+        println!("{} runs locally and needs no key", p.name);
+        return 0;
+    }
+    eprint!("API key for {} (input hidden): ", p.name);
+    let _ = std::io::stderr().flush();
+    let key = platform::read_hidden();
+    eprintln!();
+    if key.trim().is_empty() {
+        eprintln!("no key entered");
+        return 1;
+    }
+    if let Err(e) = providers::set_key(&p.name, &key) {
+        eprintln!("could not save: {e}");
+        return 1;
+    }
+    match providers::test(&p.name) {
+        Ok(n) => { println!("✓ saved; {n} models available. Pick one with /model {}:", p.name); 0 }
+        Err(e) => { println!("✗ saved, but the test call failed: {e}"); 1 }
+    }
+}
+
+fn main() {
+    if std::env::args().nth(1).as_deref() == Some("login") {
+        providers::init(&config::load());
+        let name = std::env::args().nth(2).unwrap_or_default();
+        std::process::exit(if name.is_empty() { eprintln!("usage: qh login <provider>"); 2 } else { login(&name) });
+    }
+    let args = parse();
+    let mut cfg = config::load();
+    providers::init(&cfg);
+    // no ctx in config: size the window to what the GPU can hold
+    if !cfg.ctx_set {
+        if let Some(d) = tier::detect(&cfg.host, &cfg.model) {
+            (cfg.ctx, cfg.compact_at) = (d.ctx, d.ctx * 88 / 100);
+        }
+    }
+    if let Some(c) = args.ctx {
+        (cfg.ctx, cfg.compact_at, cfg.ctx_set) = (c, c * 88 / 100, true);
+    }
+    mcp::init(&cfg.mcp);
+    let (tx, rx) = ui::channel_pair();
+    let resume_hub = args.resume.as_deref() == Some("latest") && args.print.is_empty();
+    let hub_path = if resume_hub { Hub::latest() } else { None };
+    let hub = Hub::new(cfg, hub_path.as_ref().and_then(|p| p.file_stem()).map(|s| s.to_string_lossy().into()),
+                       ui::emitter(tx.clone()), args.yes);
+    if let Some(p) = &hub_path {
+        hub.restore(p);
+    }
+    if let Some(mo) = &args.mode {
+        if !hub.set_mode(mo) {
+            eprintln!("unknown mode {mo}: ask, auto-edit, auto or plan");
+            std::process::exit(2);
+        }
+    }
+    if hub.names().is_empty() {
+        // a single-session resume from before hubs existed
+        let session = match args.resume.as_deref() {
+            Some("latest") => session::latest(),
+            Some(id) => Some(session::dir().join(format!("{id}.jsonl"))).filter(|p: &PathBuf| p.exists()),
+            None => None,
+        };
+        if let Err(e) = hub.add("main", args.profile.as_deref(), "", "", session, args.think, None) {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    }
+    if let Some(model) = &args.model {
+        for n in hub.names() {
+            if let Some(m) = hub.get(&n) {
+                let mut s = lock(&m.set);
+                (s.provider, s.model) = providers::parse_model(model);
+            }
+        }
+    }
+    if !args.print.is_empty() {
+        let code = headless(&hub, &args.print, rx, args.stats.as_deref());
+        browser::shutdown();
+        std::process::exit(code);
+    }
+    let r = ui::run(hub, tx, rx);
+    browser::shutdown();
+    if let Err(e) = r {
+        eprintln!("{e}");
+    }
+}
+
+/// Run each prompt as a turn of "main", printing replies to stdout and tool
+/// calls to stderr.
+fn headless(hub: &std::sync::Arc<Hub>, prompts: &[String], rx: std::sync::mpsc::Receiver<ui::Ui>, stats: Option<&str>) -> i32 {
+    let main = hub.names()[0].clone();
+    let Some(m) = hub.get(&main) else { return 1 };
+    let mut out = std::io::stdout();
+    let (mut code, mut calls, mut compacts, mut peak) = (0, 0, 0, 0);
+    for p in prompts {
+        hub.send(&main, p, "user", 0, None);
+        while let Ok(ui::Ui::Hub(name, ev)) = rx.recv() {
+            match ev {
+                Event::Token(t) if name == main => {
+                    let _ = out.write_all(t.as_bytes());
+                    let _ = out.flush();
+                }
+                Event::ToolCall { name: t, args } => {
+                    calls += 1;
+                    eprintln!("[{name}] ⚙ {t} {args}");
+                }
+                Event::Compact { .. } => compacts += 1,
+                Event::Done { tokens, .. } => peak = peak.max(tokens),
+                Event::Notice(n) => {
+                    eprintln!("[{name}] {n}");
+                    if n.starts_with("error") {
+                        code = 1;
+                    }
+                }
+                Event::Confirm { reply, .. } => {
+                    let _ = reply.send(hub::Answer::No);
+                }
+                _ => {}
+            }
+            // spawned helpers report back to main, so wait for the whole hub, not just main
+            if hub.quiet() {
+                println!();
+                break;
+            }
+        }
+    }
+    peak = peak.max(lock(&m.turn).tokens);
+    if let Some(path) = stats {
+        let _ = std::fs::write(path, serde_json::json!({"tokens": peak, "calls": calls, "compacts": compacts}).to_string());
+    }
+    code
+}

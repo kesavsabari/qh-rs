@@ -1071,6 +1071,20 @@ Type /team create to put it on GitHub (private) and invite friends by their GitH
                     Ok(s) => self.note(&a, s),
                     Err(e) => self.err(&a, e),
                 },
+                "private" => match crate::teamsetup::set_visibility(&m.cwd(), true) {
+                    Ok(s) => self.note(&a, s),
+                    Err(e) => self.err(&a, e),
+                },
+                "public" => {
+                    // "no" first: a stray Enter must never publish someone's code
+                    let all = vec![("status".to_string(), "no, keep it as it is".to_string()),
+                                   ("public confirm".to_string(), "yes, make it public: anyone on the internet can see the code".to_string())];
+                    self.picker = Some(picker("make this repo public?", "/team", all));
+                }
+                "public confirm" => match crate::teamsetup::set_visibility(&m.cwd(), false) {
+                    Ok(s) => self.note(&a, s),
+                    Err(e) => self.err(&a, e),
+                },
                 _ if arg == "create" || arg.starts_with("create ") => {
                     self.outside = Some(arg.split_whitespace().skip(1).map(String::from).collect());
                 }

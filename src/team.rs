@@ -563,7 +563,8 @@ pub fn report() -> String {
         return "team mode is off.\n\
   /team on      in a project that's already on GitHub: see and message everyone who can push to it\n\
   /team create  put this folder on GitHub (private) and invite friends by GitHub username\n\
-Friends join with:  qh join <owner>/<repo>".into();
+Friends join with:  qh join <owner>/<repo>\n\
+  /team private | /team public  change who can see the code".into();
     };
     let mut out = format!("team {} · you are {}\n", s.repo, s.me);
     if s.key.is_none() {

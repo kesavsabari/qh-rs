@@ -285,13 +285,16 @@ fn provider_step(name: &str, site: &str) -> Vec<String> {
         .map(|v| v.into_iter().map(|m| providers::display(name, &m.id)).collect()).unwrap_or_default()
 }
 
-const PROVIDERS: [(&str, &str, &str); 7] = [
+const PROVIDERS: [(&str, &str, &str); 10] = [
     ("openrouter", "OpenRouter", "https://openrouter.ai/keys"),
     ("groq", "Groq", "https://console.groq.com/keys"),
     ("openai", "OpenAI", "https://platform.openai.com/api-keys"),
     ("anthropic", "Anthropic", "https://console.anthropic.com/settings/keys"),
     ("deepseek", "DeepSeek", "https://platform.deepseek.com/api_keys"),
     ("mistral", "Mistral", "https://console.mistral.ai/api-keys"),
+    ("zai-coding", "GLM Coding Plan (Z.ai subscription)", "https://z.ai/manage-apikey/apikey-list"),
+    ("kimi-coding", "Kimi Code (Kimi membership)", "https://www.kimi.com/code"),
+    ("minimax", "MiniMax Coding Plan", "https://platform.minimax.io (Account → Coding Plan → Reset & Copy)"),
     ("ollama-cloud", "Ollama cloud by API key", "https://ollama.com/settings/keys"),
 ];
 

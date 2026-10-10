@@ -36,7 +36,7 @@ pub struct ModelInfo {
 // name, kind, base url, key env var, local
 // Anthropic's key var is deliberately not ANTHROPIC_API_KEY: exporting that globally switches
 // Claude Code itself to per-token billing.
-const PRESETS: [(&str, Kind, &str, &str, bool); 9] = [
+const PRESETS: [(&str, Kind, &str, &str, bool); 12] = [
     ("openrouter", Kind::OpenAI, "https://openrouter.ai/api/v1", "OPENROUTER_API_KEY", false),
     ("ollama-cloud", Kind::Ollama, "https://ollama.com", "OLLAMA_API_KEY", false),
     ("openai", Kind::OpenAI, "https://api.openai.com/v1", "OPENAI_API_KEY", false),
@@ -44,6 +44,11 @@ const PRESETS: [(&str, Kind, &str, &str, bool); 9] = [
     ("deepseek", Kind::OpenAI, "https://api.deepseek.com/v1", "DEEPSEEK_API_KEY", false),
     ("mistral", Kind::OpenAI, "https://api.mistral.ai/v1", "MISTRAL_API_KEY", false),
     ("anthropic", Kind::Anthropic, "https://api.anthropic.com", "QH_ANTHROPIC_KEY", false),
+    // coding-plan subscriptions sold for use in third-party coding tools; their keys differ from
+    // the same company's pay-as-you-go keys
+    ("zai-coding", Kind::OpenAI, "https://api.z.ai/api/coding/paas/v4", "ZAI_API_KEY", false),
+    ("kimi-coding", Kind::OpenAI, "https://api.kimi.com/coding/v1", "KIMI_API_KEY", false),
+    ("minimax", Kind::OpenAI, "https://api.minimax.io/v1", "MINIMAX_API_KEY", false),
     ("lmstudio", Kind::OpenAI, "http://localhost:1234/v1", "", true),
     ("llamacpp", Kind::OpenAI, "http://localhost:8080/v1", "", true),
 ];
@@ -233,6 +238,23 @@ fn fetch_models(p: &Provider) -> Result<Vec<ModelInfo>, String> {
             Ok(v["data"].as_array().into_iter().flatten()
                 .filter_map(|m| m["id"].as_str()).map(|n| ModelInfo { id: n.into(), ctx: Some(200_000), ..Default::default() }).collect())
         }
+        Kind::OpenAI if known_models(&p.name).is_some() => {
+            // plan endpoints may not list models: prove the key with a one-token request instead
+            let known = known_models(&p.name).unwrap_or_default();
+            if let Ok(v) = get_json(p, &format!("{base}/models")) {
+                let ids: Vec<ModelInfo> = v["data"].as_array().into_iter().flatten().filter_map(|m| m["id"].as_str())
+                    .map(|n| ModelInfo { id: n.into(), ..Default::default() }).collect();
+                if !ids.is_empty() { return Ok(ids) }
+            }
+            let body = serde_json::json!({"model": known[0], "max_tokens": 1, "messages": [{"role": "user", "content": "hi"}]});
+            http().post(&format!("{base}/chat/completions")).timeout(Duration::from_secs(20))
+                .set("Authorization", &format!("Bearer {}", p.key)).send_string(&body.to_string())
+                .map_err(|e| match e {
+                    ureq::Error::Status(c, r) => format!("HTTP {c}: {}", r.into_string().unwrap_or_default().chars().take(200).collect::<String>()),
+                    e => e.to_string(),
+                })?;
+            Ok(known.iter().map(|n| ModelInfo { id: n.to_string(), ..Default::default() }).collect())
+        }
         Kind::OpenAI => {
             let v = get_json(p, &format!("{base}/models"))?;
             Ok(v["data"].as_array().into_iter().flatten().filter(|m| {
@@ -246,6 +268,17 @@ fn fetch_models(p: &Provider) -> Result<Vec<ModelInfo>, String> {
                 })
             }).collect())
         }
+    }
+}
+
+/// Models of the coding-plan providers, per their setup docs (2026-10), used when the endpoint
+/// has no model list. The first one is used to check a key.
+fn known_models(provider: &str) -> Option<&'static [&'static str]> {
+    match provider {
+        "zai-coding" => Some(&["glm-5.1", "glm-5", "glm-5-turbo", "glm-4.5-air"]),
+        "kimi-coding" => Some(&["kimi-for-coding"]),
+        "minimax" => Some(&["MiniMax-M3"]),
+        _ => None,
     }
 }
 

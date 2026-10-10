@@ -16,6 +16,7 @@ use std::time::Duration;
 
 const LOCAL_PICK: &str = "qwen3.5:9b"; // what the harness is tuned and evaluated on
 const ACCENT: Color = Color::Cyan;
+const OPENROUTER_LOGIN: bool = false; // browser login: built, switched on once tested end to end
 
 struct Item {
     label: String,
@@ -250,7 +251,7 @@ fn provider_step(name: &str, site: &str) -> Vec<String> {
         println!("✓ {name}: using the saved key");
     } else {
         // OpenRouter can log in through the browser instead of a pasted key
-        if name == "openrouter" && yes("Connect OpenRouter", "Log in with the browser (easiest)", "Paste an API key instead") {
+        if name == "openrouter" && OPENROUTER_LOGIN && yes("Connect OpenRouter", "Log in with the browser (easiest)", "Paste an API key instead") {
             match crate::oauth::openrouter().and_then(|k| providers::set_key(name, &k)).and_then(|_| providers::test(name)) {
                 Ok(n) => println!("✓ openrouter: logged in, {n} models"),
                 Err(e) => { let _ = providers::remove_key(name); println!("✗ openrouter login failed: {e}"); return vec![] }
@@ -285,7 +286,7 @@ fn provider_step(name: &str, site: &str) -> Vec<String> {
 }
 
 const PROVIDERS: [(&str, &str, &str); 7] = [
-    ("openrouter", "OpenRouter (browser login)", "https://openrouter.ai/keys"),
+    ("openrouter", "OpenRouter", "https://openrouter.ai/keys"),
     ("groq", "Groq", "https://console.groq.com/keys"),
     ("openai", "OpenAI", "https://platform.openai.com/api-keys"),
     ("anthropic", "Anthropic", "https://console.anthropic.com/settings/keys"),

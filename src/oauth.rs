@@ -78,6 +78,7 @@ fn random() -> [u8; 32] {
 }
 
 /// Run the login; returns an OpenRouter API key.
+#[allow(dead_code)] // behind setup::OPENROUTER_LOGIN until tested
 pub fn openrouter() -> Result<String, String> {
     let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| format!("can't open a local port: {e}"))?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();

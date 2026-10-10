@@ -40,13 +40,13 @@ const HELP: &str = "/new <name> [profile]  new session (Ctrl+N: instant, auto-na
 /map (Ctrl+B)          live map of sessions, messages and shared folders
 /tier                  how the context window was sized to your GPU
 /mode [ask|auto-edit|auto|plan] (Shift+Tab)  /role [text]  /think  /tokens  /compact  /clear  /profile [name]
-/undo  /diff  /allow [pattern]  /sessions  /commands (your own /name prompts)  /mcp (servers)
+/docs (guide in your browser)  /undo  /diff  /allow [pattern]  /sessions  /commands (your own /name prompts)  /mcp (servers)
 Alt+1..9 or Alt+←/→ switch · PgUp/PgDn scroll · Ctrl+O open last tool · Ctrl+L log · Esc interrupt · Ctrl+Q quit";
 
 use crate::tools::DANGER;
 
 /// What the `/` autocomplete offers; custom commands are added from .qh/commands.
-const COMMANDS: [(&str, &str); 29] = [
+const COMMANDS: [(&str, &str); 30] = [
     ("/model", "pick this tab's model"), ("/provider", "connect providers: sign in, keys"),
     ("/new", "new session tab"), ("/close", "close this tab"), ("/mode", "ask · auto-edit · auto · plan"),
     ("/compact", "shrink the conversation"), ("/clear", "start this tab fresh"), ("/undo", "undo the agent's file changes"),
@@ -55,7 +55,7 @@ const COMMANDS: [(&str, &str); 29] = [
     ("/role", "give this tab a role"), ("/map", "map of sessions and messages"), ("/layout", "tabs or grid"),
     ("/msg", "message another tab"), ("/sessions", "saved sessions"), ("/allow", "auto-approve rules"),
     ("/release", "let held messages through"), ("/pause", "hold automatic messaging"), ("/resume", "resume messaging"),
-    ("/mcp", "MCP servers"), ("/team", "your team: who's online, read or write their sessions"), ("/commands", "your own /commands"), ("/help", "everything"),
+    ("/mcp", "MCP servers"), ("/team", "your team: who's online, read or write their sessions"), ("/commands", "your own /commands"), ("/help", "everything"), ("/docs", "open the docs in your browser"),
     ("/cd", "same as /cwd"), ("/providers", "same as /provider"),
 ];
 
@@ -1063,6 +1063,10 @@ impl App {
                 self.note(&a, if r.is_empty() { "no role yet: it is named from your first real request, or set one with /role <text>".into() } else { format!("role: {r}") });
             }
             "/mcp" => self.note(&a, crate::mcp::status()),
+            "/docs" => {
+                crate::platform::open_url(crate::platform::DOCS);
+                self.note(&a, format!("opening the docs: {}", crate::platform::DOCS));
+            }
             "/team" => match arg {
                 "on" if crate::team::github_repo(&m.cwd()).is_none() => self.note(&a,
                     "This folder isn't on GitHub yet, so there's nowhere to meet your team.\n\

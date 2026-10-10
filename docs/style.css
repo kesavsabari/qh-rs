@@ -420,3 +420,8 @@ main > section.faq { max-width: none; }
   .steps li { margin-bottom: 22px; }
   .dial-note code { word-break: break-all; }
 }
+
+/* never wider than the screen: no sideways swipe on phones */
+html, body { overflow-x: hidden; }
+@supports (overflow-x: clip) { html, body { overflow-x: clip; } }
+img, svg, .dial, .field, figure, pre, table { max-width: 100%; }

@@ -35,7 +35,7 @@ const HELP: &str = "/new <name> [profile]  new session (Ctrl+N: instant, auto-na
 /pause | /resume       hold / resume all automatic messaging
 /layout tabs|grid      one session, or up to 4 side by side (Ctrl+G toggles)
 /model [search]        pick this tab's model (local, Ollama cloud, any provider); /model default <m> for new tabs
-/provider [add|remove|test <name>]  API keys (hidden input, saved chmod 600)
+/provider              connect providers: sign in, add/test/remove keys
 /cwd [path]            this session's working folder
 /map (Ctrl+B)          live map of sessions, messages and shared folders
 /tier                  how the context window was sized to your GPU
@@ -44,6 +44,20 @@ const HELP: &str = "/new <name> [profile]  new session (Ctrl+N: instant, auto-na
 Alt+1..9 or Alt+←/→ switch · PgUp/PgDn scroll · Ctrl+O open last tool · Ctrl+L log · Esc interrupt · Ctrl+Q quit";
 
 use crate::tools::DANGER;
+
+/// What the `/` autocomplete offers; custom commands are added from .qh/commands.
+const COMMANDS: [(&str, &str); 28] = [
+    ("/model", "pick this tab's model"), ("/provider", "connect providers: sign in, keys"),
+    ("/new", "new session tab"), ("/close", "close this tab"), ("/mode", "ask · auto-edit · auto · plan"),
+    ("/compact", "shrink the conversation"), ("/clear", "start this tab fresh"), ("/undo", "undo the agent's file changes"),
+    ("/diff", "show the agent's file changes"), ("/cwd", "this tab's working folder"), ("/think", "toggle thinking"),
+    ("/tokens", "context use"), ("/tier", "context window and GPU"), ("/profile", "tool set: coding, general, browser, all"),
+    ("/role", "give this tab a role"), ("/map", "map of sessions and messages"), ("/layout", "tabs or grid"),
+    ("/msg", "message another tab"), ("/sessions", "saved sessions"), ("/allow", "auto-approve rules"),
+    ("/release", "let held messages through"), ("/pause", "hold automatic messaging"), ("/resume", "resume messaging"),
+    ("/mcp", "MCP servers"), ("/commands", "your own /commands"), ("/help", "everything"),
+    ("/cd", "same as /cwd"), ("/providers", "same as /provider"),
+];
 
 /// Prompt templates as markdown files; a project's own override the user's global ones.
 fn custom_commands(cwd: &std::path::Path) -> Vec<(String, std::path::PathBuf)> {
@@ -135,11 +149,14 @@ struct App {
     body: Rect,
     picker_rows: Option<(Rect, usize)>, // list area and the first visible row's index
     quit: bool,
+    sugg_sel: usize, // highlighted row of the / autocomplete
 }
 
-/// `/model` popup: type to filter, arrows to move, Enter picks, Esc closes.
+/// Popup list (`/model`, `/provider`): type to filter, arrows to move, Enter runs `cmd value`.
 struct Picker {
-    all: Vec<(String, String)>, // (value for /model, label shown)
+    title: &'static str,
+    cmd: String,
+    all: Vec<(String, String)>, // (value passed to cmd, label shown)
     filter: String,
     sel: usize,
     cur: String,
@@ -194,7 +211,7 @@ pub fn run(hub: Arc<Hub>, tx: Sender<Ui>, rx: Receiver<Ui>) -> std::io::Result<(
         hub: hub.clone(), views: HashMap::new(), active: String::new(), grid: false, recent: vec![],
         log: VecDeque::new(), show_log: false, input: vec![], cur: 0, hist: vec![], hist_i: 0,
         confirms: VecDeque::new(), picker: None, secret: None, map: None,
-        tab_hits: vec![], body: Rect::default(), picker_rows: None, quit: false,
+        tab_hits: vec![], body: Rect::default(), picker_rows: None, quit: false, sugg_sel: 0,
     };
     for n in hub.names() {
         app.load_view(&n);
@@ -542,9 +559,10 @@ impl App {
                 }
                 KeyCode::Enter => {
                     let pick = p.hits().get(p.sel).map(|s| s.0.clone());
+                    let cmd = p.cmd.clone();
                     self.picker = None;
                     if let Some(name) = pick {
-                        self.command(&format!("/model {name}"));
+                        self.command(&format!("{cmd} {name}"));
                     }
                 }
                 _ => {}
@@ -552,6 +570,28 @@ impl App {
             return;
         }
         let (ctrl, alt) = (k.modifiers.contains(Mods::CONTROL), k.modifiers.contains(Mods::ALT));
+        // `/` autocomplete: ↑↓ choose, Tab fills in, Enter runs the highlighted command
+        let sugg = self.suggestions();
+        if !sugg.is_empty() {
+            let typed: String = self.input.iter().collect();
+            match k.code {
+                KeyCode::Up => { self.sugg_sel = self.sugg_sel.checked_sub(1).unwrap_or(sugg.len() - 1); return }
+                KeyCode::Down => { self.sugg_sel = (self.sugg_sel + 1) % sugg.len(); return }
+                KeyCode::Tab => {
+                    self.input = format!("{} ", sugg[self.sugg_sel.min(sugg.len() - 1)].0).chars().collect();
+                    self.cur = self.input.len();
+                    return;
+                }
+                KeyCode::Enter if !sugg.iter().any(|(c, _)| *c == typed) => {
+                    self.input = sugg[self.sugg_sel.min(sugg.len() - 1)].0.chars().collect();
+                    self.cur = self.input.len();
+                }
+                _ => {}
+            }
+        }
+        if matches!(k.code, KeyCode::Char(_) | KeyCode::Backspace) {
+            self.sugg_sel = 0;
+        }
         match k.code {
             KeyCode::Char('q') | KeyCode::Char('c') if ctrl => self.quit = true,
             KeyCode::Char('n') if ctrl => {
@@ -796,7 +836,7 @@ impl App {
                     if !exact && (arg.is_empty() || hits.len() > 1) {
                         let cur = { let s = lock(&m.set); crate::providers::display(&s.provider, &s.model) };
                         let sel = if arg.is_empty() { all.iter().position(|(v, _)| *v == cur).unwrap_or(0) } else { 0 };
-                        self.picker = Some(Picker { all, filter: arg.to_string(), sel, cur });
+                        self.picker = Some(Picker { title: "model", cmd: "/model".into(), all, filter: arg.to_string(), sel, cur });
                         return;
                     }
                     match hits.as_slice() {
@@ -835,6 +875,47 @@ impl App {
                         self.secret = Some(name.into());
                         self.note(&a, format!("paste the API key for {name} and press Enter (hidden; Esc cancels)"));
                     }
+                    (Some("connect"), Some(name), _) => {
+                        let Some(p) = crate::providers::get(name) else { return self.err(&a, format!("no provider {name}")) };
+                        if p.kind == crate::providers::Kind::ChatGPT {
+                            if crate::chatgpt::signed_in() {
+                                let all = vec![("test chatgpt".to_string(), "test the sign-in (lists your plan's models)".to_string()),
+                                               ("signin chatgpt".to_string(), "sign in again".to_string()),
+                                               ("signout chatgpt".to_string(), "sign out".to_string())];
+                                self.picker = Some(Picker { title: "ChatGPT", cmd: "/provider".into(), all, filter: String::new(), sel: 0, cur: String::new() });
+                            } else {
+                                self.command("/provider signin chatgpt");
+                            }
+                        } else if p.local {
+                            self.command(&format!("/provider test {name}"));
+                        } else if p.key.is_empty() {
+                            self.command(&format!("/provider add {name}"));
+                        } else {
+                            let all = vec![(format!("test {name}"), "test the key".to_string()),
+                                           (format!("add {name}"), "replace the key".to_string()),
+                                           (format!("remove {name}"), "remove the key".to_string())];
+                            self.picker = Some(Picker { title: "provider", cmd: "/provider".into(), all, filter: String::new(), sel: 0, cur: String::new() });
+                        }
+                    }
+                    (Some("signin"), Some("chatgpt"), _) => {
+                        // the browser round trip blocks, so it runs off the UI thread and reports back as notes
+                        let (hub, a2) = (self.hub.clone(), a.clone());
+                        self.note(&a, "signing in with ChatGPT…");
+                        std::thread::spawn(move || {
+                            let say = |s: &str| hub.emit(&a2, Event::Notice(s.to_string()));
+                            let r = crate::chatgpt::login(&say);
+                            crate::providers::init(&crate::config::load());
+                            say(&match r {
+                                Ok(e) => format!("✓ signed in with ChatGPT as {e}. /model chatgpt to pick a model"),
+                                Err(e) => format!("✗ ChatGPT sign-in: {e}"),
+                            });
+                        });
+                    }
+                    (Some("signout"), Some("chatgpt"), _) => {
+                        crate::chatgpt::sign_out();
+                        crate::providers::init(&crate::config::load());
+                        self.note(&a, "signed out of ChatGPT");
+                    }
                     (Some("remove"), Some(name), _) => match crate::providers::remove_key(name) {
                         Ok(()) => self.note(&a, format!("removed the key for {name}")),
                         Err(e) => self.err(&a, e),
@@ -844,13 +925,17 @@ impl App {
                         Err(e) => self.err(&a, format!("✗ {name}: {e}")),
                     },
                     _ => {
-                        let rows: Vec<String> = crate::providers::all().iter().map(|p| {
-                            let state = if p.local { "local".to_string() } else if p.key.is_empty() {
-                                format!("no key (/provider add {})", p.name)
-                            } else { "key set".into() };
-                            format!("  {:<13} {:<9} {state}", p.name, format!("{:?}", p.kind).to_lowercase())
+                        let all: Vec<(String, String)> = crate::providers::all().iter().map(|p| {
+                            let state = match (p.kind == crate::providers::Kind::ChatGPT, p.local, p.key.is_empty()) {
+                                (true, _, true) => "sign in with your Plus/Pro plan".to_string(),
+                                (true, _, false) => format!("✓ signed in {}", crate::chatgpt::account().unwrap_or_default()),
+                                (_, true, _) => "local".into(),
+                                (_, _, true) => "add a key".into(),
+                                _ => "✓ key set".into(),
+                            };
+                            (p.name.clone(), format!("{:<14}{state}", p.name))
                         }).collect();
-                        self.note(&a, format!("providers:\n{}\n/provider add|remove|test <name> · keys in ~/.config/qwen-harness/credentials.toml", rows.join("\n")));
+                        self.picker = Some(Picker { title: "providers", cmd: "/provider connect".into(), all, filter: String::new(), sel: 0, cur: String::new() });
                     }
                 }
             }
@@ -931,6 +1016,24 @@ $ARGUMENTS is replaced by what you type after the command".into()
 
     // ---- drawing ----------------------------------------------------------
 
+    /// Commands matching what's typed, while a bare `/word` is being typed.
+    fn suggestions(&self) -> Vec<(String, String)> {
+        let typed: String = self.input.iter().collect();
+        if self.secret.is_some() || !typed.starts_with('/') || typed.contains(' ') {
+            return vec![];
+        }
+        let cwd = self.hub.get(&self.active).map(|m| m.cwd()).unwrap_or_default();
+        let mut out: Vec<(String, String)> = COMMANDS.iter().filter(|(c, _)| c.starts_with(&typed))
+            .map(|(c, d)| (c.to_string(), d.to_string())).collect();
+        for (n, p) in custom_commands(&cwd) {
+            let c = format!("/{n}");
+            if c.starts_with(&typed) && !out.iter().any(|(x, _)| *x == c) {
+                out.push((c, format!("custom · {}", p.file_name().unwrap_or_default().to_string_lossy())));
+            }
+        }
+        out
+    }
+
     fn draw(&mut self, f: &mut Frame) {
         let [tabs, body, status, input, foot] = Layout::vertical([
             Constraint::Length(1), Constraint::Min(1), Constraint::Length(1), Constraint::Length(1), Constraint::Length(1),
@@ -1004,6 +1107,19 @@ $ARGUMENTS is replaced by what you type after the command".into()
         f.set_cursor_position((input.x + 2 + cx as u16, input.y));
         let hints = "⇧Tab mode  ^N new  ^W close  ^G grid  ^B map  ^L log  Alt+←/→ tabs  PgUp/Dn scroll  ^O tool  Esc stop  ^Q quit";
         f.render_widget(Paragraph::new(hints).style(Style::new().fg(DIM)), foot);
+        let sugg = self.suggestions();
+        if !sugg.is_empty() && self.picker.is_none() {
+            let rows = sugg.len().min(10) as u16;
+            let r = Rect { x: input.x, y: input.y.saturating_sub(rows + 2), width: input.width.min(70), height: rows + 2 };
+            let top = self.sugg_sel.saturating_sub(rows as usize - 1);
+            let lines: Vec<Line> = sugg.iter().enumerate().skip(top).take(rows as usize).map(|(i, (c, d))| {
+                let st = if i == self.sugg_sel { Style::new().add_modifier(Modifier::REVERSED) } else { Style::new() };
+                Line::from(vec![Span::styled(format!("{c:<14}"), st.fg(ACCENT)), Span::styled(format!(" {d}"), st.fg(DIM))])
+            }).collect();
+            f.render_widget(Clear, r);
+            f.render_widget(Paragraph::new(lines).block(Block::bordered().border_style(Style::new().fg(DIM))
+                .title_bottom(Line::styled(" ↑↓ · Tab fill · Enter run ", Style::new().fg(DIM)))), r);
+        }
         self.picker_rows = self.picker.as_ref().map(|p| draw_picker(f, p));
         if let Some(c) = self.confirms.front() {
             draw_confirm(f, c, self.confirms.len());
@@ -1258,7 +1374,7 @@ fn draw_picker(f: &mut Frame, p: &Picker) -> (Rect, usize) {
     let r = Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 2, width: w, height: h };
     f.render_widget(Clear, r);
     let block = Block::bordered().border_style(Style::new().fg(ACCENT))
-        .title(" model ").title_bottom(Line::styled(" ↑↓ move · type to filter · Enter pick · Esc close ", Style::new().fg(DIM)));
+        .title(format!(" {} ", p.title)).title_bottom(Line::styled(" ↑↓ move · type to filter · Enter pick · Esc close ", Style::new().fg(DIM)));
     let inner = block.inner(r);
     f.render_widget(block, r);
     let mut lines = vec![Line::from(vec![Span::styled("search: ", Style::new().fg(DIM)), Span::raw(p.filter.clone()), Span::styled("▏", Style::new().fg(ACCENT))])];

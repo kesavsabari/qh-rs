@@ -151,7 +151,7 @@ fn reply(stream: &mut std::net::TcpStream, msg: &str) {
 }
 
 /// Browser sign-in. Returns the account's email.
-pub fn login() -> Result<String, String> {
+pub fn login(say: &dyn Fn(&str)) -> Result<String, String> {
     let saved = load();
     let (listener, port) = listen()?;
     let redirect = format!("http://127.0.0.1:{port}/auth/callback");
@@ -178,7 +178,7 @@ pub fn login() -> Result<String, String> {
         None => params.push(("agent_name_hint", APP_NAME.into())),
     }
     let url = format!("{AUTH}?{}", params.iter().map(|(k, v)| format!("{k}={}", enc(v))).collect::<Vec<_>>().join("&"));
-    println!("Opening your browser to sign in with ChatGPT. If it doesn't open, visit:\n  {url}\n");
+    say(&format!("Opening your browser to sign in with ChatGPT. If it doesn't open, visit:\n  {url}"));
     crate::platform::open_url(&url);
 
     listener.set_nonblocking(true).map_err(|e| e.to_string())?;

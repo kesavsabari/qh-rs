@@ -72,7 +72,7 @@ fn parse() -> Args {
 /// `qh login <provider>`: read a key without echoing it, save it (chmod 600), test it.
 fn login(name: &str) -> i32 {
     if name == "chatgpt" {
-        return match chatgpt::login() {
+        return match chatgpt::login(&|s| println!("{s}\n")) {
             Ok(email) => { println!("✓ signed in with ChatGPT as {email}. Pick a model with /model chatgpt:"); 0 }
             Err(e) => { eprintln!("✗ {e}"); 1 }
         };

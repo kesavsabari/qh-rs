@@ -249,7 +249,7 @@ fn provider_step(name: &str, site: &str) -> Vec<String> {
     if name == "chatgpt" {
         if !crate::chatgpt::signed_in() || !yes(&format!("Already signed in with ChatGPT as {}", crate::chatgpt::account().unwrap_or_default()),
                                                 "Keep it", "Sign in again") {
-            if let Err(e) = crate::chatgpt::login() {
+            if let Err(e) = crate::chatgpt::login(&|s| println!("{s}\n")) {
                 println!("✗ ChatGPT: {e}");
                 return vec![];
             }

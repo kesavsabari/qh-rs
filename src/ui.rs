@@ -603,7 +603,6 @@ impl App {
         // `/` autocomplete: ↑↓ choose, Tab fills in, Enter runs the highlighted command
         let sugg = self.suggestions();
         if !sugg.is_empty() {
-            let typed: String = self.input.iter().collect();
             match k.code {
                 KeyCode::Up => { self.sugg_sel = self.sugg_sel.checked_sub(1).unwrap_or(sugg.len() - 1); return }
                 KeyCode::Down => { self.sugg_sel = (self.sugg_sel + 1) % sugg.len(); return }
@@ -612,7 +611,8 @@ impl App {
                     self.cur = self.input.len();
                     return;
                 }
-                KeyCode::Enter if !sugg.iter().any(|(c, _)| *c == typed) => {
+                // Enter runs what's highlighted, so what you see is what runs
+                KeyCode::Enter => {
                     self.input = sugg[self.sugg_sel.min(sugg.len() - 1)].0.chars().collect();
                     self.cur = self.input.len();
                 }
@@ -1061,6 +1061,7 @@ $ARGUMENTS is replaced by what you type after the command".into()
                 out.push((c, format!("custom · {}", p.file_name().unwrap_or_default().to_string_lossy())));
             }
         }
+        out.sort_by_key(|(c, _)| *c != typed); // an exact match first, so it's the highlighted one
         out
     }
 

@@ -78,7 +78,7 @@ fn get(url: &str) -> Option<Value> {
 }
 
 /// (total, used) MiB on the first NVIDIA GPU.
-fn vram() -> Option<(f64, f64)> {
+pub fn vram() -> Option<(f64, f64)> {
     let o = std::process::Command::new("nvidia-smi")
         .args(["--query-gpu=memory.total,memory.used", "--format=csv,noheader,nounits"]).output().ok()?;
     let line = String::from_utf8_lossy(&o.stdout).lines().next()?.to_string();

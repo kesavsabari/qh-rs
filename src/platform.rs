@@ -40,11 +40,41 @@ pub enum Shell {
     PowerShell,
 }
 
-/// bash wherever it exists (Git Bash / MSYS / WSL's on Windows), else PowerShell.
+/// Git Bash on Windows. Never `C:\Windows\System32\bash.exe`: that is the WSL launcher,
+/// which fails outright on machines without a Linux distro installed.
+fn git_bash() -> Option<PathBuf> {
+    let mut c: Vec<PathBuf> = ["ProgramFiles", "ProgramW6432", "ProgramFiles(x86)", "LOCALAPPDATA"].iter()
+        .filter_map(std::env::var_os)
+        .flat_map(|b| { let b = PathBuf::from(b); [b.join(r"Git\bin\bash.exe"), b.join(r"Programs\Git\bin\bash.exe")] })
+        .collect();
+    if let Some(path) = std::env::var_os("PATH") {
+        for d in std::env::split_paths(&path) {
+            if d.join("git.exe").is_file() {
+                // …\Git\cmd\git.exe → …\Git\bin\bash.exe
+                if let Some(root) = d.parent() { c.push(root.join(r"bin\bash.exe")) }
+            }
+            let lower = d.to_string_lossy().to_lowercase();
+            if !lower.contains("system32") && !lower.contains("windowsapps") {
+                c.push(d.join("bash.exe"));
+            }
+        }
+    }
+    c.into_iter().find(|p| p.is_file())
+}
+
+fn bash_exe() -> &'static Option<PathBuf> {
+    static B: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    B.get_or_init(|| if cfg!(windows) { git_bash() } else { Some(PathBuf::from("bash")) })
+}
+
+/// bash wherever it really exists (always on Linux/macOS, Git Bash on Windows), else PowerShell.
+/// QH_SHELL=powershell|bash overrides.
 pub fn shell() -> Shell {
     static S: std::sync::OnceLock<Shell> = std::sync::OnceLock::new();
-    *S.get_or_init(|| {
-        if !cfg!(windows) || on_path("bash") { Shell::Bash } else { Shell::PowerShell }
+    *S.get_or_init(|| match std::env::var("QH_SHELL").map(|v| v.to_lowercase()).as_deref() {
+        Ok("powershell") | Ok("pwsh") => Shell::PowerShell,
+        Ok("bash") => Shell::Bash,
+        _ => if bash_exe().is_some() { Shell::Bash } else { Shell::PowerShell },
     })
 }
 
@@ -54,8 +84,16 @@ pub fn shell_name() -> &'static str {
 
 /// A command for `script` in the platform shell.
 pub fn shell_cmd(script: &str) -> Command {
-    match shell() {
-        Shell::Bash => { let mut c = Command::new("bash"); c.arg("-c").arg(script); c }
+    shell_cmd_for(shell(), script)
+}
+
+pub fn shell_cmd_for(sh: Shell, script: &str) -> Command {
+    match sh {
+        Shell::Bash => {
+            let mut c = Command::new(bash_exe().clone().unwrap_or_else(|| PathBuf::from("bash")));
+            c.arg("-c").arg(script);
+            c
+        }
         Shell::PowerShell => {
             let exe = if on_path("pwsh") { "pwsh" } else { "powershell" };
             let mut c = Command::new(exe);
@@ -68,7 +106,11 @@ pub fn shell_cmd(script: &str) -> Command {
 /// `script` followed by a line printing `mark` and the shell's final directory, keeping
 /// the script's exit code.
 pub fn with_cwd_report(script: &str, mark: &str) -> String {
-    match shell() {
+    with_cwd_report_for(shell(), script, mark)
+}
+
+pub fn with_cwd_report_for(sh: Shell, script: &str, mark: &str) -> String {
+    match sh {
         // pwd -W gives C:/… under Git Bash, where $PWD would be /c/…
         Shell::Bash if cfg!(windows) => format!("{script}\n__qh=$?; printf '\\n{mark}%s' \"$(pwd -W 2>/dev/null || pwd)\"; exit $__qh"),
         Shell::Bash => format!("{script}\n__qh=$?; printf '\\n{mark}%s' \"$PWD\"; exit $__qh"),
@@ -262,6 +304,18 @@ mod tests {
         let d = diff("f", Some("a\nb\nc\n"), Some("a\nB\nc\n"));
         assert!(d.contains("-b\n+B\n") && d.contains(" a\n"), "{d}");
         assert!(diff("f", Some("x"), Some("x")).is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn powershell_reports_its_folder() {
+        let d = std::env::temp_dir();
+        let script = with_cwd_report_for(Shell::PowerShell, "Set-Location ..; Write-Output hi", "MARK:");
+        let (o, _) = run_timeout(shell_cmd_for(Shell::PowerShell, &script), None, 60, &d).unwrap();
+        let out = String::from_utf8_lossy(&o.stdout);
+        let dir = out.rsplit("MARK:").next().unwrap().trim();
+        assert!(out.contains("hi") && o.status.success(), "{out}");
+        assert_eq!(std::path::Path::new(dir).canonicalize().unwrap(), d.parent().unwrap().canonicalize().unwrap());
     }
 
     #[test]

@@ -586,10 +586,11 @@ mod cwd_tests {
         let (mut s1, mut s2) = (root.clone(), root.clone());
         let out = bash(&mut s1, &json!({"cmd": "cd a && mkdir -p c && cd c"})).unwrap();
         assert!(out.contains("cwd is now"), "{out}");
-        assert_eq!(s1, root.join("a/c"));
+        assert_eq!(s1.canonicalize().unwrap(), root.join("a/c").canonicalize().unwrap());
         assert_eq!(s2, root, "another session's folder must not move");
         let out = bash(&mut s2, &json!({"cmd": "pwd"})).unwrap();
-        assert!(out.contains(&root.display().to_string()) && !out.contains("QHCWD"), "{out}");
+        let norm = |x: &str| x.replace('\\', "/").to_lowercase();
+        assert!(norm(&out).contains(&norm(&root.display().to_string())) && !out.contains("QHCWD"), "{out}");
         write_file(&s1, &json!({"path": "f.txt", "content": "x"})).unwrap();
         assert!(root.join("a/c/f.txt").exists());
     }

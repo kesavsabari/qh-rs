@@ -270,5 +270,13 @@ pub fn info(provider: &str, model: &str) -> Option<ModelInfo> {
 pub fn test(name: &str) -> Result<usize, String> {
     let p = get(name).ok_or_else(|| format!("no provider {name}"))?;
     cache().lock().unwrap_or_else(|e| e.into_inner()).remove(&p.name);
+    // OpenRouter lists models without a key, so the list proves nothing: ask about the key itself
+    if p.name == "openrouter" {
+        let r = crate::backend::http().get(&format!("{}/key", p.base.trim_end_matches('/')))
+            .set("Authorization", &format!("Bearer {}", p.key)).timeout(std::time::Duration::from_secs(10)).call();
+        if let Err(e) = r {
+            return Err(match e { ureq::Error::Status(c, _) => format!("key rejected (HTTP {c})"), e => e.to_string() });
+        }
+    }
     models(&p).map(|m| m.len())
 }

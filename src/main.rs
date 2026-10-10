@@ -12,6 +12,7 @@ mod hub;
 mod prompt;
 mod providers;
 mod session;
+mod setup;
 mod skills;
 mod textcall;
 mod tier;
@@ -23,6 +24,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 const USAGE: &str = "qh [--resume [id|latest]] [--profile coding|general|all] [--model NAME|provider:MODEL] [--think] [--mode ask|auto-edit|auto|plan]
+qh setup                connect a model (local Ollama or a cloud API key)
 qh login <provider>     save an API key (openrouter, ollama-cloud, openai, groq, anthropic…)
 qh -p \"prompt\" [-p \"next turn\" ...] [-y] [--ctx N] [--stats FILE]
     run prompts as turns of one session without the UI and print the replies
@@ -99,7 +101,17 @@ fn main() {
         let name = std::env::args().nth(2).unwrap_or_default();
         std::process::exit(if name.is_empty() { eprintln!("usage: qh login <provider>"); 2 } else { login(&name) });
     }
+    if std::env::args().nth(1).as_deref() == Some("setup") {
+        providers::init(&config::load());
+        std::process::exit(if setup::run() { 0 } else { 1 });
+    }
     let args = parse();
+    if args.print.is_empty() && setup::needed() && std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        providers::init(&config::load());
+        if !setup::run() {
+            std::process::exit(1);
+        }
+    }
     let mut cfg = config::load();
     providers::init(&cfg);
     // no ctx in config: size the window to what the GPU can hold

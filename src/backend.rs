@@ -333,6 +333,27 @@ pub fn anthropic(base: &str, key: &str, model: &str, messages: &[Value], tools: 
 #[allow(clippy::too_many_arguments)]
 pub fn chat(p: &Provider, model: &str, messages: &[Value], tools: &[Value], think: bool, ctx: usize,
             keep_alive: &str, on: &mut dyn FnMut(bool, &str) -> bool) -> Result<Reply, Error> {
+    chat_raw(p, model, messages, tools, think, ctx, keep_alive, on).map_err(|e| explain(p, e))
+}
+
+/// Turn the errors a newcomer will actually hit into what to do about them.
+fn explain(p: &Provider, e: Error) -> Error {
+    let n = &p.name;
+    match &e {
+        Error::Other(m) if !p.local && (m.starts_with("HTTP 401") || m.starts_with("HTTP 403")) => Error::Other(format!(
+            "{n} rejected the API key ({}). Fix it with `qh login {n}` (or /provider add {n}), or pick another model with /model.",
+            &m[..8])),
+        Error::Other(m) if m.starts_with("HTTP 402") => Error::Other(format!(
+            "{n} says the account is out of credit (HTTP 402). Top it up, or pick a free/local model with /model.")),
+        Error::Connect(m) if p.local && p.kind == Kind::Ollama => Error::Connect(format!(
+            "{m}. Ollama isn't answering at {}: start it (`ollama serve` or the Ollama app), or run `qh setup`.", p.base)),
+        _ => e,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn chat_raw(p: &Provider, model: &str, messages: &[Value], tools: &[Value], think: bool, ctx: usize,
+            keep_alive: &str, on: &mut dyn FnMut(bool, &str) -> bool) -> Result<Reply, Error> {
     if !p.local && p.key.is_empty() {
         return Err(Error::Other(format!("no key for {}: run /provider add {} (or qh login {})", p.name, p.name, p.name)));
     }

@@ -78,7 +78,7 @@
   <p>Go to a project folder and type <code>qh</code>. The first time, a setup screen asks which models you want. Move with <kbd>↑</kbd> <kbd>↓</kbd>, tick with <kbd>Space</kbd>, continue with <kbd>Enter</kbd>. You can tick several.</p>
   <table>
     <tr><th>Choice</th><th>What you need</th><th>Good for</th></tr>
-    <tr><td>Local models (Ollama)</td><td>The free <a href="https://ollama.com/download">Ollama</a> app and a GPU with about 7&nbsp;GB of memory</td><td>Private, free, offline</td></tr>
+    <tr><td>Local models (Ollama)</td><td>The free <a href="https://ollama.com/download">Ollama</a> app and a GPU (about 8&nbsp;GB for the recommended model; less works with a smaller context)</td><td>Private, free, offline</td></tr>
     <tr><td>Ollama cloud</td><td>The Ollama app and a free ollama.com account</td><td>Big models without a big GPU</td></tr>
     <tr><td>ChatGPT Plus/Pro</td><td>A ChatGPT subscription</td><td>Using the plan you already pay for</td></tr>
     <tr><td>OpenRouter, Groq, OpenAI, Anthropic, DeepSeek, Mistral</td><td>An API key from that site</td><td>Pay-per-use or free-tier cloud models</td></tr>
@@ -205,7 +205,7 @@ what does src/engine.rs do?</code></pre>
   <h2>Start a team</h2>
   <ol class="steps">
     <li><b>You</b>, in the project folder: type <code>/team create</code> in qh (or <code>qh team create</code> in a terminal). Answer two questions: who can see the code (private or public), and your friends' GitHub usernames. Check the summary and say yes. qh puts the folder on GitHub if it isn't there, keeps secret files like <code>.env</code> out, and invites your friends.</li>
-    <li><b>Send your friend</b> the line qh prints, for example <code>qh join kesavsabari/webshop</code>.</li>
+    <li><b>Send your friend</b> the line qh prints, for example <code>qh join you/webshop</code>.</li>
     <li><b>Your friend</b> runs it. qh accepts the GitHub invite, downloads the project, and turns team mode on. Then <code>cd webshop</code> and <code>qh</code>.</li>
   </ol>
   <p>From then on, just run <code>qh</code> in the project: team mode comes back on by itself. If the project is already on GitHub and your friends already have access, each of you just types <code>/team on</code> once.</p>
@@ -214,13 +214,13 @@ what does src/engine.rs do?</code></pre>
 
 <section id="team-use">
   <h2>See and message teammates</h2>
-  <p>The status bar shows who's online, like <code>👥 kesav · rahul ● · anu ○ 2h ago</code>. Notes appear when someone joins or leaves.</p>
+  <p>The status bar shows who's online, like <code>👥 you · alex ● · sam ○ 2h ago</code>. Notes appear when someone joins or leaves.</p>
   <p>Type <code>/team</code> for a list of everyone's sessions. Pick one to:</p>
   <ul>
     <li><b>read</b> it: its recent conversation, read-only;</li>
     <li><b>write</b> into it: your message goes to that session on their computer.</li>
   </ul>
-  <p>Or type directly: <code>/team open rahul api</code> and <code>/team send rahul api add rate limiting to login</code>.</p>
+  <p>Or type directly: <code>/team open alex api</code> and <code>/team send alex api add rate limiting to login</code>.</p>
   <p>When a teammate writes into one of your sessions, you're asked first: <b>allow once</b>, <b>always allow</b> that person, or <b>deny</b>. The message waits until you answer, and waits for you if you're offline.</p>
 </section>
 

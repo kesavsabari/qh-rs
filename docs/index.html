@@ -135,7 +135,7 @@
       <div class="rate-num"><span class="num-strip dim">≈ 14,000</span></div>
     </div>
   </div>
-    <p class="fine">qh measured 2026-10-10 on <code>qwen3.5:9b</code> (RTX 4060 laptop GPU, Ollama), "hi" in an empty folder, reply included. Your numbers will vary with model, tools and project size.</p>
+    <p class="fine">qh measured 2026-10-10 on <code>qwen3.5:9b</code> (a laptop with an 8 GB NVIDIA GPU, Ollama), "hi" in an empty folder, reply included. Your numbers will vary with model, tools and project size.</p>
   </div>
   </div>
 </section>
@@ -156,7 +156,7 @@
       <tr><td>OpenCode</td><td class="n">178 MB</td><td class="n">697 MB</td></tr>
     </tbody>
   </table>
-  <p id="weight-note" class="fine ledger-note">Measured 2026-10-09 on one Linux laptop: Claude Code 2.1.292, Codex 0.161.0, OpenCode 1.18.35. Install size is the files on disk; memory is the TUI open and idle in tmux, two runs. Each tool does different things; this is weight, not capability.</p>
+  <p id="weight-note" class="fine ledger-note">Measured 2026-10-09 on a Linux laptop: Claude Code 2.1.292, Codex 0.161.0, OpenCode 1.18.35. Install size is the files on disk; memory is the TUI open and idle in tmux, two runs. Each tool does different things; this is weight, not capability.</p>
   </div>
   <div class="split-visual">
   <h3 class="sub">Why it stays light</h3>
@@ -206,7 +206,7 @@
 
 </section>
 
-<div class="band band-brass"><p class="band-line">Four agents. One 8&nbsp;GB GPU.</p><div class="band-side"><span class="band-keys"><kbd>Ctrl</kbd><kbd>G</kbd></span><span>opens the 2×2 grid</span></div></div>
+<div class="band band-brass"><p class="band-line">Four agents. One GPU.</p><div class="band-side"><span class="band-keys"><kbd>Ctrl</kbd><kbd>G</kbd></span><span>opens the 2×2 grid</span></div></div>
 
 <section id="kit" class="kit" aria-labelledby="kit-title">
   <h2 id="kit-title" class="strip strip-section">What's wired in</h2>
@@ -245,7 +245,7 @@
       <tr><td>All 18 tasks, two full runs in a row</td><td class="n hi"><span class="num-strip red">96%</span></td></tr>
     </tbody>
   </table>
-  <p id="ledger-note" class="fine ledger-note">Pass rate on all 18 tasks × 3 runs, <code>qwen3.5:9b</code>, self-measured on one machine.</p>
+  <p id="ledger-note" class="fine ledger-note">Pass rate on all 18 tasks × 3 runs, <code>qwen3.5:9b</code>, measured on one laptop; your results will vary with model and hardware.</p>
   </div>
   <div class="split-visual">
   <h3 class="sub">What moved the number</h3>
@@ -302,7 +302,7 @@
   </div>
   <figure class="shot">
     <img src="img/qh-map.webp" width="2454" height="1445" loading="lazy" decoding="async"
-         alt="qh's map view: nodes for main, tests, docs and web with their status and model; lines from main and docs to the folder /tmp/cart-demo, marked in red as shared.">
+         alt="qh's map view: nodes for main, tests, docs and web with their status and model; lines from main and docs to the project folder, marked in red as shared.">
     <figcaption>main and docs both wrote to the project folder, so the map flags it as shared.</figcaption>
   </figure>
   </div>
@@ -315,7 +315,7 @@
   <p class="section-lede">Work on one project with friends, each on your own computer. See who's online, what their agents are doing, read their sessions and send work into them. No server and no sign-up: the project's GitHub repo is the switchboard, and everyone who can push to it is on the team.</p>
   <ul class="rules-list compact">
     <li><strong>Start in one line.</strong> <code>/team create</code> puts the folder on GitHub (private by default, secrets like <code>.env</code> left out) and invites friends by username. They run <code>qh join you/project</code>.</li>
-    <li><strong>See the board.</strong> The status bar shows <code>👥 you · rahul ● · anu ○ 2h ago</code>; notes appear when someone joins or leaves; <code>/team</code> lists everyone's sessions.</li>
+    <li><strong>See the board.</strong> The status bar shows <code>👥 you · alex ● · sam ○ 2h ago</code>; notes appear when someone joins or leaves; <code>/team</code> lists everyone's sessions.</li>
     <li><strong>Read and write.</strong> Open a teammate's session to follow along, or send a message into it. It runs on their machine only after they allow it, and they approve every edit it leads to.</li>
     <li><strong>Encrypted.</strong> Sessions, messages and file names are sealed with a key only the team holds, so even a public repo shows outsiders nothing but noise.</li>
     <li><strong>Picks up where you left off.</strong> Next day, <code>qh</code> in the project reconnects by itself.</li>
@@ -355,7 +355,7 @@
     <dl>
       <div><dt>Models</dt><dd><a href="https://ollama.com">Ollama</a> (local or cloud), a ChatGPT plan, or an API key</dd></div>
       <div><dt>Tested on</dt><dd><code>qwen3.5:9b</code></dd></div>
-      <div><dt>GPU</dt><dd>for local models: about 8 GB of VRAM for a 9B model at 32k; none for cloud</dd></div>
+      <div><dt>GPU</dt><dd>for local models: a GPU (about 8 GB for a 7–9B model); none for cloud models</dd></div>
       <div><dt>Team mode</dt><dd>git and a GitHub account</dd></div>
       <div><dt>Browser</dt><dd>optional: Chromium, Chrome or Brave already installed</dd></div>
       <div><dt>OS</dt><dd>Windows, macOS and Linux, native</dd></div>
@@ -366,7 +366,7 @@
 </section>
 <section id="faq" class="faq" aria-labelledby="faq-title">
   <h2 id="faq-title" class="strip strip-section">Operator, a question</h2>
-  <div class="faq-list"><details><summary>Which models work?</summary><p>Ollama models (local, or Ollama's cloud after <code>ollama signin</code>), your ChatGPT Plus/Pro plan, OpenRouter, OpenAI, Anthropic, Groq, DeepSeek, Mistral, the GLM, Kimi and MiniMax coding plans, LM Studio, llama.cpp and anything OpenAI-compatible. It's tuned and tested on qwen3.5:9b; each tab can use a different model.</p></details><details><summary>How much GPU do I need?</summary><p>qwen3.5:9b with a 32k context fits in about 6 GB, so an 8 GB card runs it fully on the GPU.</p></details><details><summary>Does anything leave my machine?</summary><p>Not with a local model. qh talks to Ollama on localhost. Only web_fetch and the browser tools reach the internet, and only when the model calls them. If you pick a cloud model, that tab's conversation goes to the provider. In team mode, what you share is encrypted so only your team can read it.</p></details><details><summary>Does it work on Windows?</summary><p>Yes, natively. Install with one PowerShell line. Commands run in Git Bash if you have it, otherwise PowerShell.</p></details><details><summary>Can strangers join my team?</summary><p>No. Only people with push access to the project's GitHub repo can take part, and a message into your session never runs until you allow it.</p></details><details><summary>Can several sessions run at once?</summary><p>Yes, as many tabs as you like, four side by side in the grid. Local sessions share one GPU and take turns; cloud sessions run at the same time.</p></details><details><summary>Why Rust?</summary><p>One 5 MB file to install, a few megabytes of memory, and a UI that stays fast with fifty sessions open, so the GPU and RAM go to the model. The numbers are in "Light on the line" above.</p></details><details><summary>Is it free?</summary><p>Yes. qh is open source under the MIT license. You pay only for any cloud model you choose to use.</p></details></div>
+  <div class="faq-list"><details><summary>Which models work?</summary><p>Ollama models (local, or Ollama's cloud after <code>ollama signin</code>), your ChatGPT Plus/Pro plan, OpenRouter, OpenAI, Anthropic, Groq, DeepSeek, Mistral, the GLM, Kimi and MiniMax coding plans, LM Studio, llama.cpp and anything OpenAI-compatible. It's tuned and tested on qwen3.5:9b; each tab can use a different model.</p></details><details><summary>How much GPU do I need?</summary><p>None, if you use cloud models or your ChatGPT plan. For local models qh sizes the context to whatever GPU you have: about 8 GB runs a 7–9B model like qwen3.5:9b with a 32k context; more memory fits bigger models or longer contexts; smaller cards still work with a shorter context. <code>/tier</code> shows what it picked.</p></details><details><summary>Does anything leave my machine?</summary><p>Not with a local model. qh talks to Ollama on localhost. Only web_fetch and the browser tools reach the internet, and only when the model calls them. If you pick a cloud model, that tab's conversation goes to the provider. In team mode, what you share is encrypted so only your team can read it.</p></details><details><summary>Does it work on Windows?</summary><p>Yes, natively. Install with one PowerShell line. Commands run in Git Bash if you have it, otherwise PowerShell.</p></details><details><summary>Can strangers join my team?</summary><p>No. Only people with push access to the project's GitHub repo can take part, and a message into your session never runs until you allow it.</p></details><details><summary>Can several sessions run at once?</summary><p>Yes, as many tabs as you like, four side by side in the grid. Local sessions share one GPU and take turns; cloud sessions run at the same time.</p></details><details><summary>Why Rust?</summary><p>One 5 MB file to install, a few megabytes of memory, and a UI that stays fast with fifty sessions open, so the GPU and RAM go to the model. The numbers are in "Light on the line" above.</p></details><details><summary>Is it free?</summary><p>Yes. qh is open source under the MIT license. You pay only for any cloud model you choose to use.</p></details></div>
 </section>
 
 </main>

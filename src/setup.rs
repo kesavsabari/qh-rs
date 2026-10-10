@@ -100,7 +100,7 @@ fn cloud() -> Option<(Vec<String>, String)> {
     let opts: Vec<(&str, &str)> = vec![
         ("openrouter", "one key, hundreds of models, some free — https://openrouter.ai/keys"),
         ("groq", "very fast, free tier — https://console.groq.com/keys"),
-        ("ollama-cloud", "Ollama's hosted models — https://ollama.com/settings/keys"),
+        ("ollama-cloud", "Ollama's hosted models by API key (with the Ollama app, sign-in is easier) — https://ollama.com/settings/keys"),
         ("openai", "https://platform.openai.com/api-keys"),
         ("anthropic", "https://console.anthropic.com/settings/keys"),
         ("deepseek", "https://platform.deepseek.com/api_keys"),
@@ -126,13 +126,33 @@ fn cloud() -> Option<(Vec<String>, String)> {
     }
     let all: Vec<String> = providers::get(name).and_then(|p| providers::models(&p).ok())
         .map(|v| v.into_iter().map(|m| m.id).collect()).unwrap_or_default();
-    let model = loop {
+    Some((vec![], providers::display(name, &search(&all))))
+}
+
+fn search(all: &[String]) -> String {
+    loop {
         let q = ask("Search models (e.g. qwen, coder, llama; Enter for all): ").to_lowercase();
         let hits: Vec<String> = all.iter().filter(|m| m.to_lowercase().contains(&q)).take(20).cloned().collect();
         if hits.is_empty() { println!("  nothing matches"); continue }
-        if let Some(i) = choose("Model [number, Enter to search again]: ", &hits) { break hits[i].clone() }
-    };
-    Some((vec![], providers::display(name, &model)))
+        if let Some(i) = choose("Model [number, Enter to search again]: ", &hits) { return hits[i].clone() }
+    }
+}
+
+/// Ollama's own cloud: the local app signs in to ollama.com (browser login, no API key) and then
+/// runs `…-cloud` models on their servers, so a laptop without a big GPU gets big models.
+fn ollama_cloud(host: &str) -> Option<Vec<String>> {
+    println!("Cloud models run on ollama.com through your Ollama app: no API key, just an ollama.com account (free tier).");
+    match std::process::Command::new("ollama").arg("signin").status() {
+        Ok(s) if s.success() => println!("✓ signed in"),
+        Ok(_) => println!("(sign-in didn't finish; you can also sign in from the Ollama app's settings)"),
+        Err(_) => println!("Sign in from the Ollama app (Settings → sign in), then come back here."),
+    }
+    let all: Vec<String> = crate::backend::list_models(host).into_iter().filter(|m| crate::backend::is_cloud(m)).collect();
+    if all.is_empty() {
+        println!("Couldn't load the cloud model list from ollama.com; check your internet and run `qh setup` again.");
+        return None;
+    }
+    Some(vec![format!("host = \"{host}\""), format!("model = \"{}\"", search(&all))])
 }
 
 /// Interactive setup. Returns false if the user backed out without a working model.
@@ -141,13 +161,18 @@ pub fn run() -> bool {
     let host = crate::config::load().host;
     let has_ollama = local_models(&host).is_some();
     let mut choices = vec![];
-    if has_ollama { choices.push("Local model with Ollama (private, free, uses your GPU)".to_string()) }
+    if has_ollama {
+        choices.push("Local model with Ollama (private, free, uses your GPU)".to_string());
+        choices.push("Ollama cloud models (sign in to ollama.com, no API key, no GPU needed)".to_string());
+    }
     choices.push("Cloud model with an API key (no GPU needed)".to_string());
     if !has_ollama { choices.push("I want local models: how do I install Ollama?".to_string()) }
     let Some(i) = choose("How do you want to run models? [number]: ", &choices) else { return false };
     let pick = &choices[i];
     let (lines, default) = if pick.starts_with("Local") {
         match local(&host) { Some(l) => (l, String::new()), None => return false }
+    } else if pick.starts_with("Ollama cloud") {
+        match ollama_cloud(&host) { Some(l) => (l, String::new()), None => return false }
     } else if pick.starts_with("Cloud") {
         match cloud() { Some(x) => x, None => return false }
     } else {

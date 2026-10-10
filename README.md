@@ -30,6 +30,9 @@ Go to a project folder and type `qh`. On first start it asks how you want to run
   <https://ollama.com/download> (on Windows: `winget install Ollama.Ollama`) and start it.
   Setup lists your models and can download `qwen3.5:9b`, the model qh is tuned on. That
   model needs about 7 GB of GPU memory.
+- **Ollama cloud.** This needs the Ollama app but no big GPU and no API key: setup runs
+  `ollama signin`, which opens your browser to log in to ollama.com (there's a free tier), then
+  lets you pick a `…-cloud` model, which runs on their servers.
 - **Cloud (API key).** No GPU is needed. Pick a provider, paste your key, and setup tests it
   and lets you search for a model. [OpenRouter](https://openrouter.ai/keys) is the easiest
   start: one key covers hundreds of models, and some of them are free.

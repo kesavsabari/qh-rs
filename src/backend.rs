@@ -343,6 +343,8 @@ fn explain(p: &Provider, e: Error) -> Error {
         Error::Other(m) if !p.local && (m.starts_with("HTTP 401") || m.starts_with("HTTP 403")) => Error::Other(format!(
             "{n} rejected the API key ({}). Fix it with `qh login {n}` (or /provider add {n}), or pick another model with /model.",
             &m[..8])),
+        Error::Other(m) if p.local && p.kind == Kind::Ollama && m.starts_with("HTTP 401") => Error::Other(
+            "Ollama isn't signed in to ollama.com, which cloud models need: run `ollama signin` (or sign in from the Ollama app).".into()),
         Error::Other(m) if m.starts_with("HTTP 402") => Error::Other(format!(
             "{n} says the account is out of credit (HTTP 402). Top it up, or pick a free/local model with /model.")),
         Error::Connect(m) if p.local && p.kind == Kind::Ollama => Error::Connect(format!(

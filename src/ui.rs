@@ -55,7 +55,7 @@ const COMMANDS: [(&str, &str); 29] = [
     ("/role", "give this tab a role"), ("/map", "map of sessions and messages"), ("/layout", "tabs or grid"),
     ("/msg", "message another tab"), ("/sessions", "saved sessions"), ("/allow", "auto-approve rules"),
     ("/release", "let held messages through"), ("/pause", "hold automatic messaging"), ("/resume", "resume messaging"),
-    ("/mcp", "MCP servers"), ("/team", "who's online in this repo · on · off"), ("/commands", "your own /commands"), ("/help", "everything"),
+    ("/mcp", "MCP servers"), ("/team", "your team: who's online, read or write their sessions"), ("/commands", "your own /commands"), ("/help", "everything"),
     ("/cd", "same as /cwd"), ("/providers", "same as /provider"),
 ];
 
@@ -1041,7 +1041,66 @@ impl App {
                     crate::team::stop();
                     self.note(&a, "team presence off (teammates see you go offline)");
                 }
-                _ => self.note(&a, crate::team::report()),
+                "status" => self.note(&a, crate::team::report()),
+                _ if arg.starts_with("open ") => {
+                    let mut w = arg[5..].split_whitespace();
+                    match (w.next(), w.next()) {
+                        (Some(who), Some(s)) => match crate::team::transcript(who, s) {
+                            Ok(t) => self.note(&a, t),
+                            Err(e) => self.err(&a, e),
+                        },
+                        _ => self.err(&a, "usage: /team open <who> <session>"),
+                    }
+                }
+                _ if arg.starts_with("send ") => {
+                    let mut w = arg[5..].splitn(3, ' ');
+                    match (w.next(), w.next(), w.next()) {
+                        (Some(who), Some(s), Some(text)) if !text.trim().is_empty() => match crate::team::send(who, s, text.trim()) {
+                            Ok(m) => self.note(&a, m),
+                            Err(e) => self.err(&a, e),
+                        },
+                        (Some(who), Some(s), _) => {
+                            // picked from the list: put the command in the input box to type the message
+                            self.input = format!("/team send {who} {s} ").chars().collect();
+                            self.cur = self.input.len();
+                        }
+                        _ => self.err(&a, "usage: /team send <who> <session> <text>"),
+                    }
+                }
+                _ if arg.starts_with("answer ") => {
+                    let w: Vec<&str> = arg.split_whitespace().collect();
+                    let (Some(from), Some(id), Some(ans)) = (w.get(1), w.get(2).and_then(|x| x.parse::<u64>().ok()), w.get(3)) else {
+                        return self.err(&a, "usage: /team answer <who> <id> once|always|deny");
+                    };
+                    match crate::team::decide(from, id, ans) {
+                        Some((session, text)) => {
+                            let to = if self.hub.get(&session).is_some() { session } else { a.clone() };
+                            self.hub.send(&to, &text, "user", 0, None);
+                            self.note(&a, format!("delivered to {to}{}", if *ans == "always" { format!("; {from}'s messages now go straight in") } else { String::new() }));
+                        }
+                        None if *ans == "deny" => self.note(&a, format!("denied {from}'s message")),
+                        None => self.err(&a, "that message isn't waiting any more"),
+                    }
+                }
+                _ => {
+                    if !crate::team::running() {
+                        return self.note(&a, crate::team::report());
+                    }
+                    // waiting messages first, then everyone's sessions
+                    let mut all: Vec<(String, String, String)> = vec![];
+                    for i in crate::team::pending() {
+                        let g = format!("✉ {} → your {}: {}", i.from, i.session, clip(&i.text, 50));
+                        all.push((format!("answer {} {} once", i.from, i.id), "allow once".into(), g.clone()));
+                        all.push((format!("answer {} {} always", i.from, i.id), format!("always allow {}", i.from), g.clone()));
+                        all.push((format!("answer {} {} deny", i.from, i.id), "deny".into(), g));
+                    }
+                    for (who, s, label) in crate::team::sessions() {
+                        all.push((format!("open {who} {s}"), format!("read  {label}"), who.clone()));
+                        all.push((format!("send {who} {s}"), format!("write {s}"), who));
+                    }
+                    all.push(("status".into(), "who's online, sessions, files".into(), "team".into()));
+                    self.picker = Some(Picker { title: "team", cmd: "/team".into(), all, filter: String::new(), sel: 0, cur: String::new() });
+                }
             },
             "/commands" => {
                 let list = custom_commands(&m.cwd());
@@ -1272,14 +1331,35 @@ $ARGUMENTS is replaced by what you type after the command".into()
     /// Share this hub's sessions as presence on the active tab's repo.
     fn start_team(&self) -> Result<String, String> {
         let cwd = self.hub.get(&self.active).map(|m| m.cwd()).unwrap_or_default();
-        let (hub, hub2, a) = (self.hub.clone(), self.hub.clone(), self.active.clone());
+        let (hub, a) = (self.hub.clone(), self.active.clone());
         let summary = Box::new(move || {
-            let sessions: Vec<Value> = lock(&hub.members).iter().map(|m| serde_json::json!({
+            let members = lock(&hub.members).clone();
+            let sessions: Vec<Value> = members.iter().map(|m| serde_json::json!({
                 "name": m.name, "status": m.status(), "role": lock(&m.purpose).clone()})).collect();
-            serde_json::json!({"sessions": sessions, "files": hub.claimed_files()})
+            // the recent conversation of each session, text only, so teammates can follow along
+            let mut transcripts = serde_json::Map::new();
+            for m in &members {
+                let msgs = lock(&m.msgs);
+                let rows: Vec<Value> = msgs.iter().filter(|x| matches!(context::role(x), "user" | "assistant"))
+                    .filter(|x| !context::content(x).trim().is_empty())
+                    .rev().take(30).collect::<Vec<_>>().into_iter().rev()
+                    .map(|x| serde_json::json!([context::role(x), context::content(x).chars().take(1500).collect::<String>()])).collect();
+                transcripts.insert(m.name.clone(), rows.into());
+            }
+            serde_json::json!({"sessions": sessions, "files": hub.claimed_files(), "transcripts": transcripts})
         });
-        let say = Box::new(move |s: String| hub2.emit(&a, Event::Notice(s)));
-        crate::team::start(&cwd, summary, say)
+        let (h1, h2, h3, h4, a1, a2) = (self.hub.clone(), self.hub.clone(), self.hub.clone(), self.hub.clone(), a.clone(), a.clone());
+        let hooks = crate::team::Hooks {
+            say: Box::new(move |s: String| h1.emit(&a1, Event::Notice(s))),
+            deliver: Box::new(move |session: &str, text: &str| {
+                let to = if h2.get(session).is_some() { session.to_string() } else { h2.names().first().cloned().unwrap_or_default() };
+                h2.send(&to, text, "user", 0, None);
+            }),
+            ask: Box::new(move |i: &crate::team::Incoming| h3.emit(&a2, Event::Notice(format!(
+                "✉ {} wants to send to your {}: \"{}\" · /team to allow or deny", i.from, i.session, i.text)))),
+            refresh: Box::new(move || h4.emit("", Event::Changed)),
+        };
+        crate::team::start(&cwd, summary, hooks)
     }
 
     fn status_line(&self) -> String {

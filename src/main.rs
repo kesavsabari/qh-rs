@@ -17,6 +17,8 @@ mod session;
 mod setup;
 mod skills;
 mod team;
+mod teamcrypto;
+mod teamsetup;
 mod textcall;
 mod tier;
 mod tools;
@@ -28,6 +30,7 @@ use std::path::PathBuf;
 
 const USAGE: &str = "qh [--resume [id|latest]] [--profile coding|general|all] [--model NAME|provider:MODEL] [--think] [--mode ask|auto-edit|auto|plan]
 qh setup                connect a model (local Ollama or a cloud API key)
+qh team create [user…]  share this project on GitHub and invite friends · qh join owner/repo
 qh login chatgpt        sign in with your ChatGPT Plus/Pro plan (qh logout chatgpt)
 qh login <provider>     save an API key (openrouter, ollama-cloud, openai, groq, anthropic…)
 qh -p \"prompt\" [-p \"next turn\" ...] [-y] [--ctx N] [--stats FILE]
@@ -106,6 +109,12 @@ fn login(name: &str) -> i32 {
 }
 
 fn main() {
+    let argv: Vec<String> = std::env::args().collect();
+    match (argv.get(1).map(String::as_str), argv.get(2).map(String::as_str)) {
+        (Some("team"), Some("create")) => std::process::exit(teamsetup::create(&argv[3..])),
+        (Some("join"), Some(repo)) => std::process::exit(teamsetup::join(repo)),
+        _ => {}
+    }
     if std::env::args().nth(1).as_deref() == Some("logout") && std::env::args().nth(2).as_deref() == Some("chatgpt") {
         chatgpt::sign_out();
         println!("signed out of ChatGPT");

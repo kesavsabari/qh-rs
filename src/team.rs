@@ -560,8 +560,10 @@ pub fn status_line() -> Option<String> {
 pub fn report() -> String {
     let g = STATE.lock().unwrap();
     let Some(s) = g.as_ref().filter(|_| running()) else {
-        return "team mode is off. `/team on` in a repo whose remote is on GitHub shares your sessions (encrypted) \
-with everyone who can push to it.".into();
+        return "team mode is off.\n\
+  /team on      in a project that's already on GitHub: see and message everyone who can push to it\n\
+  /team create  put this folder on GitHub (private) and invite friends by GitHub username\n\
+Friends join with:  qh join <owner>/<repo>".into();
     };
     let mut out = format!("team {} · you are {}\n", s.repo, s.me);
     if s.key.is_none() {

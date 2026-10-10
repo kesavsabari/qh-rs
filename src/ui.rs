@@ -96,6 +96,7 @@ enum Item {
     User(String),
     Reply(String),
     Note(String),
+    Cmd(String), // a /command as typed, so its answer has context
     Err(String),
     Tool { title: String, args: String, result: String, open: bool },
     Stat(String),
@@ -150,6 +151,7 @@ struct App {
     picker_rows: Option<(Rect, usize)>, // list area and the first visible row's index
     quit: bool,
     sugg_sel: usize, // highlighted row of the / autocomplete
+    outside: Option<Vec<String>>, // a terminal step to run with the UI suspended (team create)
 }
 
 /// Popup list (`/model`, `/provider`): type to filter, arrows to move, Enter runs `cmd value`.
@@ -241,7 +243,7 @@ pub fn run(hub: Arc<Hub>, tx: Sender<Ui>, rx: Receiver<Ui>) -> std::io::Result<(
         hub: hub.clone(), views: HashMap::new(), active: String::new(), grid: false, recent: vec![],
         log: VecDeque::new(), show_log: false, input: vec![], cur: 0, hist: vec![], hist_i: 0,
         confirms: VecDeque::new(), picker: None, secret: None, map: None,
-        tab_hits: vec![], body: Rect::default(), picker_rows: None, quit: false, sugg_sel: 0,
+        tab_hits: vec![], body: Rect::default(), picker_rows: None, quit: false, sugg_sel: 0, outside: None,
     };
     for n in hub.names() {
         app.load_view(&n);
@@ -279,6 +281,30 @@ pub fn run(hub: Arc<Hub>, tx: Sender<Ui>, rx: Receiver<Ui>) -> std::io::Result<(
             match if left.is_zero() { rx.try_recv().map_err(|_| ()) } else { rx.recv_timeout(left).map_err(|_| ()) } {
                 Ok(x) => app.handle(x),
                 Err(()) => break,
+            }
+        }
+        if let Some(friends) = app.outside.take() {
+            // hand the terminal to the guided team setup, then take it back
+            let _ = execute!(std::io::stdout(), event::DisableBracketedPaste, event::DisableMouseCapture);
+            ratatui::restore();
+            let cwd = app.hub.get(&app.active).map(|m| m.cwd()).unwrap_or_default();
+            let prev = std::env::current_dir().ok();
+            let _ = std::env::set_current_dir(&cwd);
+            println!("\n— qh team setup —\n");
+            let ok = crate::teamsetup::create(&friends) == 0;
+            if let Some(p) = prev { let _ = std::env::set_current_dir(p); }
+            println!("\nPress Enter to go back to qh.");
+            let _ = std::io::stdin().read_line(&mut String::new());
+            term = ratatui::init();
+            let _ = execute!(std::io::stdout(), event::EnableBracketedPaste);
+            if app.hub.cfg.mouse { let _ = execute!(std::io::stdout(), event::EnableMouseCapture); }
+            let _ = term.clear();
+            let a = app.active.clone();
+            if ok && !crate::team::running() {
+                match app.start_team() {
+                    Ok(s) => app.note(&a, s),
+                    Err(e) => app.err(&a, format!("team mode: {e}")),
+                }
             }
         }
         if app.quit {
@@ -694,7 +720,7 @@ impl App {
                 }
                 let msg = match crate::providers::set_key(&name, &key).and_then(|_| crate::providers::test(&name)) {
                     Ok(n) => format!("✓ {name}: key saved (chmod 600), {n} models available. /model {name} to pick one"),
-                    Err(e) => format!("✗ {name}: key saved but the test call failed: {e}"),
+                    Err(e) => { let _ = crate::providers::remove_key(&name); format!("✗ {name}: {e} (not saved)") }
                 };
                 self.note(&a, msg);
             }
@@ -710,6 +736,12 @@ impl App {
                 let a = self.active.clone();
                 self.view(&a).scroll = 0;
                 if line.starts_with('/') {
+                    // never echo an API key typed inline
+                    let shown = match line.split_whitespace().collect::<Vec<_>>().as_slice() {
+                        ["/provider" | "/providers", "add", name, _key, ..] => format!("/provider add {name} ••••••"),
+                        _ => line.clone(),
+                    };
+                    self.view(&a).push(Item::Cmd(shown));
                     self.command(&line);
                 } else {
                     self.send(&line);
@@ -1032,10 +1064,16 @@ impl App {
             }
             "/mcp" => self.note(&a, crate::mcp::status()),
             "/team" => match arg {
+                "on" if crate::team::github_repo(&m.cwd()).is_none() => self.note(&a,
+                    "This folder isn't on GitHub yet, so there's nowhere to meet your team.\n\
+Type /team create to put it on GitHub (private) and invite friends by their GitHub username."),
                 "on" => match self.start_team() {
                     Ok(s) => self.note(&a, s),
                     Err(e) => self.err(&a, e),
                 },
+                _ if arg == "create" || arg.starts_with("create ") => {
+                    self.outside = Some(arg.split_whitespace().skip(1).map(String::from).collect());
+                }
                 "off" => {
                     if let Some((_, repo)) = crate::team::github_repo(&m.cwd()) { crate::team::remember(&repo, false) }
                     crate::team::stop();
@@ -1116,7 +1154,6 @@ $ARGUMENTS is replaced by what you type after the command".into()
                     let body = std::fs::read_to_string(&path).unwrap_or_default();
                     let text = if body.contains("$ARGUMENTS") { body.replace("$ARGUMENTS", arg) }
                                else if arg.is_empty() { body } else { format!("{body}\n\n{arg}") };
-                    self.view(&a).push(Item::User(line.into()));
                     self.hub.send(&a, &expand_mentions(text.trim()), "user", 0, None);
                 }
                 None => self.err(&a, format!("unknown command {cmd}, try /help or /commands")),
@@ -1468,6 +1505,7 @@ fn item_lines(it: &Item, w: usize, need: usize) -> Vec<Line<'static>> {
             rows.into_iter().rev().flatten().collect()
         }
         Item::Note(s) => styled(s, Style::new().fg(Color::Blue), 0),
+        Item::Cmd(s) => styled(&format!("› {s}"), Style::new().fg(ACCENT), 0),
         Item::Err(s) => styled(s, Style::new().fg(Color::Red), 0),
         Item::Stat(s) => styled(s, Style::new().fg(DIM), 0),
         Item::Tool { title, args, result, open } => {

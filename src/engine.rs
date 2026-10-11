@@ -44,6 +44,8 @@ fn wanted_file(user: &str) -> Option<String> {
 }
 
 // handing the job to another session counts as doing it
+/// The same call with the same result this many times in a turn ends the turn.
+const REPEAT_STOP: u32 = 5;
 const WRITERS: [&str; 7] = ["write_file", "edit_file", "rename_symbol", "bash", "send_message", "ask", "spawn"];
 
 /// A build or test command, as opposed to looking around.
@@ -65,6 +67,9 @@ fn turn(hub: &Arc<Hub>, m: &Arc<Member>, user: &str) -> Result<String, Error> {
     // code edited since the last build/test run, and whether we already asked for one
     let (mut unchecked, mut check_nudged) = (false, false);
     let mut stops = 0; // stop-hook refusals this turn, capped so a broken hook can't loop forever
+    // the same call with the same result, counted over the turn: a model going round in circles
+    let mut repeats: std::collections::HashMap<u64, u32> = Default::default();
+    let mut circling: Option<String> = None;
     loop {
         compact(hub, m, false)?;
         // what teammates' agents just changed, before this session builds on stale ideas
@@ -175,7 +180,32 @@ Run the project's build or test command now, fix what fails, then reply."}));
                 unchecked = false;
             }
             errors = if result.starts_with("error") { errors + 1 } else { 0 };
+            let n = {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                (name, args.to_string(), &result).hash(&mut h);
+                let n = repeats.entry(h.finish()).or_insert(0);
+                *n += 1;
+                *n
+            };
             m.push(msg);
+            if n == 3 {
+                circling = Some(format!("{name} {}", args.to_string().chars().take(80).collect::<String>()));
+            }
+            if n >= REPEAT_STOP {
+                let note = format!("stopped: the same {name} call gave the same result {n} times. Tell me how to proceed.");
+                hub.emit(&m.name, Event::Notice(note.clone()));
+                m.push(json!({"role": "assistant", "content": note}));
+                return Ok(note);
+            }
+        }
+        // the third identical call and result: say so once, before the next try
+        if let Some(c) = circling.take() {
+            hub.emit(&m.name, Event::Notice(format!("the model is repeating itself ({c}); told it to change approach")));
+            m.push(json!({"role": "user", "content": format!(
+                "[harness] You have now made this exact call three times and got the same result each time: {c}. \
+Repeating it won't change the outcome. Re-read the result, find out why it happens, and try a different approach; \
+if you're blocked, say what you need.")}));
         }
         if m.cancel.load(Relaxed) {
             return Err(Error::Cancelled);
@@ -454,25 +484,38 @@ fn call_locked(hub: &Arc<Hub>, m: &Arc<Member>, msgs: &[Value], schemas: &[Value
             // output, so nothing is shown twice
             Err(e) if attempt < 2 && first.is_none() && backend::transient(&e) && !m.cancel.load(Relaxed) => {
                 attempt += 1;
-                hub.emit(&m.name, Event::Notice(format!("{e}; retrying ({attempt}/2)")));
-                std::thread::sleep(std::time::Duration::from_secs(2 * attempt));
+                // a rate limit wants longer than a hiccup: the provider's Retry-After, else 5 s then 15 s
+                let wait = match &e {
+                    Error::Limited(_, w) => w.unwrap_or(if attempt == 1 { 5 } else { 15 }),
+                    _ => 2 * attempt,
+                };
+                hub.emit(&m.name, Event::Notice(format!("{e}; retrying in {wait} s ({attempt}/2)")));
+                // in steps, so Esc still stops it
+                for _ in 0..wait * 10 {
+                    if m.cancel.load(Relaxed) { break }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
             }
             r => break (r, t0, first),
         }
     };
     let r = match r {
-        Err(Error::Connect(_)) if !cfg.fallback_model.is_empty() => {
+        Err(ref e @ (Error::Connect(_) | Error::Limited(..))) if !cfg.fallback_model.is_empty() && !m.cancel.load(Relaxed) => {
+            let what = if matches!(e, Error::Limited(..)) { "is rate-limited" } else { "is unreachable" };
             let (fp, fm) = crate::providers::parse_model(&cfg.fallback_model);
             if (fp.as_str(), fm.as_str()) == (provider.as_str(), model.as_str()) {
-                return Err(Error::Other(format!("{} is unreachable", crate::providers::display(&provider, &model))));
+                return Err(Error::Other(format!("{} {what}", crate::providers::display(&provider, &model))));
             }
-            hub.emit(&m.name, Event::Notice(format!("{} unreachable, falling back to {}", prov.name, cfg.fallback_model)));
+            hub.emit(&m.name, Event::Notice(format!("{} {what}, falling back to {}", crate::providers::display(&provider, &model), cfg.fallback_model)));
             {
                 let mut s = lock(&m.set);
                 (s.provider, s.model) = (fp, fm);
             }
             return call_locked(hub, m, msgs, schemas, quiet);
         }
+        Err(Error::Limited(why, _)) => return Err(Error::Other(format!(
+            "{} is rate-limited: {why}\nWait a minute, pick another model with /model, or set fallback_model in config.toml to switch on its own.",
+            crate::providers::display(&provider, &model)))),
         r => r?,
     };
     if !quiet {

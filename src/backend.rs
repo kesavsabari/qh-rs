@@ -18,6 +18,8 @@ pub enum Error {
     Connect(String),
     Cancelled,
     Other(String),
+    /// HTTP 429: the provider's reason, and how long it asked us to wait (Retry-After)
+    Limited(String, Option<u64>),
 }
 
 impl std::fmt::Display for Error {
@@ -26,13 +28,52 @@ impl std::fmt::Display for Error {
             Error::Connect(e) => write!(f, "connect failed: {e}"),
             Error::Cancelled => write!(f, "interrupted"),
             Error::Other(e) => write!(f, "{e}"),
+            Error::Limited(e, _) => write!(f, "rate-limited: {e}"),
         }
     }
 }
 
-pub fn http() -> &'static ureq::Agent {
-    static A: OnceLock<ureq::Agent> = OnceLock::new();
-    A.get_or_init(|| ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(10)).build())
+/// The shared HTTP client. It keeps connections open for reuse, so after a switch to another
+/// network (WiFi to a hotspot) a kept connection is tied to an address this machine no longer
+/// has, and a request on it fails (macOS: "Can't assign requested address", os error 49).
+/// So each call checks which local address the default route uses (a syscall, nothing is sent)
+/// and starts a fresh client, without the old connections, when it has changed.
+pub fn http() -> ureq::Agent {
+    static A: std::sync::Mutex<Option<(Option<std::net::IpAddr>, ureq::Agent)>> = std::sync::Mutex::new(None);
+    let here = local_addr();
+    let mut a = A.lock().unwrap_or_else(|e| e.into_inner());
+    match &*a {
+        Some((ip, agent)) if *ip == here => agent.clone(),
+        _ => {
+            let agent = ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(10)).build();
+            *a = Some((here, agent.clone()));
+            agent
+        }
+    }
+}
+
+/// This machine's address on the default route (IPv4, else IPv6), or None when offline.
+fn local_addr() -> Option<std::net::IpAddr> {
+    use std::net::UdpSocket;
+    // connecting a UDP socket only picks the route; no packet leaves (documentation addresses)
+    let v4 = || { let s = UdpSocket::bind("0.0.0.0:0").ok()?; s.connect("192.0.2.1:9").ok()?; s.local_addr().ok() };
+    let v6 = || { let s = UdpSocket::bind("[::]:0").ok()?; s.connect("[2001:db8::1]:9").ok()?; s.local_addr().ok() };
+    v4().or_else(v6).map(|a| a.ip())
+}
+
+/// An error answer as an Error: a 429 becomes `Limited` with the provider's own words (OpenRouter
+/// puts the upstream's in error.metadata.raw); anything else keeps its status and body.
+pub fn status_error(code: u16, r: ureq::Response) -> Error {
+    let wait = r.header("retry-after").and_then(|s| s.trim().parse::<u64>().ok());
+    let text = r.into_string().unwrap_or_default();
+    if code != 429 {
+        return Error::Other(format!("HTTP {code}: {text}"));
+    }
+    let v: Value = serde_json::from_str(&text).unwrap_or_default();
+    let e = &v["error"];
+    let why = e["metadata"]["raw"].as_str().or(e["message"].as_str()).or(v["message"].as_str())
+        .map(String::from).unwrap_or_else(|| text.chars().take(200).collect());
+    Error::Limited(why.trim().chars().take(300).collect(), wait)
 }
 
 fn post(url: &str, body: &Value, auth: Option<&str>) -> Result<ureq::Response, Error> {
@@ -41,7 +82,7 @@ fn post(url: &str, body: &Value, auth: Option<&str>) -> Result<ureq::Response, E
         req = req.set("Authorization", &format!("Bearer {k}"));
     }
     req.send_string(&body.to_string()).map_err(|e| match e {
-        ureq::Error::Status(code, r) => Error::Other(format!("HTTP {code}: {}", r.into_string().unwrap_or_default())),
+        ureq::Error::Status(code, r) => status_error(code, r),
         ureq::Error::Transport(t) => match t.kind() {
             ureq::ErrorKind::ConnectionFailed | ureq::ErrorKind::Dns => Error::Connect(t.to_string()),
             _ => Error::Other(t.to_string()),
@@ -273,7 +314,7 @@ pub fn anthropic(base: &str, key: &str, model: &str, messages: &[Value], tools: 
     let url = format!("{}/v1/messages", base.trim_end_matches('/'));
     let r = http().post(&url).set("Content-Type", "application/json").set("x-api-key", key)
         .set("anthropic-version", "2023-06-01").send_string(&body.to_string()).map_err(|e| match e {
-            ureq::Error::Status(code, r) => Error::Other(format!("HTTP {code}: {}", r.into_string().unwrap_or_default())),
+            ureq::Error::Status(code, r) => status_error(code, r),
             ureq::Error::Transport(t) => Error::Connect(t.to_string()),
         })?;
     let (mut content, mut prompt, mut out_tokens) = (String::new(), 0u64, 0u64);
@@ -385,6 +426,8 @@ fn chat_raw(p: &Provider, model: &str, messages: &[Value], tools: &[Value], thin
 pub fn transient(e: &Error) -> bool {
     match e {
         Error::Connect(_) => true,
+        // worth a wait only when it's short; a long one goes to the fallback model or the user
+        Error::Limited(_, wait) => wait.is_none_or(|w| w <= 30),
         Error::Other(m) => {
             let m = m.to_lowercase();
             ["http 429", "http 500", "http 502", "http 503", "http 504", "http 529", "overloaded", "loading model",

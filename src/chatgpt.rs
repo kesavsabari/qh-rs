@@ -555,6 +555,10 @@ pub fn chat(model: &str, messages: &[Value], tools: &[Value], think: bool,
                     let wait = e["resets_in_seconds"].as_u64().map(|s| format!(" (resets in {}h {}m)", s / 3600, s / 60 % 60)).unwrap_or_default();
                     return Error::Other(format!("you've hit your ChatGPT plan's limit for {model}{wait}; switch model with /model"));
                 }
+                if code == 429 {
+                    let why = e["message"].as_str().unwrap_or("too many requests").to_string();
+                    return Error::Limited(why, None);
+                }
                 let msg = e["message"].as_str().or(err["detail"].as_str()).map(String::from).unwrap_or(text);
                 Error::Other(format!("HTTP {code}: {msg}"))
             }

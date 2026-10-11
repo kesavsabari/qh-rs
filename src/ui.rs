@@ -56,7 +56,7 @@ const COMMANDS: [(&str, &str); 36] = [
     ("/new", "new session tab"), ("/close", "close this tab"), ("/mode", "ask · auto-edit · auto · plan"),
     ("/compact", "shrink the conversation"), ("/clear", "start this tab fresh"), ("/undo", "undo the agent's file changes"),
     ("/diff", "show the agent's file changes"), ("/cwd", "this tab's working folder"), ("/think", "toggle thinking"),
-    ("/tokens", "context use"), ("/tier", "context window and GPU"), ("/profile", "tool set: coding, general, browser, all"),
+    ("/tokens", "context use"), ("/tier", "this tab's context window"), ("/profile", "tool set: coding, general, browser, all"),
     ("/role", "give this tab a role"), ("/map", "map of sessions and messages"), ("/layout", "tabs or grid"),
     ("/msg", "message another tab"), ("/sessions", "saved sessions"), ("/allow", "auto-approve rules"),
     ("/release", "let held messages through"), ("/pause", "hold automatic messaging"), ("/resume", "resume messaging"),
@@ -1237,11 +1237,28 @@ impl App {
             }
             "/map" => self.map = Some(crate::map::Map::default()),
             "/tier" => {
-                let model = lock(&m.set).model.clone();
-                let ctx = self.hub.cfg.ctx;
-                let src = if self.hub.cfg.ctx_set { "set in config" } else { "sized to the GPU at start" };
-                let live = crate::tier::detect(&self.hub.cfg.host, &model).map(|d| d.why).unwrap_or_else(|| "no NVIDIA GPU or model info".into());
-                self.note(&a, format!("local window {}k (tier {}, {src})\nright now: {live}", ctx / 1024, crate::tier::tier(ctx)));
+                let (provider, model) = { let s = lock(&m.set); (s.provider.clone(), s.model.clone()) };
+                let shown = crate::providers::display(&provider, &model);
+                if crate::providers::is_local(&provider, &model) {
+                    let ctx = self.hub.cfg.ctx;
+                    let src = if self.hub.cfg.ctx_set { "set in config" } else { "sized to the GPU at start" };
+                    let live = match (crate::tier::vram(), crate::tier::detect(&self.hub.cfg.host, &model)) {
+                        (_, Some(d)) => d.why,
+                        (None, None) => crate::tier::NO_GPU.into(),
+                        (Some(_), None) => format!("Ollama didn't describe {model} (is it running, and is the model pulled?)"),
+                    };
+                    self.note(&a, format!("{shown}: {}k window (tier {}, {src})\nright now: {live}", ctx / 1024, crate::tier::tier(ctx)));
+                } else {
+                    // a cloud model: its own window, capped since every request resends the whole conversation
+                    let (ctx, _) = self.hub.ctx_for(&m, true);
+                    let cap = self.hub.cfg.cloud_ctx;
+                    let why = match crate::providers::info(&provider, &model).and_then(|i| i.ctx) {
+                        Some(k) if k > cap => format!("{shown} takes {}k; qh keeps {}k (cloud_ctx in config.toml), since every request resends the whole conversation", k / 1024, cap / 1024),
+                        Some(_) => format!("{shown}'s own window"),
+                        None => format!("{} doesn't publish {shown}'s window, so qh assumes 32k", provider),
+                    };
+                    self.note(&a, format!("{shown}: {}k window (tier {}), a cloud model: no GPU needed\n{why}", ctx / 1024, crate::tier::tier(ctx)));
+                }
             }
             "/cwd" | "/cd" => {
                 if !arg.is_empty() {

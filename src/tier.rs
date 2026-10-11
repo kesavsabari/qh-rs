@@ -77,8 +77,34 @@ fn get(url: &str) -> Option<Value> {
     serde_json::from_str(&http().get(url).timeout(Duration::from_secs(4)).call().ok()?.into_string().ok()?).ok()
 }
 
-/// (total, used) MiB on the first NVIDIA GPU.
+/// (total, used) MiB of GPU memory: the first NVIDIA card, or on Apple Silicon the share of
+/// the unified memory the GPU may use.
 pub fn vram() -> Option<(f64, f64)> {
+    nvidia().or_else(apple)
+}
+
+/// What `vram` reads, for messages.
+pub fn gpu_kind() -> &'static str {
+    if nvidia().is_some() { "GPU" } else if apple().is_some() { "unified memory (Apple Silicon)" } else { "GPU" }
+}
+
+/// Said when there's nothing to size from.
+pub const NO_GPU: &str = "qh can't read this machine's GPU memory (it reads NVIDIA cards and Apple Silicon); \
+set `ctx = 16384` (or what fits) in config.toml";
+
+/// Apple Silicon: Metal lets the GPU use about two thirds of the memory up to 36 GB and three
+/// quarters above (recommendedMaxWorkingSetSize). Other apps share it, so this is optimistic;
+/// `ctx` in config.toml overrides it.
+fn apple() -> Option<(f64, f64)> {
+    if !cfg!(target_os = "macos") || std::env::consts::ARCH != "aarch64" {
+        return None;
+    }
+    let o = std::process::Command::new("sysctl").args(["-n", "hw.memsize"]).output().ok()?;
+    let mib = String::from_utf8_lossy(&o.stdout).trim().parse::<f64>().ok()? / 1_048_576.0;
+    Some((mib * if mib > 36.0 * 1024.0 { 0.75 } else { 0.67 }, 0.0))
+}
+
+fn nvidia() -> Option<(f64, f64)> {
     let o = std::process::Command::new("nvidia-smi")
         .args(["--query-gpu=memory.total,memory.used", "--format=csv,noheader,nounits"]).output().ok()?;
     let line = String::from_utf8_lossy(&o.stdout).lines().next()?.to_string();
@@ -128,8 +154,8 @@ pub fn detect(host: &str, model: &str) -> Option<Detect> {
     }
     Some(Detect {
         ctx,
-        why: format!("{total:.0} MiB GPU, {others:.0} used elsewhere, {weights:.0} for weights, \
-{:.0} KiB per token of context → {}k (tier {})", per_token * 1024.0, ctx / 1024, tier(ctx)),
+        why: format!("{total:.0} MiB {}, {others:.0} used elsewhere, {weights:.0} for weights, \
+{:.0} KiB per token of context → {}k (tier {})", gpu_kind(), per_token * 1024.0, ctx / 1024, tier(ctx)),
     })
 }
 

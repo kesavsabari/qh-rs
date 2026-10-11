@@ -233,7 +233,7 @@ fn fetch_models(p: &Provider) -> Result<Vec<ModelInfo>, String> {
     let base = p.base.trim_end_matches('/');
     let num = |v: &Value| v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0);
     match p.kind {
-        Kind::ChatGPT => Ok(crate::chatgpt::models()?.into_iter().map(|id| ModelInfo { id, ..Default::default() }).collect()),
+        Kind::ChatGPT => Ok(crate::chatgpt::models()?.into_iter().map(|(id, ctx)| ModelInfo { id, ctx, ..Default::default() }).collect()),
         Kind::Ollama => {
             let v = get_json(p, &format!("{base}/api/tags"))?;
             Ok(v["models"].as_array().into_iter().flatten()

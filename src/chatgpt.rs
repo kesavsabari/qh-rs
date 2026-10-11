@@ -457,8 +457,9 @@ fn auth() -> Result<Auth, String> {
     }
 }
 
-/// The signed-in account's models, as slugs (display names only differ in case/punctuation).
-pub fn models() -> Result<Vec<String>, String> {
+/// The signed-in account's models, as slugs (display names only differ in case/punctuation),
+/// with the context window each one can use when the list says.
+pub fn models() -> Result<Vec<(String, Option<usize>)>, String> {
     let a = auth()?;
     let url = match a.account {
         Some(_) => format!("{CODEX}/models?client_version={CODEX_VERSION}"),
@@ -469,8 +470,11 @@ pub fn models() -> Result<Vec<String>, String> {
             e => e.to_string(),
         })?;
     let v: Value = serde_json::from_str(&r.into_string().map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-    Ok(v["models"].as_array().into_iter().flatten().filter(|m| m["visibility"] == "list")
-        .filter_map(|m| m["slug"].as_str().map(String::from)).collect())
+    Ok(v["models"].as_array().into_iter().flatten().filter(|m| m["visibility"] == "list").filter_map(|m| {
+        let ctx = m["context_window"].as_u64()
+            .map(|w| (w * m["effective_context_window_percent"].as_u64().unwrap_or(100).min(100) / 100) as usize);
+        Some((m["slug"].as_str()?.to_string(), ctx))
+    }).collect())
 }
 
 fn text(m: &Value) -> &str {

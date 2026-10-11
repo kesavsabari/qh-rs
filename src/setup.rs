@@ -211,7 +211,7 @@ fn local_step(host: &str, mut models: Vec<String>) -> Vec<String> {
         let fit = match gb {
             Some(g) if g < 7.5 => format!("needs ~7 GB of GPU memory, you have {g:.0} GB: it will run partly on the CPU, slowly"),
             Some(g) => format!("fits your {g:.0} GB GPU"),
-            None => "no NVIDIA GPU found: Apple/AMD/CPU work, more slowly".into(),
+            None => "couldn't read your GPU's memory: it will still run, maybe slowly".into(),
         };
         if yes(&format!("Download {LOCAL_PICK}, the model qh is tuned on? ({fit})"), "Yes, download it (~6 GB)", "No, skip")
             && pull(host, LOCAL_PICK) {
@@ -257,7 +257,7 @@ fn provider_step(name: &str, site: &str) -> Vec<String> {
         providers::init(&crate::config::load()); // pick up the new sign-in
         return match crate::chatgpt::models() {
             Ok(m) => { println!("✓ ChatGPT ({}): {} models", crate::chatgpt::account().unwrap_or_default(), m.len());
-                       m.into_iter().map(|id| providers::display(name, &id)).collect() }
+                       m.into_iter().map(|(id, _)| providers::display(name, &id)).collect() }
             Err(e) => { println!("✗ ChatGPT signed in, but listing models failed: {e}"); vec![] }
         };
     }

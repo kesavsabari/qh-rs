@@ -121,6 +121,71 @@ fn instructions(cwd: &Path) -> Option<(String, String)> {
     std::fs::read_to_string(&g).ok().map(|t| (g.display().to_string(), t))
 }
 
+/// What the model would otherwise guess: the git branch, what's uncommitted, and the commands
+/// that build and test this project (so the first test run is the right one).
+fn facts(cwd: &Path) -> String {
+    let git = |args: &[&str]| std::process::Command::new("git").current_dir(cwd).args(args)
+        .stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output().ok()
+        .filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim_end().to_string());
+    let mut out = vec![];
+    if let Some(branch) = git(&["branch", "--show-current"]) {
+        let changed: Vec<String> = git(&["status", "--porcelain"]).unwrap_or_default().lines()
+            .filter_map(|l| l.get(3..)).map(|p| p.trim_matches('"').to_string()).collect();
+        let shown: Vec<&str> = changed.iter().take(8).map(String::as_str).collect();
+        let changes = match changed.len() {
+            0 => "nothing uncommitted".to_string(),
+            n => format!("{n} uncommitted: {}{}", shown.join(", "), if n > 8 { ", …" } else { "" }),
+        };
+        out.push(format!("Git: branch {}; {changes}.", if branch.is_empty() { "(detached)" } else { &branch }));
+    }
+    let cmds = commands(cwd);
+    if !cmds.is_empty() {
+        out.push(format!("Build and test with: {}.", cmds.join(", ")));
+    }
+    out.join("\n")
+}
+
+/// This project's build, test and lint commands, from its manifests.
+fn commands(cwd: &Path) -> Vec<String> {
+    let has = |f: &str| cwd.join(f).exists();
+    let read = |f: &str| std::fs::read_to_string(cwd.join(f)).unwrap_or_default();
+    let mut v: Vec<String> = vec![];
+    if has("Cargo.toml") {
+        v.extend(["cargo build".into(), "cargo test".into()]);
+    }
+    if has("go.mod") {
+        v.extend(["go build ./...".into(), "go test ./...".into()]);
+    }
+    if has("package.json") {
+        let pkg: serde_json::Value = serde_json::from_str(&read("package.json")).unwrap_or_default();
+        let pm = if has("pnpm-lock.yaml") { "pnpm" } else if has("yarn.lock") { "yarn" } else if has("bun.lockb") || has("bun.lock") { "bun" } else { "npm" };
+        for s in ["build", "test", "lint", "typecheck"] {
+            if pkg["scripts"][s].is_string() {
+                v.push(if s == "test" { format!("{pm} test") } else { format!("{pm} run {s}") });
+            }
+        }
+    }
+    if has("pyproject.toml") || has("setup.py") || has("requirements.txt") {
+        let py = read("pyproject.toml") + &read("setup.cfg");
+        if py.contains("pytest") || has("pytest.ini") || has("tests") || has("conftest.py") {
+            v.push("pytest".into());
+        }
+        if py.contains("ruff") {
+            v.push("ruff check .".into());
+        }
+    }
+    if has("Makefile") {
+        for line in read("Makefile").lines() {
+            if let Some(t) = line.split(':').next().filter(|t| matches!(*t, "build" | "test" | "lint" | "check")) {
+                if !v.contains(&format!("make {t}")) {
+                    v.push(format!("make {t}"));
+                }
+            }
+        }
+    }
+    v
+}
+
 pub fn system(profile: &str, cwd: &Path, lim: &crate::tier::Limits) -> String {
     let mut text = if profile == "general" {
         format!("You are a terse personal assistant on the user's computer. Today is {}.
@@ -138,6 +203,12 @@ Keep replies short. When done, say what changed in one or two lines.", cwd.displ
     // small models often state the answer and stop; the requested action is the job
     text += "\nIf the user asks you to write, save, create, send or change something, do it with a tool \
 before replying; stating the answer in chat does not count.";
+    if profile == "coding" {
+        let f = facts(cwd);
+        if !f.is_empty() {
+            text += &format!("\n\n{f}");
+        }
+    }
     if profile == "coding" && lim.map_chars > 0 {
         let tree = repomap(cwd, lim.map_chars);
         if !tree.is_empty() {
@@ -154,4 +225,25 @@ before replying; stating the answer in chat does not count.";
         text += &format!("\n\nProject notes:\n{}", notes.chars().take(lim.notes_chars).collect::<String>());
     }
     text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn facts_name_branch_changes_and_commands() {
+        let d = std::env::temp_dir().join(format!("qh-facts-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("package.json"), r#"{"scripts": {"test": "vitest", "build": "vite build"}}"#).unwrap();
+        std::fs::write(d.join("pnpm-lock.yaml"), "").unwrap();
+        std::fs::write(d.join("Makefile"), "test:\n\tpnpm test\nlint: build\n").unwrap();
+        let run = |a: &[&str]| assert!(std::process::Command::new("git").current_dir(&d).args(a).output().unwrap().status.success());
+        run(&["init", "-q", "-b", "work"]);
+        let f = facts(&d);
+        assert!(f.contains("Git: branch work; 3 uncommitted: "), "{f}");
+        assert!(f.contains("Build and test with: pnpm run build, pnpm test, make test, make lint."), "{f}");
+        let _ = std::fs::remove_dir_all(&d);
+        assert_eq!(facts(&std::env::temp_dir().join("qh-no-such-dir")), "");
+    }
 }

@@ -161,6 +161,44 @@ fn fuzzy_span(text: &str, old: &str) -> Option<(usize, usize, isize)> {
     Some((i, i + want.len(), indent(lines[i]) as isize - indent(first) as isize))
 }
 
+/// How alike two lines are, 0..1: shared character pairs (Dice), ignoring surrounding spaces.
+fn line_like(a: &str, b: &str) -> f64 {
+    let pairs = |s: &str| -> Vec<(char, char)> { let c: Vec<char> = s.trim().chars().collect(); c.windows(2).map(|w| (w[0], w[1])).collect() };
+    let (x, mut y) = (pairs(a), pairs(b));
+    if x.is_empty() && y.is_empty() {
+        return if a.trim() == b.trim() { 1.0 } else { 0.0 };
+    }
+    let total = x.len() + y.len();
+    let mut shared = 0;
+    for p in &x {
+        if let Some(i) = y.iter().position(|q| q == p) {
+            y.swap_remove(i);
+            shared += 1;
+        }
+    }
+    2.0 * shared as f64 / total as f64
+}
+
+/// The lines of `text` most like `old` (same count), numbered, when they're alike enough to be
+/// what the model meant: the failed edit then shows what to copy instead of a bare "not found".
+fn closest(text: &str, old: &str) -> Option<String> {
+    let want: Vec<&str> = old.trim_matches('\n').lines().collect();
+    let lines: Vec<&str> = text.lines().collect();
+    if want.is_empty() || want.len() > 40 || lines.len() < want.len() || lines.len() > 5000 {
+        return None;
+    }
+    let mut best = (0.0, 0);
+    for i in 0..=lines.len() - want.len() {
+        let score = want.iter().zip(&lines[i..]).map(|(w, l)| line_like(w, l)).sum::<f64>() / want.len() as f64;
+        if score > best.0 {
+            best = (score, i);
+        }
+    }
+    let (score, i) = best;
+    (score >= 0.5).then(|| lines[i..i + want.len()].iter().enumerate()
+        .map(|(k, l)| format!("{:>5}| {}", i + k + 1, l.chars().take(200).collect::<String>())).collect::<Vec<_>>().join("\n"))
+}
+
 /// What edit_file makes of `text`: the new text plus a note on how it matched, or the message
 /// for the model when `old` doesn't match exactly once.
 fn edit_text(text: &str, old: &str, new: &str) -> Result<(String, String), String> {
@@ -169,10 +207,15 @@ fn edit_text(text: &str, old: &str, new: &str) -> Result<(String, String), Strin
         return Ok((text.replacen(old, new, 1), String::new()));
     }
     if n > 1 {
-        return Err(format!("error: old string found {n} times; include more surrounding lines so it is unique"));
+        let at: Vec<String> = text.match_indices(old).take(5).map(|(i, _)| (text[..i].matches('\n').count() + 1).to_string()).collect();
+        return Err(format!("error: old string found {n} times (lines {}{}); include more surrounding lines so it is unique",
+                           at.join(", "), if n > 5 { ", …" } else { "" }));
     }
     let Some((s, e, delta)) = fuzzy_span(text, old) else {
-        return Err("error: old string not found. read_file the exact lines and copy them verbatim".into());
+        return Err(match closest(text, old) {
+            Some(near) => format!("error: old string not found. The closest lines in the file are below; copy them exactly as `old`:\n{near}"),
+            None => "error: old string not found. read_file the exact lines and copy them verbatim".into(),
+        });
     };
     let pad = |l: &str| -> String {
         if l.trim().is_empty() {
@@ -491,16 +534,17 @@ pub fn builtin_schema(name: &str) -> Option<Value> {
             "description": "Keep a checklist for multi-step work. Send the whole list each time; status is pending, doing or done.",
             "parameters": {"type": "object", "required": ["items"], "properties": {"items": {"type": "array",
                 "items": {"type": "object", "properties": {"text": {"type": "string"}, "status": {"type": "string"}}}}}}}}),
-        "read_file" => schema(name, "Read a file with line numbers.", &[("path", "string"), ("start", "integer"), ("end", "integer")], &["path"]),
+        "read_file" => schema(name, "Read a file with line numbers. Files over 300 lines give an outline unless you pass start/end; long output is cut, and says so.", &[("path", "string"), ("start", "integer"), ("end", "integer")], &["path"]),
         "write_file" => schema(name, "Create or overwrite a file.", &[("path", "string"), ("content", "string")], &["path", "content"]),
-        "edit_file" => schema(name, "Replace one exact unique string in a file.", &[("path", "string"), ("old", "string"), ("new", "string")], &["path", "old", "new"]),
+        "edit_file" => schema(name, "Replace one exact unique string in a file. Whitespace differences still match; if `old` isn't found exactly once, nothing changes and the error says why.", &[("path", "string"), ("old", "string"), ("new", "string")], &["path", "old", "new"]),
         "find_references" => schema(name, "List every line using a name (whole word).", &[("name", "string"), ("path", "string")], &["name"]),
         "rename_symbol" => schema(name, "Rename a name everywhere in the project (whole word).", &[("old", "string"), ("new", "string"), ("path", "string")], &["old", "new"]),
         "remember" => schema(name, "Save a lasting project fact to NOTES.md for future sessions.", &[("fact", "string")], &["fact"]),
         "bash" => schema(name, if crate::platform::shell() == crate::platform::Shell::PowerShell {
-            "Run a PowerShell command (Windows)." } else { "Run a shell command." }, &[("cmd", "string")], &["cmd"]),
-        "grep" => schema(name, "Search files recursively for a regex.", &[("pattern", "string"), ("path", "string")], &["pattern"]),
-        "web_fetch" => schema(name, "Fetch a URL as plain text.", &[("url", "string")], &["url"]),
+            "Run a PowerShell command (Windows). Stopped after 120 s; long output is cut, and says so; a cd carries over to the next call." } else {
+            "Run a shell command. Stopped after 120 s; long output is cut, and says so; a cd carries over to the next call." }, &[("cmd", "string")], &["cmd"]),
+        "grep" => schema(name, "Search files recursively for a regex. Long results are cut: narrow the pattern or path.", &[("pattern", "string"), ("path", "string")], &["pattern"]),
+        "web_fetch" => schema(name, "Fetch a URL as plain text (20 s at most; long pages are cut). It doesn't run JavaScript: use the browser tools for pages that need it.", &[("url", "string")], &["url"]),
         _ => return None,
     })
 }
@@ -602,6 +646,20 @@ pub fn call(name: &str, a: &Value, cfg: &Config, cwd: &mut PathBuf, lim: &crate:
 #[cfg(test)]
 mod cwd_tests {
     use super::*;
+
+    #[test]
+    fn failed_edits_point_at_the_right_lines() {
+        let text = "fn main() {\n    let total = price * qty;\n    println!(\"{total}\");\n}\n";
+        // a wrong variable name: not found, but the error shows lines 2-3 to copy
+        let e = edit_text(text, "    let total = price * quantity;\n    println!(\"{total}\");", "x").unwrap_err();
+        assert!(e.contains("    2|     let total = price * qty;") && e.contains("    3|"), "{e}");
+        // nothing like it: the plain message
+        let e = edit_text(text, "class Foo:\n    pass", "x").unwrap_err();
+        assert!(e.contains("read_file the exact lines") && !e.contains("|"), "{e}");
+        // twice: says where
+        let e = edit_text("a = 1\nb = 2\na = 1\n", "a = 1", "a = 3").unwrap_err();
+        assert!(e.contains("2 times (lines 1, 3)"), "{e}");
+    }
 
     fn tmp(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("qh-test-{name}-{}", std::process::id()));

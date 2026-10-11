@@ -80,7 +80,7 @@
     <tr><th>Choice</th><th>What you need</th><th>Good for</th></tr>
     <tr><td>Local models (Ollama)</td><td>The free <a href="https://ollama.com/download">Ollama</a> app and a GPU (about 8&nbsp;GB for the recommended model; less works with a smaller context)</td><td>Private, free, offline</td></tr>
     <tr><td>Ollama cloud</td><td>The Ollama app and a free ollama.com account</td><td>Big models without a big GPU</td></tr>
-    <tr><td>ChatGPT Plus/Pro</td><td>A ChatGPT subscription</td><td>Using the plan you already pay for</td></tr>
+    <tr><td>ChatGPT</td><td>A ChatGPT plan (Go, Plus or Pro)</td><td>Using the plan you already pay for</td></tr>
     <tr><td>OpenRouter, Groq, OpenAI, Anthropic, DeepSeek, Mistral</td><td>An API key from that site</td><td>Pay-per-use or free-tier cloud models</td></tr>
     <tr><td>GLM, Kimi, MiniMax coding plans</td><td>That plan's key</td><td>Flat-price coding subscriptions</td></tr>
   </table>
@@ -116,9 +116,9 @@ what does src/engine.rs do?</code></pre>
 
 <section id="chatgpt">
   <h2>ChatGPT plan</h2>
-  <p>With ChatGPT Plus or Pro you can use your plan in qh instead of paying for an API key:</p>
+  <p>With a ChatGPT plan (Go, Plus or Pro) you can use your plan in qh instead of paying for an API key:</p>
   <pre><code>qh login chatgpt</code></pre>
-  <p>Your browser opens; approve qh. Then pick a model with <code>/model chatgpt</code>. Inside qh you can also do it from <code>/provider</code> → chatgpt. Usage counts against your plan's allowance; you can cap how much qh may use in ChatGPT's settings. Sign out with <code>qh logout chatgpt</code>.</p>
+  <p>If the Codex CLI is signed in on this computer, qh uses that sign-in. Otherwise your browser opens; sign in with ChatGPT. This goes the way the Codex CLI does (OpenCode and others do the same), which isn't OpenAI's official route for other apps, so OpenAI could change it. With Plus or Pro you can use the official route instead: <code>qh login chatgpt-official</code>. Then pick a model with <code>/model chatgpt</code>. Inside qh you can also do it from <code>/provider</code> → chatgpt. Usage counts against your plan's allowance; you can cap how much qh may use in ChatGPT's settings. Sign out with <code>qh logout chatgpt</code>.</p>
 </section>
 
 <section id="keys">

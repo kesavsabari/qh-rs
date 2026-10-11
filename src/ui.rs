@@ -1223,7 +1223,7 @@ impl App {
                     _ => {
                         let all: Vec<(String, String)> = crate::providers::all().iter().map(|p| {
                             let state = match (p.kind == crate::providers::Kind::ChatGPT, p.local, p.key.is_empty()) {
-                                (true, _, true) => "sign in with your Plus/Pro plan".to_string(),
+                                (true, _, true) => "sign in with your ChatGPT plan".to_string(),
                                 (true, _, false) => format!("✓ signed in {}", crate::chatgpt::account().unwrap_or_default()),
                                 (_, true, _) => "local".into(),
                                 (_, _, true) => "add a key".into(),

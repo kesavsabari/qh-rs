@@ -301,7 +301,7 @@ fn provider_step(name: &str, site: &str) -> Vec<String> {
 }
 
 const PROVIDERS: [(&str, &str, &str); 11] = [
-    ("chatgpt", "ChatGPT Plus/Pro (sign in, uses your plan)", "browser sign-in"),
+    ("chatgpt", "ChatGPT (sign in, uses your plan: Go, Plus or Pro)", "browser sign-in"),
     ("openrouter", "OpenRouter", "https://openrouter.ai/keys"),
     ("groq", "Groq", "https://console.groq.com/keys"),
     ("openai", "OpenAI", "https://platform.openai.com/api-keys"),

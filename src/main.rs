@@ -35,7 +35,7 @@ const USAGE: &str = "qh [--resume [id|latest]] [--profile coding|general|all] [-
 qh setup                connect a model (local Ollama or a cloud API key)
 qh team create [user…]  share this project on GitHub and invite friends · qh join owner/repo [code]
 qh docs                 open the guide in your browser
-qh login chatgpt        sign in with your ChatGPT Plus/Pro plan (qh logout chatgpt)
+qh login chatgpt        use your ChatGPT plan, Go included (qh logout chatgpt)
 qh login <provider>     save an API key (openrouter, ollama-cloud, openai, groq, anthropic…)
 qh -p \"prompt\" [-p \"next turn\" ...] [-y] [--ctx N] [--stats FILE]
     run prompts as turns of one session without the UI and print the replies
@@ -79,8 +79,10 @@ fn parse() -> Args {
 
 /// `qh login <provider>`: read a key without echoing it, save it (chmod 600), test it.
 fn login(name: &str) -> i32 {
-    if name == "chatgpt" {
-        return match chatgpt::login(&|s| println!("{s}\n")) {
+    if name == "chatgpt" || name == "chatgpt-official" {
+        let say = |s: &str| println!("{s}\n");
+        let r = if name == "chatgpt" { chatgpt::login(&say) } else { chatgpt::login_official(&say) };
+        return match r {
             Ok(email) => { println!("✓ signed in with ChatGPT as {email}. Pick a model with /model chatgpt:"); 0 }
             Err(e) => { eprintln!("✗ {e}"); 1 }
         };

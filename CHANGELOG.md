@@ -12,6 +12,9 @@
   100 columns on wide screens, a short key hint line (`/help` lists all keys), and the status
   bar only mentions the profile and thinking when they differ from usual.
 - The model knows sessions are saved and that `qh --resume` reopens them.
+- **Keys that work on a Mac.** Shift+←/→ switches tabs (macOS takes Ctrl+←/→ for desktops),
+  Option+←/→ moves a word instead of typing `b` or `f`, and Shift+↑/↓ scrolls (no PgUp/PgDn on
+  a Mac keyboard). Alt+←/→ and Alt+1..9 still work where the terminal sends them.
 
 ## 0.1.5 — 2026-10-11
 

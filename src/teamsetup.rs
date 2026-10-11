@@ -121,10 +121,13 @@ pub fn create_inner(friends: &[String]) -> Result<(), String> {
             (format!("{me}/{name}"), name)
         }
     };
-    let secret_files = if existing.is_none() { secrets(&cwd) } else { vec![] };
+    // no commits yet: an empty folder, or a create that stopped before its first push
+    let unborn = git(&cwd, &["rev-parse", "-q", "--verify", "HEAD"], &[]).is_err();
+    let secret_files = if existing.is_none() || unborn { secrets(&cwd) } else { vec![] };
 
     println!("\nReady to:");
     match &existing {
+        Some(r) if unborn => println!("  • make this folder's first commit and push it to {r}"),
         Some(r) => println!("  • use {r}, where this project already is"),
         None => println!("  • put this folder on GitHub as {repo} ({})", if private { "private" } else { "PUBLIC: anyone can see the code" }),
     }
@@ -145,10 +148,6 @@ pub fn create_inner(friends: &[String]) -> Result<(), String> {
         if git(&cwd, &["rev-parse", "--show-toplevel"], &[]).is_err() {
             git(&cwd, &["init", "-q", "-b", "main"], &[])?;
         }
-        if !secret_files.is_empty() {
-            let mut gi = std::fs::OpenOptions::new().create(true).append(true).open(cwd.join(".gitignore")).map_err(|e| e.to_string())?;
-            for f in &secret_files { let _ = writeln!(gi, "{f}"); }
-        }
         api("POST", "/user/repos", &tok, Some(&json!({"name": name, "private": private})), None)?;
         let url = format!("https://github.com/{repo}.git");
         if git(&cwd, &["remote", "get-url", "origin"], &[]).is_ok() {
@@ -156,10 +155,18 @@ pub fn create_inner(friends: &[String]) -> Result<(), String> {
         } else {
             git(&cwd, &["remote", "add", "origin", &url], &[])?;
         }
+    }
+    if existing.is_none() || unborn {
+        if !secret_files.is_empty() {
+            let mut gi = std::fs::OpenOptions::new().create(true).append(true).open(cwd.join(".gitignore")).map_err(|e| e.to_string())?;
+            for f in &secret_files { let _ = writeln!(gi, "{f}"); }
+        }
+        let url = format!("https://github.com/{repo}.git");
         git(&cwd, &["add", "-A"], &[])?;
-        let _ = git(&cwd, &["-c", "user.name=qh", "-c", "user.email=qh@localhost", "commit", "-q", "-m", "First commit"], &[]);
-        let branch = git(&cwd, &["branch", "--show-current"], &[]).unwrap_or("main".into());
-        git(&cwd, &["push", "-q", "-u", &url, &format!("HEAD:{branch}")], &auth_env(&tok))?;
+        // --allow-empty: an empty folder still gets a commit, or there's nothing to push
+        git(&cwd, &["-c", "user.name=qh", "-c", "user.email=qh@localhost", "commit", "-q", "--allow-empty", "-m", "First commit"], &[])?;
+        let branch = git(&cwd, &["branch", "--show-current"], &[]).ok().filter(|b| !b.trim().is_empty()).unwrap_or("main".into());
+        git(&cwd, &["push", "-q", "-u", &url, &format!("HEAD:{}", branch.trim())], &auth_env(&tok))?;
         println!("✓ on GitHub: https://github.com/{repo}");
     }
     // the team key exists from the start, so each invite can carry it under its own code

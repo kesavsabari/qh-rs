@@ -1,5 +1,5 @@
 #!/bin/sh
-# qh installer for Linux/macOS:  curl -fsSL https://raw.githubusercontent.com/kesavsabari/qh-rs/main/install.sh | sh
+# qh installer for Linux/macOS:  curl -fsSL kesavsabari.github.io/qh/sh | sh
 set -e
 repo=kesavsabari/qh-rs
 case "$(uname -s)-$(uname -m)" in
@@ -10,8 +10,36 @@ case "$(uname -s)-$(uname -m)" in
 esac
 dir="$HOME/.local/bin"
 mkdir -p "$dir"
-curl -fL "https://github.com/$repo/releases/latest/download/$asset" -o "$dir/qh"
-chmod +x "$dir/qh"
+echo "Downloading qh..."
+curl -fsSL "https://github.com/$repo/releases/latest/download/$asset" -o "$dir/qh.tmp"
+chmod +x "$dir/qh.tmp"
+mv "$dir/qh.tmp" "$dir/qh"
 echo "Installed $dir/qh"
-case ":$PATH:" in *":$dir:"*) ;; *) echo "Add $dir to your PATH." ;; esac
+
+# Put ~/.local/bin on PATH for new terminals (macOS doesn't have it by default).
+case ":$PATH:" in
+  *":$dir:"*) ready=1 ;;
+  *)
+    ready=0
+    line='export PATH="$HOME/.local/bin:$PATH"'
+    case "$(basename "${SHELL:-sh}")" in
+      zsh)  rc="$HOME/.zshrc" ;;
+      bash) if [ "$(uname -s)" = Darwin ]; then rc="$HOME/.bash_profile"; else rc="$HOME/.bashrc"; fi ;;
+      fish) rc="$HOME/.config/fish/conf.d/qh.fish"; line='fish_add_path -g $HOME/.local/bin'; mkdir -p "$(dirname "$rc")" ;;
+      *)    rc="$HOME/.profile" ;;
+    esac
+    if ! grep -qs '\.local/bin' "$rc"; then
+      printf '\n# added by the qh installer\n%s\n' "$line" >> "$rc"
+      echo "Added $dir to PATH in $rc"
+    fi
+    ;;
+esac
+
+echo
+if [ "$ready" = 1 ]; then
+  echo "Run: qh"
+else
+  echo "Open a new terminal and run: qh"
+  echo "(or in this one: export PATH=\"\$HOME/.local/bin:\$PATH\" && qh)"
+fi
 echo "Needs a model: Ollama (https://ollama.com) + 'ollama pull qwen3.5:9b', or 'qh login openrouter'."

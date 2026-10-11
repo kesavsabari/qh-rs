@@ -50,7 +50,12 @@ const SNAPSHOT_JS: &str = r#"(() => {
 struct Ws {
     s: TcpStream,
     next: u64,
+    problems: Vec<String>,                          // page errors seen since the last snapshot
+    requests: std::collections::HashMap<String, String>, // request id -> url, to name failed loads
 }
+
+/// Page problems kept between snapshots, and shown at most this many.
+const MAX_PROBLEMS: usize = 12;
 
 impl Ws {
     fn connect(url: &str) -> Result<Ws, String> {
@@ -75,7 +80,7 @@ impl Ws {
                 break;
             }
         }
-        Ok(Ws { s, next: 0 })
+        Ok(Ws { s, next: 0, problems: vec![], requests: Default::default() })
     }
 
     fn send(&mut self, text: &str) -> std::io::Result<()> {
@@ -135,12 +140,60 @@ impl Ws {
         }
     }
 
+    /// Keep what tells the model a page is broken: console errors, uncaught exceptions, requests
+    /// that failed or came back 4xx/5xx. Everything else DevTools sends is dropped.
+    fn event(&mut self, m: &Value) {
+        let p = &m["params"];
+        let short = |s: &str| s.lines().next().unwrap_or("").chars().take(200).collect::<String>();
+        let line = match m["method"].as_str().unwrap_or("") {
+            "Runtime.consoleAPICalled" if p["type"] == "error" || p["type"] == "assert" => {
+                let args: Vec<String> = p["args"].as_array().into_iter().flatten()
+                    .map(|a| a["value"].as_str().map(String::from).or_else(|| a["description"].as_str().map(String::from)).unwrap_or_else(|| a["value"].to_string()))
+                    .collect();
+                Some(format!("console.error: {}", short(&args.join(" "))))
+            }
+            "Runtime.exceptionThrown" => {
+                let d = &p["exceptionDetails"];
+                let what = d["exception"]["description"].as_str().or(d["text"].as_str()).unwrap_or("exception");
+                let line = d["lineNumber"].as_u64().unwrap_or(0) + 1;
+                let at = match d["url"].as_str().map(|u| u.rsplit('/').next().unwrap_or(u)).filter(|f| !f.is_empty()) {
+                    Some(file) => format!(" ({file}:{line})"),
+                    None => format!(" (inline script, line {line})"),
+                };
+                Some(format!("uncaught {}{at}", short(what)))
+            }
+            "Network.requestWillBeSent" => {
+                if self.requests.len() > 2000 { self.requests.clear() }
+                self.requests.insert(p["requestId"].as_str().unwrap_or("").into(), p["request"]["url"].as_str().unwrap_or("").into());
+                None
+            }
+            // every page asks for /favicon.ico: a missing one isn't the page's problem
+            "Network.responseReceived" if p["response"]["status"].as_u64().is_some_and(|s| s >= 400)
+                && !p["response"]["url"].as_str().unwrap_or("").ends_with("/favicon.ico") =>
+                Some(format!("HTTP {} {}", p["response"]["status"], short(p["response"]["url"].as_str().unwrap_or("")))),
+            "Network.loadingFailed" if p["canceled"] != true => {
+                let url = self.requests.get(p["requestId"].as_str().unwrap_or("")).cloned().unwrap_or_default();
+                Some(format!("request failed ({}): {}", p["errorText"].as_str().unwrap_or("error"), short(&url)))
+            }
+            _ => None,
+        };
+        if let Some(l) = line {
+            if self.problems.len() < 50 && !self.problems.contains(&l) {
+                self.problems.push(l);
+            }
+        }
+    }
+
     fn call(&mut self, method: &str, params: Value) -> Result<Value, String> {
         self.next += 1;
         let id = self.next;
         self.send(&json!({"id": id, "method": method, "params": params}).to_string()).map_err(|e| e.to_string())?;
         loop {
             let m: Value = serde_json::from_str(&self.recv().map_err(|e| e.to_string())?).unwrap_or_default();
+            if m["method"].is_string() {
+                self.event(&m);
+                continue;
+            }
             if m["id"].as_u64() == Some(id) {
                 if let Some(e) = m.get("error") {
                     return Err(e["message"].as_str().unwrap_or("devtools error").to_string());
@@ -190,6 +243,9 @@ fn launch(headless: bool) -> Result<Browser, String> {
         .and_then(|t| t["webSocketDebuggerUrl"].as_str()).map(String::from).ok_or("no page target")?;
     let mut ws = Ws::connect(&url)?;
     ws.call("Page.enable", json!({}))?;
+    // console errors, exceptions and failed requests come back with each snapshot
+    ws.call("Runtime.enable", json!({}))?;
+    ws.call("Network.enable", json!({}))?;
     Ok(Browser { child, ws, refs: vec![] })
 }
 
@@ -276,7 +332,14 @@ impl Browser {
         } else {
             String::new()
         };
-        Ok(format!("{warn}{}\n{}\n\nElements:\n{}\n\nText:\n{chunk}{more}", d["title"].as_str().unwrap_or(""),
+        let problems = std::mem::take(&mut self.ws.problems);
+        let problems = if problems.is_empty() { String::new() } else {
+            let more = problems.len().saturating_sub(MAX_PROBLEMS);
+            format!("\n\nPage problems since the last action (console errors, failed requests):\n{}{}",
+                    problems.iter().take(MAX_PROBLEMS).map(|p| format!("- {p}")).collect::<Vec<_>>().join("\n"),
+                    if more > 0 { format!("\n- … {more} more") } else { String::new() })
+        };
+        Ok(format!("{warn}{}\n{}\n\nElements:\n{}\n\nText:\n{chunk}{more}{problems}", d["title"].as_str().unwrap_or(""),
                    d["url"].as_str().unwrap_or(""), lines.join("\n")))
     }
 
@@ -422,7 +485,7 @@ pub fn schemas() -> Vec<Value> {
     use crate::tools::schema;
     vec![
         schema("browse", "Open a URL in a real browser (click, type, scroll tools follow).", &[("url", "string")], &["url"]),
-        schema("snapshot", "Re-read the current page. page=2.. for more text.", &[("page", "integer")], &[]),
+        schema("snapshot", "Re-read the current page. page=2.. for more text. Console errors and failed requests since the last action are listed at the end.", &[("page", "integer")], &[]),
         schema("click", "Click element [ref] from the latest snapshot.", &[("ref", "integer")], &["ref"]),
         schema("type", "Fill element [ref] with text; submit=true presses Enter.", &[("ref", "integer"), ("text", "string"), ("submit", "boolean")], &["ref", "text"]),
         schema("select", "Choose an option (by visible label) in select [ref].", &[("ref", "integer"), ("option", "string")], &["ref", "option"]),

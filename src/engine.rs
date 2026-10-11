@@ -121,7 +121,7 @@ Run the project's build or test command now, fix what fails, then reply."}));
                 }
             }
             let t = lock(&m.turn);
-            hub.emit(&m.name, Event::Done { tokens: t.tokens, tps: t.tps });
+            hub.emit(&m.name, Event::Done { tokens: t.tokens });
             return Ok(content(&msg).to_string());
         }
         // normalise up front so the UI shows the arguments the tool will actually get

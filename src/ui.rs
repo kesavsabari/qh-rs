@@ -28,6 +28,8 @@ pub enum Ui {
 
 const GRID_MAX: usize = 4;
 const MAX_ITEMS: usize = 400;
+/// Transcript text wraps at this many columns, however wide the terminal.
+const MAX_LINE: u16 = 100;
 const HELP: &str = "/new <name> [profile]  new session (Ctrl+N: instant, auto-named)
 /close (Ctrl+W)        close this session
 /msg <name> <text>     message another session as yourself
@@ -145,7 +147,6 @@ enum Item {
     Cmd(String), // a /command as typed, so its answer has context
     Err(String),
     Tool { title: String, args: String, result: String, open: bool },
-    Stat(String),
 }
 
 #[derive(Default)]
@@ -616,7 +617,12 @@ impl App {
     }
 
     fn note(&mut self, name: &str, s: impl Into<String>) {
-        self.view(name).push(Item::Note(s.into()));
+        let s = s.into();
+        let v = self.view(name);
+        // pressing a key again that only prints a note shouldn't stack copies
+        if !matches!(v.items.back(), Some(Item::Note(last)) if *last == s) {
+            v.push(Item::Note(s));
+        }
     }
 
     fn err(&mut self, name: &str, s: impl Into<String>) {
@@ -720,11 +726,7 @@ impl App {
                 self.view(&name).streaming = false;
                 self.note(&name, t)
             }
-            Event::Done { tokens, tps } => {
-                let v = self.view(&name);
-                v.streaming = false;
-                v.push(Item::Stat(if tps > 0.0 { format!("{tokens} tokens · {tps} tok/s") } else { format!("{tokens} tokens") }));
-            }
+            Event::Done { .. } => self.view(&name).streaming = false,
             Event::Confirm { tool, args, reply, cwd, warn } => {
                 let rules = self.hub.get(&name).map(|m| lock(&m.set).allow.clone()).unwrap_or_default();
                 let rule = suggest_rule(&tool, &args, &rules);
@@ -1783,7 +1785,7 @@ $ARGUMENTS is replaced by what you type after the command".into()
         };
         f.render_widget(Paragraph::new(line), input);
         f.set_cursor_position((input.x + 2 + cx as u16, input.y));
-        let hints = "⇧Tab mode  ^N new  ^W close  ^G grid  ^Space team⇄personal  ^T team map  ^B sessions map  ^P projects  ^L log  Alt+←/→ tabs  PgUp/Dn scroll  ^O tool  Esc stop  ^Q quit";
+        let hints = "⇧Tab mode  ^N new tab  ^P projects  ^T team  ^O last tool  Esc stop  ^Q quit  ·  /help for all keys";
         // a newer qh: a standing notice at the right end of the bottom line, over the hints
         let foot = match crate::update::available() {
             Some(v) => {
@@ -2167,8 +2169,10 @@ then it's `git push -u origin {branch}` and `gh pr create --fill`.");
             let parts: Vec<&str> = dir.rsplit(['/', '\\']).take(2).collect();
             format!("…/{}/{}", parts.get(1).unwrap_or(&""), parts[0])
         } else { dir };
-        let mut out = format!("▸ {}{role} · {dir} · [{mode}] · {model} · {profile} · think {} · [{}{}] {live}/{ctx}", self.active,
-                              if think { "on" } else { "off" }, "█".repeat(bar), "░".repeat(20 - bar));
+        let profile = if profile == self.hub.cfg.profile { String::new() } else { format!(" · {profile}") };
+        let think = if think { " · think" } else { "" };
+        let mut out = format!("▸ {}{role} · {dir} · [{mode}] · {model}{profile}{think} · [{}{}] {live}/{ctx}", self.active,
+                              "█".repeat(bar), "░".repeat(20 - bar));
         let cost = lock(&m.turn).cost;
         if cost > 0.0 { out += &if cost < 0.01 { format!(" · ${cost:.4}") } else { format!(" · ${cost:.2}") } }
         if tps > 0.0 { out += &format!(" · {tps} tok/s") }
@@ -2182,7 +2186,8 @@ then it's `git push -u origin {branch}` and `gh pr create --fill`.");
 
     /// Wrap only as many items as fit, walking up from the newest.
     fn draw_chat(&mut self, f: &mut Frame, name: &str, area: Rect) {
-        let width = area.width.saturating_sub(2).max(10) as usize;
+        // long lines are hard to read on a wide screen
+        let width = area.width.saturating_sub(2).clamp(10, MAX_LINE) as usize;
         let h = area.height as usize;
         let v = self.views.entry(name.to_string()).or_default();
         let need = h + v.scroll;
@@ -2253,7 +2258,6 @@ fn item_lines(it: &Item, w: usize, need: usize) -> Vec<Line<'static>> {
         Item::Note(s) => styled(s, Style::new().fg(Color::Blue), 0),
         Item::Cmd(s) => styled(&format!("› {s}"), Style::new().fg(ACCENT), 0),
         Item::Err(s) => styled(s, Style::new().fg(Color::Red), 0),
-        Item::Stat(s) => styled(s, Style::new().fg(DIM), 0),
         Item::Tool { title, args, result, open } => {
             let mut v = styled(&format!("{} {title}", if *open { "▾" } else { "▸" }), Style::new().fg(DIM), 0);
             if *open {

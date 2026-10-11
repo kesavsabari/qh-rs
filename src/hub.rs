@@ -42,7 +42,7 @@ pub enum Event {
     ToolResult { #[allow(dead_code)] name: String, result: String },
     Compact { stage: &'static str, before: usize, after: usize },
     Notice(String),
-    Done { tokens: u64, tps: f64 },
+    Done { tokens: u64 },
     Confirm { tool: String, args: Value, reply: Sender<Answer>, cwd: PathBuf, warn: String },
     Added,
     Log(String),
@@ -211,7 +211,8 @@ impl Hub {
 
     pub fn system_for(&self, name: &str, profile: &str, cwd: &Path) -> String {
         format!("{}\n\nYou are session '{name}'; the user sees sessions as tabs by name (\"the tests tab\" = \
-session tests). Messages from other sessions start with [from <name>].", prompt::system(profile, cwd, &crate::tier::Limits::for_ctx(self.cfg.ctx)))
+session tests). Messages from other sessions start with [from <name>]. qh saves every session as it goes; \
+`qh --resume` reopens the last workspace after quitting.", prompt::system(profile, cwd, &crate::tier::Limits::for_ctx(self.cfg.ctx)))
     }
 
     /// The tools sent with a request. Everything stays callable, but tool definitions are

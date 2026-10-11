@@ -205,7 +205,8 @@ impl Ws {
 }
 
 struct Browser {
-    child: Child,
+    /// None when qh attached to a browser an earlier qh left running
+    child: Option<Child>,
     ws: Ws,
     refs: Vec<Value>,
 }
@@ -217,6 +218,11 @@ fn launch(headless: bool) -> Result<Browser, String> {
     let profile = state_dir().join("browser");
     let _ = std::fs::create_dir_all(&profile);
     let port_file = profile.join("DevToolsActivePort");
+    // A browser still holding this profile (a window qh lost track of, or one left by an earlier
+    // qh) makes a new one hand over to it and quit, so it would never start: use that one instead.
+    if let Some(port) = live_port(&port_file) {
+        return connect(port, None);
+    }
     let _ = std::fs::remove_file(&port_file);
     let mut args = vec![format!("--user-data-dir={}", profile.display()), "--remote-debugging-port=0".into(),
                         "--no-first-run".into(), "--no-default-browser-check".into(), "--window-size=1100,760".into()];
@@ -225,7 +231,12 @@ fn launch(headless: bool) -> Result<Browser, String> {
     }
     args.push("about:blank".into());
     let child = crate::platform::browsers().iter().find_map(|b| {
-        Command::new(b).args(&args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().ok()
+        let mut c = Command::new(b);
+        c.args(&args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        // its own process group: the terminal's title and Ctrl+C stay with qh
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut c, 0);
+        c.spawn().ok()
     }).ok_or("no Chrome, Chromium, Edge or Brave found")?;
     let t0 = Instant::now();
     let port = loop {
@@ -233,14 +244,32 @@ fn launch(headless: bool) -> Result<Browser, String> {
             break p;
         }
         if t0.elapsed() > Duration::from_secs(15) {
-            return Err("browser did not start (is another qh browser already running?)".into());
+            return Err(format!("the browser did not start. If a qh browser window is open, quit it (all of its \
+                                windows) and try again. Its profile: {}", profile.display()));
         }
         std::thread::sleep(Duration::from_millis(50));
     };
+    connect(port, Some(child))
+}
+
+/// The DevTools port of a browser already running on qh's profile, if it still answers.
+fn live_port(port_file: &std::path::Path) -> Option<u16> {
+    let port = std::fs::read_to_string(port_file).ok()?.lines().next()?.trim().parse::<u16>().ok()?;
+    let ok = ureq::AgentBuilder::new().timeout(Duration::from_secs(2)).build()
+        .get(&format!("http://127.0.0.1:{port}/json/version")).call().is_ok();
+    ok.then_some(port)
+}
+
+fn connect(port: u16, child: Option<Child>) -> Result<Browser, String> {
     let list: Value = crate::backend::http().get(&format!("http://127.0.0.1:{port}/json/list")).call()
         .map_err(|e| e.to_string())?.into_string().ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
-    let url = list.as_array().into_iter().flatten().find(|t| t["type"] == "page")
-        .and_then(|t| t["webSocketDebuggerUrl"].as_str()).map(String::from).ok_or("no page target")?;
+    let mut page = list.as_array().into_iter().flatten().find(|t| t["type"] == "page").cloned();
+    if page.is_none() {
+        // every window was closed but the browser kept running, as it does on macOS
+        page = crate::backend::http().request("PUT", &format!("http://127.0.0.1:{port}/json/new?about:blank")).call()
+            .ok().and_then(|r| r.into_string().ok()).and_then(|s| serde_json::from_str(&s).ok());
+    }
+    let url = page.as_ref().and_then(|t| t["webSocketDebuggerUrl"].as_str()).map(String::from).ok_or("no page target")?;
     let mut ws = Ws::connect(&url)?;
     ws.call("Page.enable", json!({}))?;
     // console errors, exceptions and failed requests come back with each snapshot
@@ -252,7 +281,9 @@ fn launch(headless: bool) -> Result<Browser, String> {
 pub fn shutdown() {
     if let Some(mut b) = lock(&B).take() {
         let _ = b.ws.call("Browser.close", json!({}));
-        let _ = b.child.wait();
+        if let Some(c) = b.child.as_mut() {
+            let _ = c.wait();
+        }
     }
 }
 
@@ -333,7 +364,8 @@ impl Browser {
             String::new()
         };
         let problems = std::mem::take(&mut self.ws.problems);
-        let problems = if problems.is_empty() { String::new() } else {
+        // said even when clean, so the model knows the check ran
+        let problems = if problems.is_empty() { "\n\nNo console errors or failed requests.".to_string() } else {
             let more = problems.len().saturating_sub(MAX_PROBLEMS);
             format!("\n\nPage problems since the last action (console errors, failed requests):\n{}{}",
                     problems.iter().take(MAX_PROBLEMS).map(|p| format!("- {p}")).collect::<Vec<_>>().join("\n"),
@@ -383,8 +415,16 @@ pub fn label(a: &Value) -> String {
 
 pub fn call(name: &str, a: &Value, headless: bool, allow: &[String]) -> String {
     let mut g = lock(&B);
-    if g.as_mut().is_some_and(|b| b.child.try_wait().ok().flatten().is_some() || b.ws.call("Runtime.evaluate", json!({"expression": "1"})).is_err()) {
-        *g = None; // window was closed: start over
+    if g.as_mut().is_some_and(|b| b.child.as_mut().is_some_and(|c| c.try_wait().ok().flatten().is_some())
+                               || b.ws.call("Runtime.evaluate", json!({"expression": "1"})).is_err()) {
+        // the window was closed or the browser stopped answering: don't leave it running holding the
+        // profile, or every later start hands over to it and quits
+        if let Some(mut b) = g.take() {
+            if let Some(c) = b.child.as_mut() {
+                let _ = c.kill();
+                let _ = c.wait();
+            }
+        }
     }
     if g.is_none() {
         match launch(headless) {

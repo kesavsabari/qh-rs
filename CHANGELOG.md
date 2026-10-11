@@ -54,3 +54,50 @@ Self-updates from signed releases, ChatGPT Go plans, and direct encrypted lines 
 - ChatGPT Go plans work, through the same sign-in the Codex CLI uses.
 - Team mode: direct encrypted lines between teammates, the team room, and agents asking each
   other's agents. Board folders are signed and vouched for by GitHub.
+
+## 0.1.3 — 2026-10-10
+
+Team mode with an encrypted board kept in your own repo, and the docs website.
+
+- **Team mode.** See which teammates are online and what their agents are doing, through the
+  project's own git host. The board is encrypted so only the team can read it. Start with
+  `qh team create` or `/team create`, and teammates run `qh join`.
+- **Teammates' sessions:** read them and send them messages.
+- **Simpler team create:** two questions and one confirm; `/team private` and `/team public`.
+- **A website and docs:** the homepage, the guide at /docs, and `/docs` opens it from qh.
+- Typed `/commands` show in the transcript, and rejected API keys are no longer saved.
+- MIT license.
+
+## 0.1.2 — 2026-10-10
+
+Sign in with your ChatGPT plan, coding-plan providers, and pickers for providers and models.
+
+- **Sign in with ChatGPT** and use your plan's allowance instead of an API key.
+- **Coding plans:** GLM (Z.ai), Kimi Code and MiniMax.
+- **Pickers:** choose a provider, and models grouped by provider.
+- **Slash-command autocomplete:** Enter runs the highlighted command.
+
+## 0.1.1 — 2026-10-10
+
+A friendlier first run: tick any mix of model sources, search models, and sign in instead of pasting keys.
+
+- **Interactive setup:** tick any mix of sources (local, Ollama cloud, API keys) and search the
+  model list.
+- **Ollama cloud** through `ollama signin`, with no API key.
+- **OpenRouter** sign-in in the browser.
+- Shorter install commands, and a README.
+
+## 0.1.0 — 2026-10-10
+
+The first release: a terminal coding agent for local and cloud models, with several sessions side by side.
+
+- **A coding agent in your terminal** for Ollama models and OpenAI-compatible providers:
+  OpenRouter, OpenAI, Anthropic, Groq, DeepSeek and Mistral.
+- **Tools:** read, write and edit files, run commands, grep, rename symbols, find references,
+  fetch web pages, a todo list, memory, and a browser.
+- **Several sessions as tabs** that message each other and hand work around, with a live map.
+- **Modes** from ask to auto, and `/undo` and `/diff` for the agent's changes.
+- **Sized to your GPU:** the context window fits your graphics memory (`/tier`), and long
+  conversations are compacted.
+- MCP servers, hooks, skills and your own `/commands`.
+- A setup wizard, and on Windows commands run in Git Bash when it's installed.

@@ -91,6 +91,7 @@ pub struct Peer {
     sign: String,                           // their signing key (Ed25519), named in the folder
     anchor: String,                         // the commit GitHub vouches for their keys on
     signed: bool,                           // the folder's signature checks out against `sign`
+    qh: String,                             // the qh version they run (empty before 0.1.4)
 }
 
 /// A member's keys as we know them: (member key, signing key, GitHub confirmed them).
@@ -402,7 +403,7 @@ fn vet(repo: &str, tok: &str, p: &Peer, hooks: &Hooks) -> bool {
     let login = &p.login;
     if !p.signed {
         warn_once(repo, Some(hooks), &format!("unsigned {login}"), format!(
-            "ignored {login}'s board folder: it isn't signed with their member key (they run an old qh, or someone else wrote it)"));
+            "ignored {login}'s board folder: it isn't signed with their member key. Most likely they run a qh older than 0.1.4: ask them to run the install line again (kesavsabari.github.io/qh-rs). Otherwise someone else wrote it."));
         return false;
     }
     let Some((pin, newest)) = with(repo, |s| (s.pins.get(login).cloned(), s.git_ms.get(login).copied().unwrap_or(0))) else { return false };
@@ -513,6 +514,7 @@ fn read_folder(f: &Folder, repo: &str, login: &str, key: Option<&Key>) -> Peer {
         pub_key: f.get("pub").trim().to_string(),
         signed: !sign.is_empty() && tc::folder_signed_by(&sign, f.get("sig"), repo, login, &f.msg, &f.files),
         anchor: f.get("anchor").trim().to_string(), sign,
+        qh: msg["qh"].as_str().unwrap_or("").to_string(),
         ..Default::default()
     };
     for (name, content) in &f.files {
@@ -793,7 +795,7 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks) -> Result<String, Strin
                     quick = Some(q);
                 }
             });
-            let msg = json!({"v": 2, "state": state_word, "ts": now(), "ms": now_ms()});
+            let msg = json!({"v": 2, "state": state_word, "ts": now(), "ms": now_ms(), "qh": crate::update::VERSION});
             files.push(("sign".into(), sign_pub.clone()));
             files.push(("anchor".into(), idc.clone()));
             let sig = tc::sign_folder(&secret, &repo2, &me2, &msg.to_string(), &files);
@@ -905,6 +907,11 @@ fn absorb(repo: &str, root: &Path, list: &[(String, String)], shas: &mut HashMap
         let f = folder_files(root, sha);
         let p = read_folder(&f, repo, login, None);
         if vet(repo, tok, &p, hooks) {
+            if crate::update::newer(&p.qh, crate::update::VERSION) {
+                warn_once(repo, Some(hooks), &format!("newer qh {}", p.qh), format!(
+                    "{login} runs qh {}, newer than yours ({}): run {} so you both work the same way",
+                    p.qh, crate::update::VERSION, crate::update::how()));
+            }
             folders.push((f, p));
         }
     }

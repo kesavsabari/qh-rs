@@ -20,6 +20,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - name: tag matches Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          grep -q "^version = \"${GITHUB_REF_NAME#v}\"" Cargo.toml || { echo "tag $GITHUB_REF_NAME but Cargo.toml says $(grep '^version' Cargo.toml)"; exit 1; }
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}

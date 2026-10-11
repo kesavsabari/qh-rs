@@ -69,7 +69,12 @@
   <pre><code>irm kesavsabari.github.io/qh | iex</code></pre>
   <h3>Linux and macOS</h3>
   <pre><code>curl -fsSL kesavsabari.github.io/qh/sh | sh</code></pre>
-  <p>Then open a <b>new</b> terminal, so <code>qh</code> is on your PATH. To update later, run the same command again.</p>
+  <p>Then open a <b>new</b> terminal, so <code>qh</code> is on your PATH.</p>
+  <h3>Updating</h3>
+  <p>qh looks for a new version once a day. When there is one, the bottom line says <b>Update available! Run: qh update</b>. Run it in a terminal, or type <code>/update</code> inside qh, then restart qh.</p>
+  <pre><code>qh update
+qh --version</code></pre>
+  <p>qh only installs a release signed with the qh release key, checks the download against it, makes sure it starts, and never installs an older version. The daily check fetches two small files from GitHub and sends nothing about you; turn it off with <code>update_check = "off"</code> in <code>config.toml</code>. qh 0.1.3 and older can't update themselves: run the install command above once more.</p>
   <div class="note">On Windows, qh runs commands with <a href="https://git-scm.com/download/win">Git Bash</a> if it's installed, otherwise PowerShell. Installing Git also gives you <code>git</code>, which team mode needs.</div>
 </section>
 

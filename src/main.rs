@@ -26,6 +26,7 @@ mod textcall;
 mod tier;
 mod tools;
 mod ui;
+mod update;
 
 use hub::{lock, Event, Hub};
 use std::io::Write;
@@ -35,6 +36,7 @@ const USAGE: &str = "qh [--resume [id|latest]] [--profile coding|general|all] [-
 qh setup                connect a model (local Ollama or a cloud API key)
 qh team create [user…]  share this project on GitHub and invite friends · qh join owner/repo [code]
 qh docs                 open the guide in your browser
+qh update               install the newest qh (qh --version shows this one)
 qh login chatgpt        use your ChatGPT plan, Go included (qh logout chatgpt)
 qh login <provider>     save an API key (openrouter, ollama-cloud, openai, groq, anthropic…)
 qh -p \"prompt\" [-p \"next turn\" ...] [-y] [--ctx N] [--stats FILE]
@@ -121,6 +123,11 @@ fn main() {
         (Some("join"), Some(repo)) => std::process::exit(teamsetup::join(repo, argv.get(3).map(String::as_str))),
         (Some("link"), _) => std::process::exit(link::cli(&argv[2..])),
         (Some("relay"), _) => std::process::exit(relay::cli(&argv[2..])),
+        (Some("--version" | "-V"), _) => {
+            println!("qh {}", update::VERSION);
+            std::process::exit(0);
+        }
+        (Some("update"), _) => std::process::exit(update::cli()),
         (Some("docs"), _) => {
             platform::open_url(platform::DOCS);
             println!("{}", platform::DOCS);
@@ -161,6 +168,7 @@ fn main() {
         (cfg.ctx, cfg.compact_at, cfg.ctx_set) = (c, c * 88 / 100, true);
     }
     mcp::init(&cfg.mcp);
+    let update_check = cfg.update_check;
     let (tx, rx) = ui::channel_pair();
     let resume_hub = args.resume.as_deref() == Some("latest") && args.print.is_empty();
     let hub_path = if resume_hub { Hub::latest() } else { None };
@@ -200,6 +208,7 @@ fn main() {
         browser::shutdown();
         std::process::exit(code);
     }
+    update::check_in_background(update_check);
     let r = ui::run(hub, tx, rx);
     browser::shutdown();
     if let Err(e) = r {

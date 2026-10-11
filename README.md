@@ -24,6 +24,13 @@ curl -fsSL kesavsabari.github.io/qh/sh | sh
 
 Open a **new** terminal afterwards so `qh` is on your PATH.
 
+**Updating.** qh looks for a new version once a day. When there is one, the bottom line says
+`Update available! Run: qh update`. `qh update` (or `/update` inside qh) installs it. It only
+installs releases signed with the qh release key, and never an older version. `qh --version`
+shows what you run. `update_check = "off"` in config.toml stops the daily check. That check
+fetches two small files from GitHub and sends nothing about you or your install. qh 0.1.3 and
+older can't update themselves: run the install command again once.
+
 ## First run
 
 Go to a project folder and type `qh`. On first start it asks how you want to run models:

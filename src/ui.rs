@@ -45,13 +45,13 @@ const HELP: &str = "/new <name> [profile]  new session (Ctrl+N: instant, auto-na
 /promise [fn what]     make a teammate's last answer (or your own words) a checked promise: edits that break it are held
 /tier                  how the context window was sized to your GPU
 /mode [ask|auto-edit|auto|plan] (Shift+Tab)  /role [text]  /think  /tokens  /compact  /clear  /profile [name]
-/docs (guide in your browser)  /undo  /diff  /allow [pattern]  /sessions  /commands (your own /name prompts)  /mcp (servers)
+/docs (guide in your browser)  /update (newest qh)  /undo  /diff  /allow [pattern]  /sessions  /commands (your own /name prompts)  /mcp (servers)
 Alt+1..9 or Alt+←/→ switch · PgUp/PgDn scroll · Ctrl+O open last tool · Ctrl+L log · Esc interrupt · Ctrl+Q quit";
 
 use crate::tools::DANGER;
 
 /// What the `/` autocomplete offers; custom commands are added from .qh/commands.
-const COMMANDS: [(&str, &str); 35] = [
+const COMMANDS: [(&str, &str); 36] = [
     ("/model", "pick this tab's model"), ("/provider", "connect providers: sign in, keys"),
     ("/new", "new session tab"), ("/close", "close this tab"), ("/mode", "ask · auto-edit · auto · plan"),
     ("/compact", "shrink the conversation"), ("/clear", "start this tab fresh"), ("/undo", "undo the agent's file changes"),
@@ -60,7 +60,7 @@ const COMMANDS: [(&str, &str); 35] = [
     ("/role", "give this tab a role"), ("/map", "map of sessions and messages"), ("/layout", "tabs or grid"),
     ("/msg", "message another tab"), ("/sessions", "saved sessions"), ("/allow", "auto-approve rules"),
     ("/release", "let held messages through"), ("/pause", "hold automatic messaging"), ("/resume", "resume messaging"),
-    ("/mcp", "MCP servers"), ("/team", "your team: start or join; in a team, opens the team room (Ctrl+T)"), ("/relay", "relay server for teammates nothing else reaches"), ("/commands", "your own /commands"), ("/help", "everything"), ("/docs", "open the docs in your browser"), ("/project", "switch project (Ctrl+P)"),
+    ("/mcp", "MCP servers"), ("/team", "your team: start or join; in a team, opens the team room (Ctrl+T)"), ("/relay", "relay server for teammates nothing else reaches"), ("/commands", "your own /commands"), ("/help", "everything"), ("/docs", "open the docs in your browser"), ("/update", "install the newest qh"), ("/project", "switch project (Ctrl+P)"),
     ("/anyway", "let this tab edit what a teammate is changing"),
     ("/answers", "may teammates' agents ask yours: auto · ask · off"),
     ("/promise", "hold teammates to their last answer: edits that break it are held"),
@@ -1358,6 +1358,18 @@ impl App {
                 Ok(t) => self.note(&a, t),
                 Err(e) => self.err(&a, e),
             },
+            "/update" => {
+                // the download blocks, so it runs off the UI thread and reports back as notes
+                let (hub, a2) = (self.hub.clone(), a.clone());
+                self.note(&a, format!("looking for a newer qh (this is {})…", crate::update::VERSION));
+                std::thread::spawn(move || {
+                    let say = |s: &str| hub.emit(&a2, Event::Notice(s.to_string()));
+                    say(&match crate::update::run(&say) {
+                        Ok(m) => m,
+                        Err(e) => format!("✗ update: {e}"),
+                    });
+                });
+            }
             "/docs" => {
                 crate::platform::open_url(crate::platform::DOCS);
                 self.note(&a, format!("opening the docs: {}", crate::platform::DOCS));
@@ -1755,6 +1767,17 @@ $ARGUMENTS is replaced by what you type after the command".into()
         f.render_widget(Paragraph::new(line), input);
         f.set_cursor_position((input.x + 2 + cx as u16, input.y));
         let hints = "⇧Tab mode  ^N new  ^W close  ^G grid  ^Space team⇄personal  ^T team map  ^B sessions map  ^P projects  ^L log  Alt+←/→ tabs  PgUp/Dn scroll  ^O tool  Esc stop  ^Q quit";
+        // a newer qh: a standing notice at the right end of the bottom line, over the hints
+        let foot = match crate::update::available() {
+            Some(v) => {
+                let note = format!(" Update available ({v})! Run: {} ", crate::update::how());
+                let w = (note.chars().count() as u16).min(foot.width);
+                let [rest, right] = Layout::horizontal([Constraint::Min(0), Constraint::Length(w)]).areas(foot);
+                f.render_widget(Paragraph::new(note).style(Style::new().fg(Color::Yellow)), right);
+                rest
+            }
+            None => foot,
+        };
         f.render_widget(Paragraph::new(hints).style(Style::new().fg(DIM)), foot);
         let sugg = self.suggestions();
         if !sugg.is_empty() && self.picker.is_none() {

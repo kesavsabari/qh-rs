@@ -42,6 +42,8 @@ pub struct Config {
     /// qh-link relay server for teammates nothing else reaches: "default", "none", or
     /// "host:port#secret" (from `qh relay`), comma-separated for several
     pub relay: String,
+    /// look for a newer qh once a day (`update_check = "off"` or false stops it)
+    pub update_check: bool,
 }
 
 pub fn config_dir() -> PathBuf {
@@ -140,6 +142,7 @@ pub fn load() -> Config {
         ctx_set: false,
         mouse: true,
         relay: "default".into(),
+        update_check: true,
     };
     let path = std::env::var("QH_CONFIG")
         .map(PathBuf::from)
@@ -173,6 +176,11 @@ pub fn load() -> Config {
         }
         if let Some(v) = s("mode") { c.mode = v }
         if let Some(v) = s("relay") { c.relay = v }
+        match t.get("update_check") {
+            Some(toml::Value::Boolean(b)) => c.update_check = *b,
+            Some(toml::Value::String(v)) => c.update_check = !matches!(v.as_str(), "off" | "false" | "no"),
+            _ => {}
+        }
         if let Some(p) = t.get("providers").and_then(|v| v.as_table()) {
             c.providers = p.iter().filter_map(|(k, v)| v.as_table().map(|t| (k.clone(), t.clone()))).collect();
         }

@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.6 — 2026-10-11
+
+- **The browser no longer gets stuck.** If qh lost track of its Chrome, every later start opened
+  a blank tab in it and failed with "browser did not start". qh now reconnects to its own
+  Chrome, opens a new tab if every window was closed, and shuts down one it gives up on.
+- A page with no console errors or failed requests now says so, so the model knows it checked.
+- Python folders with plain `test_*.py` files and no `pyproject.toml` get a test command
+  (`python3 -m unittest`).
+- **A quieter screen:** no tokens line after every reply (the status bar has it), text wraps at
+  100 columns on wide screens, a short key hint line (`/help` lists all keys), and the status
+  bar only mentions the profile and thinking when they differ from usual.
+- The model knows sessions are saved and that `qh --resume` reopens them.
+
 ## 0.1.5 — 2026-10-11
 
 - **Failed edits point at the right lines.** When an edit's text isn't in the file, the error

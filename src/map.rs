@@ -101,7 +101,7 @@ fn graph(hub: &Hub, files: bool) -> (Vec<Node>, Vec<(String, String, Color, Opti
             let shared = who.len() > 1;
             nodes.push(Node {
                 id: id.clone(),
-                label: format!("{short}/{}", if shared { "  ⚠ shared" } else { "" }),
+                label: format!("{short}/{}", if shared { "  (shared)" } else { "" }),
                 color: if shared { Color::Red } else { Color::Blue },
                 glyph: "▪",
             });

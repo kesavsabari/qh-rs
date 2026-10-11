@@ -39,6 +39,9 @@ pub struct Config {
     pub default_provider: String,
     pub ctx_set: bool,
     pub mouse: bool, // ctx came from config or --ctx; otherwise it is sized to the GPU
+    /// qh-link relay server for teammates nothing else reaches: "default", "none", or
+    /// "host:port#secret" (from `qh relay`), comma-separated for several
+    pub relay: String,
 }
 
 pub fn config_dir() -> PathBuf {
@@ -53,6 +56,62 @@ pub fn home() -> PathBuf {
 /// Shared with the Python harness, so sessions and hubs resume across both.
 pub fn state_dir() -> PathBuf {
     std::env::var("QH_STATE_DIR").map(PathBuf::from).unwrap_or_else(|_| crate::platform::state_base())
+}
+
+/// Set one top-level `key = "value"` in config.toml, keeping the rest of the file (comments,
+/// tables) as it is: an existing line is replaced, otherwise the setting goes above the first table.
+pub fn set(key: &str, value: &str) -> Result<PathBuf, String> {
+    let path = std::env::var("QH_CONFIG").map(PathBuf::from).unwrap_or_else(|_| crate::platform::config_base().join("config.toml"));
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    // private: it can hold a relay's secret
+    crate::platform::write_private(&path, set_in(&text, key, value).as_bytes()).map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
+fn set_in(text: &str, key: &str, value: &str) -> String {
+    let line = format!("{key} = \"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""));
+    let mut out: Vec<String> = vec![];
+    let (mut done, mut in_table) = (false, false);
+    for l in text.lines() {
+        let t = l.trim_start();
+        if t.starts_with('[') {
+            if !done {
+                out.push(line.clone());
+                done = true;
+            }
+            in_table = true;
+        }
+        if !in_table && t.split('=').next().is_some_and(|k| k.trim() == key) {
+            if !done {
+                out.push(line.clone());
+                done = true;
+            }
+            continue;
+        }
+        out.push(l.to_string());
+    }
+    if !done {
+        out.push(line);
+    }
+    out.join("\n") + "\n"
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn set_changes_one_setting_and_keeps_the_rest() {
+        let text = "# mine\nmodel = \"a\"\nrelay = \"none\"\n\n[providers.x]\nrelay = \"table, untouched\"\n";
+        let out = super::set_in(text, "relay", "1.2.3.4:47232#k");
+        assert_eq!(out, "# mine\nmodel = \"a\"\nrelay = \"1.2.3.4:47232#k\"\n\n[providers.x]\nrelay = \"table, untouched\"\n");
+        let out = super::set_in("model = \"a\"\n[t]\nx = 1\n", "relay", "none");
+        assert_eq!(out, "model = \"a\"\nrelay = \"none\"\n[t]\nx = 1\n");
+        assert_eq!(super::set_in("", "relay", "say \"hi\""), "relay = \"say \\\"hi\\\"\"\n");
+        let parsed: toml::Table = super::set_in("", "relay", "a\\b\"c").parse().unwrap();
+        assert_eq!(parsed["relay"].as_str(), Some("a\\b\"c"));
+    }
 }
 
 pub fn load() -> Config {
@@ -80,11 +139,24 @@ pub fn load() -> Config {
         default_provider: String::new(),
         ctx_set: false,
         mouse: true,
+        relay: "default".into(),
     };
     let path = std::env::var("QH_CONFIG")
         .map(PathBuf::from)
         .unwrap_or_else(|_| crate::platform::config_base().join("config.toml"));
-    if let Some(t) = std::fs::read_to_string(path).ok().and_then(|s| s.parse::<toml::Table>().ok()) {
+    if let Some(t) = std::fs::read_to_string(&path).ok().and_then(|s| s.parse::<toml::Table>().ok()) {
+        // it holds secrets (a relay's key, API keys): only its owner may read it
+        let secret = t.get("relay").and_then(|v| v.as_str()).is_some_and(|r| r.contains('#'))
+            || t.contains_key("openrouter_key") || t.contains_key("providers");
+        #[cfg(unix)]
+        if secret {
+            use std::os::unix::fs::PermissionsExt;
+            if std::fs::metadata(&path).is_ok_and(|m| m.permissions().mode() & 0o077 != 0) {
+                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = secret;
         let s = |k: &str| t.get(k).and_then(|v| v.as_str()).map(String::from);
         let n = |k: &str| t.get(k).and_then(|v| v.as_integer()).map(|v| v as usize);
         if let Some(v) = s("host") { c.host = v }
@@ -100,6 +172,7 @@ pub fn load() -> Config {
             c.allow = a.iter().filter_map(|v| v.as_str().map(String::from)).collect();
         }
         if let Some(v) = s("mode") { c.mode = v }
+        if let Some(v) = s("relay") { c.relay = v }
         if let Some(p) = t.get("providers").and_then(|v| v.as_table()) {
             c.providers = p.iter().filter_map(|(k, v)| v.as_table().map(|t| (k.clone(), t.clone()))).collect();
         }

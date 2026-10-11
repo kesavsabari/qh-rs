@@ -5,7 +5,7 @@
 use crate::team::{api, auth_env, github_repo, remember, token};
 use serde_json::json;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 fn ask(q: &str) -> String {
@@ -64,6 +64,17 @@ fn secrets(dir: &Path) -> Vec<String> {
     out
 }
 
+/// Your home folder (or anything above it) is never a project: it holds your keys and every
+/// other project. Refuse before asking anything.
+pub fn not_a_project(cwd: &Path) -> Result<(), String> {
+    let home = crate::platform::home();
+    let (c, h) = (cwd.canonicalize().unwrap_or(cwd.into()), home.canonicalize().unwrap_or(home));
+    if h.starts_with(&c) {
+        return Err(format!("{} is your home folder (or above it), not a project. Pick or make a project folder: /team create in qh opens a folder browser.", cwd.display()));
+    }
+    Ok(())
+}
+
 pub fn create(friends: &[String]) -> i32 {
     match create_inner(friends) {
         Ok(()) => 0,
@@ -72,8 +83,9 @@ pub fn create(friends: &[String]) -> i32 {
 }
 
 /// Two questions and one confirmation; everything else has a default.
-fn create_inner(friends: &[String]) -> Result<(), String> {
+pub fn create_inner(friends: &[String]) -> Result<(), String> {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    not_a_project(&cwd)?;
     let tok = token().ok_or("no GitHub login found: install the GitHub CLI and run `gh auth login`, or set GITHUB_TOKEN")?;
     let (_, _, me) = api("GET", "/user", &tok, None, None)?;
     let me = me["login"].as_str().ok_or("GitHub didn't say who you are")?.to_string();
@@ -117,7 +129,9 @@ fn create_inner(friends: &[String]) -> Result<(), String> {
         None => println!("  • put this folder on GitHub as {repo} ({})", if private { "private" } else { "PUBLIC: anyone can see the code" }),
     }
     if !secret_files.is_empty() {
-        println!("  • leave out {} ({})", secret_files.join(", "), if secret_files.len() == 1 { "looks like a secret" } else { "look like secrets" });
+        let shown: Vec<&str> = secret_files.iter().take(5).map(String::as_str).collect();
+        let more = if secret_files.len() > 5 { format!(" and {} more", secret_files.len() - 5) } else { String::new() };
+        println!("  • leave out {}{more} ({})", shown.join(", "), if secret_files.len() == 1 { "looks like a secret" } else { "look like secrets" });
     }
     for (_, shown) in &people {
         println!("  • invite {shown}");
@@ -148,20 +162,55 @@ fn create_inner(friends: &[String]) -> Result<(), String> {
         git(&cwd, &["push", "-q", "-u", &url, &format!("HEAD:{branch}")], &auth_env(&tok))?;
         println!("✓ on GitHub: https://github.com/{repo}");
     }
-    let mut invited = vec![];
+    // the team key exists from the start, so each invite can carry it under its own code
+    crate::team::ensure_key(&repo);
+    let mut lines = vec![];
     for (f, shown) in &people {
         match api("PUT", &format!("/repos/{repo}/collaborators/{f}"), &tok, Some(&json!({"permission": "push"})), None) {
-            Ok((201, _, _)) => { println!("✓ invited {shown}"); invited.push(f.clone()) }
-            Ok((204, _, _)) => println!("✓ {shown} already has access"),
+            Ok((c @ (201 | 204), _, _)) => {
+                println!("✓ {shown} {}", if c == 201 { "invited" } else { "already has access" });
+                if let Some(code) = crate::team::add_invite(&repo, f) { lines.push(format!("{f}:  qh join {repo} {code}")) }
+            }
             Ok((c, _, _)) => println!("✗ GitHub answered {c} for {f}"),
             Err(e) => println!("✗ {f}: {e}"),
         }
     }
     remember(&repo, true);
-    if !invited.is_empty() {
-        println!("\nSend this to your friend{}:\n\n    qh join {repo}\n", if invited.len() > 1 { "s" } else { "" });
+    if !lines.is_empty() {
+        println!("\nSend each friend their line (it lets them in even if you're offline):\n");
+        for l in lines { println!("    {l}") }
+        println!();
     }
     Ok(())
+}
+
+/// Give friends access to this project's repo; they then run `qh join owner/repo`.
+pub fn invite(cwd: &Path, users: &[String]) -> Result<String, String> {
+    let (_, repo) = github_repo(cwd).ok_or("this folder isn't on GitHub yet: /team create first")?;
+    let tok = token().ok_or("no GitHub login found: run `gh auth login`")?;
+    let mut out = vec![];
+    let mut invited = false;
+    let mut codes = vec![];
+    for f in users {
+        let ok = |f: &str, codes: &mut Vec<String>| {
+            if let Some(c) = crate::team::add_invite(&repo, f) { codes.push(format!("{f}:  qh join {repo} {c}")) }
+        };
+        out.push(match api("PUT", &format!("/repos/{repo}/collaborators/{f}"), &tok, Some(&json!({"permission": "push"})), None) {
+            Ok((201, _, _)) => { invited = true; ok(f, &mut codes); format!("✓ invited {f}") }
+            Ok((204, _, _)) => { invited = true; ok(f, &mut codes); format!("✓ {f} already has access") }
+            Ok((404, _, _)) => format!("✗ no GitHub user {f}"),
+            Ok((403, _, _)) => format!("✗ GitHub refused: only the repo's owner or an admin can invite"),
+            Ok((c, _, _)) => format!("✗ GitHub answered {c} for {f}"),
+            Err(e) => format!("✗ {f}: {e}"),
+        });
+    }
+    if invited && codes.is_empty() {
+        out.push(format!("Send this to your friend: qh join {repo}  (you'll let them in when they turn up)"));
+    } else if invited {
+        out.push("Send each friend their line; it lets them in even if you're offline:".into());
+        out.extend(codes.into_iter().map(|c| format!("  {c}")));
+    }
+    Ok(out.join("\n"))
 }
 
 /// Make the project's GitHub repo private or public.
@@ -176,14 +225,14 @@ pub fn set_visibility(cwd: &Path, private: bool) -> Result<String, String> {
        else { format!("{repo} is now public: anyone can see the code (team data stays encrypted)") })
 }
 
-pub fn join(repo: &str) -> i32 {
-    match join_inner(repo) {
-        Ok(()) => 0,
+pub fn join(repo: &str, code: Option<&str>) -> i32 {
+    match join_inner(repo, code) {
+        Ok(_) => 0,
         Err(e) => { eprintln!("✗ {e}"); 1 }
     }
 }
 
-fn join_inner(repo: &str) -> Result<(), String> {
+pub fn join_inner(repo: &str, invite_code: Option<&str>) -> Result<PathBuf, String> {
     let repo = repo.trim().trim_start_matches("https://github.com/").trim_end_matches(".git").trim_end_matches('/');
     if repo.split('/').count() != 2 { return Err("use the form owner/repo, e.g. qh join kesavsabari/webshop".into()) }
     let tok = token().ok_or("no GitHub login found: install the GitHub CLI and run `gh auth login`, or set GITHUB_TOKEN")?;
@@ -217,6 +266,7 @@ fn join_inner(repo: &str) -> Result<(), String> {
         git(&std::env::current_dir().map_err(|e| e.to_string())?, &["clone", "-q", &format!("https://github.com/{repo}.git"), name], &auth_env(&tok))?;
     }
     remember(repo, true);
+    if let Some(c) = invite_code.filter(|c| !c.trim().is_empty()) { crate::team::set_join_code(repo, c) }
     println!("✓ joined {repo}. Start working together:\n\n    cd {name}\n    qh\n\nTeam mode turns on by itself; your teammates see you within seconds.");
-    Ok(())
+    Ok(dir)
 }

@@ -224,9 +224,10 @@ session tests). Messages from other sessions start with [from <name>].", prompt:
         let (provider, model) = { let s = lock(&m.set); (s.provider.clone(), s.model.clone()) };
         let sees = crate::providers::resolve(&provider)
             .is_none_or(|p| p.kind != crate::providers::Kind::Ollama || crate::tier::caps(&p.base, &model).vision);
+        let team = crate::team::running_here(&m.cwd());
         tools.into_iter().filter(|t| {
             let n = t["function"]["name"].as_str().unwrap_or("");
-            if n == "screenshot" && !sees {
+            if (n == "screenshot" && !sees) || (n == "ask_team" && !team) {
                 return false;
             }
             !(solo && matches!(n, "list_sessions" | "read_session" | "send_message" | "ask"))
@@ -447,8 +448,18 @@ session tests). Messages from other sessions start with [from <name>].", prompt:
                     }
                 });
             }
+            let request = text.clone();
             let fin = engine::run(&hub, &m, text);
             hub.release_files(&m.name);
+            // in a team project: refresh this session's fact sheet (decided / next) for teammates
+            if crate::team::running_here(&m.cwd()) && !fin.starts_with("error") && fin != "interrupted" {
+                let (hub, m, fin) = (hub.clone(), m.clone(), fin.clone());
+                std::thread::spawn(move || {
+                    if let Some((decided, next)) = engine::sheet(&hub, &m, &request, &fin) {
+                        crate::team::set_sheet(&m.name, &m.cwd(), &decided, &next);
+                    }
+                });
+            }
             let (reply, hops) = {
                 let mut c = lock(&m.ctl);
                 (c.reply.take(), c.hops)
@@ -866,6 +877,11 @@ fn hub_schemas() -> Vec<Value> {
                &[("to", "string"), ("question", "string")], &["to", "question"]),
         schema("spawn", "Start a worker session on a task; its result comes back to you.",
                &[("name", "string"), ("task", "string"), ("profile", "string")], &["name", "task"]),
+        schema("ask_team", "Ask a teammate (another person on this team project, with their own agent) about code they \
+own or are changing: a function's shape, an API, what they're about to change. Name the file or function in the question \
+and it goes to whoever is changing or using it. First call: their fact sheet (cheap). deep=true: their agent answers from its \
+live session; the answer arrives later as a message, so keep working meanwhile. to = \"login\" or \"login/session\" (optional).",
+               &[("question", "string"), ("to", "string"), ("deep", "boolean")], &["question"]),
     ]
 }
 

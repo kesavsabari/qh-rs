@@ -3,6 +3,10 @@
 //! member who holds it "wraps" a copy for each other member (X25519 between the two members'
 //! keys → HKDF-SHA256 → ChaCha20-Poly1305), so only that member can open it. Everything else
 //! on the board is sealed with the team key, so on a public repo outsiders see noise.
+//!
+//! Git doesn't say who pushed a ref, so anyone with push access could write a folder under
+//! someone else's name. Every folder is therefore signed (Ed25519, derived from the member key),
+//! and readers only take folders whose signature matches the key they know for that login.
 use crate::oauth::{b64url, b64url_decode, random};
 use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, CHACHA20_POLY1305};
 use x25519_dalek::{PublicKey, StaticSecret};
@@ -54,6 +58,41 @@ pub fn unwrap(blob: &str, mine: &StaticSecret, sender_pub: &str, repo: &str) -> 
     open(&pair_key(mine, sender_pub)?, &format!("wrap:{repo}"), blob)?.try_into().ok()
 }
 
+/// The member's signing key, derived from their member key (so there's still one secret to keep).
+fn signer(mine: &StaticSecret) -> ring::signature::Ed25519KeyPair {
+    let salt = ring::hkdf::Salt::new(ring::hkdf::HKDF_SHA256, b"qh team sign v1");
+    let mut seed = [0u8; 32];
+    salt.extract(mine.as_bytes()).expand(&[], ring::hkdf::HKDF_SHA256).expect("hkdf").fill(&mut seed).expect("hkdf");
+    ring::signature::Ed25519KeyPair::from_seed_unchecked(&seed).expect("32-byte seed")
+}
+
+pub fn sign_pub(mine: &StaticSecret) -> String {
+    use ring::signature::KeyPair;
+    b64url(signer(mine).public_key().as_ref())
+}
+
+/// What a folder signature covers: the repo, the login, the commit message, and every file
+/// (name and exact bytes) except the signature itself.
+fn folder_bytes(repo: &str, login: &str, msg: &str, files: &[(String, String)]) -> Vec<u8> {
+    let mut f: Vec<&(String, String)> = files.iter().filter(|(n, _)| n != "sig").collect();
+    f.sort();
+    let mut out = format!("qh folder v1\n{repo}\n{login}\n{}\n", msg.trim()).into_bytes();
+    for (name, content) in f {
+        out.extend(format!("{name}\0{}\0", content.len()).as_bytes());
+        out.extend(content.as_bytes());
+    }
+    out
+}
+
+pub fn sign_folder(mine: &StaticSecret, repo: &str, login: &str, msg: &str, files: &[(String, String)]) -> String {
+    b64url(signer(mine).sign(&folder_bytes(repo, login, msg, files)).as_ref())
+}
+
+pub fn folder_signed_by(sign_pub: &str, sig: &str, repo: &str, login: &str, msg: &str, files: &[(String, String)]) -> bool {
+    let key = ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, b64url_decode(sign_pub.trim()));
+    key.verify(&folder_bytes(repo, login, msg, files), &b64url_decode(sig.trim())).is_ok()
+}
+
 pub fn new_team_key() -> Key {
     random()
 }
@@ -96,5 +135,26 @@ mod tests {
         assert_eq!(open(&k, "data:rahul", &s).as_deref(), Some(&b"hello"[..]));
         assert!(open(&k, "data:kesav", &s).is_none(), "a blob can't be passed off as someone else's");
         assert!(open(&new_team_key(), "data:rahul", &s).is_none());
+    }
+
+    #[test]
+    fn a_folder_signature_binds_every_file_the_login_and_the_repo() {
+        let (a, m) = (StaticSecret::from(random()), StaticSecret::from(random()));
+        let files = vec![("pub".to_string(), "P".to_string()), ("data".to_string(), "D".to_string()), ("keys/bob".to_string(), "W".to_string())];
+        let sig = sign_folder(&a, "o/r", "alice", "{\"ts\":1}", &files);
+        let pk = sign_pub(&a);
+        assert_eq!(pk, sign_pub(&a), "the same member key gives the same signing key");
+        assert!(folder_signed_by(&pk, &sig, "o/r", "alice", "{\"ts\":1}\n", &files), "a trailing newline from git doesn't matter");
+        let mut changed = files.clone();
+        changed[1].1 = "D2".into();
+        assert!(!folder_signed_by(&pk, &sig, "o/r", "alice", "{\"ts\":1}", &changed), "data swapped");
+        let mut more = files.clone();
+        more.push(("keys/mallory".into(), "W".into()));
+        assert!(!folder_signed_by(&pk, &sig, "o/r", "alice", "{\"ts\":1}", &more), "a file added");
+        assert!(!folder_signed_by(&pk, &sig, "o/r", "bob", "{\"ts\":1}", &files), "another login");
+        assert!(!folder_signed_by(&pk, &sig, "o/x", "alice", "{\"ts\":1}", &files), "another repo");
+        assert!(!folder_signed_by(&pk, &sig, "o/r", "alice", "{\"ts\":2}", &files), "another message (an old folder replayed)");
+        let forged = sign_folder(&m, "o/r", "alice", "{\"ts\":1}", &files);
+        assert!(!folder_signed_by(&pk, &forged, "o/r", "alice", "{\"ts\":1}", &files), "a teammate can't sign as alice");
     }
 }

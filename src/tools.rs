@@ -161,19 +161,18 @@ fn fuzzy_span(text: &str, old: &str) -> Option<(usize, usize, isize)> {
     Some((i, i + want.len(), indent(lines[i]) as isize - indent(first) as isize))
 }
 
-fn edit_file(cwd: &Path, a: &Value) -> Result<String, String> {
-    let (path, old, new) = (&fix_path(cwd, sa(a, "path")), sa(a, "old"), sa(a, "new"));
-    let text = std::fs::read_to_string(path).map_err(|e| ferr(cwd, sa(a, "path"), e))?;
+/// What edit_file makes of `text`: the new text plus a note on how it matched, or the message
+/// for the model when `old` doesn't match exactly once.
+fn edit_text(text: &str, old: &str, new: &str) -> Result<(String, String), String> {
     let n = if old.is_empty() { 0 } else { text.matches(old).count() };
     if n == 1 {
-        std::fs::write(path, text.replacen(old, new, 1)).map_err(|e| e.to_string())?;
-        return Ok(format!("edited {path}{}", check_syntax(path)));
+        return Ok((text.replacen(old, new, 1), String::new()));
     }
     if n > 1 {
-        return Ok(format!("error: old string found {n} times; include more surrounding lines so it is unique"));
+        return Err(format!("error: old string found {n} times; include more surrounding lines so it is unique"));
     }
-    let Some((s, e, delta)) = fuzzy_span(&text, old) else {
-        return Ok("error: old string not found. read_file the exact lines and copy them verbatim".into());
+    let Some((s, e, delta)) = fuzzy_span(text, old) else {
+        return Err("error: old string not found. read_file the exact lines and copy them verbatim".into());
     };
     let pad = |l: &str| -> String {
         if l.trim().is_empty() {
@@ -192,8 +191,36 @@ fn edit_file(cwd: &Path, a: &Value) -> Result<String, String> {
     if text.ends_with('\n') {
         out.push('\n');
     }
-    std::fs::write(path, out).map_err(|e| e.to_string())?;
-    Ok(format!("edited {path} (matched lines {}-{e} ignoring whitespace){}", s + 1, check_syntax(path)))
+    Ok((out, format!(" (matched lines {}-{e} ignoring whitespace)", s + 1)))
+}
+
+fn edit_file(cwd: &Path, a: &Value) -> Result<String, String> {
+    let (path, old, new) = (&fix_path(cwd, sa(a, "path")), sa(a, "old"), sa(a, "new"));
+    let text = std::fs::read_to_string(path).map_err(|e| ferr(cwd, sa(a, "path"), e))?;
+    match edit_text(&text, old, new) {
+        Err(msg) => Ok(msg),
+        Ok((out, how)) => {
+            std::fs::write(path, out).map_err(|e| e.to_string())?;
+            Ok(format!("edited {path}{how}{}", check_syntax(path)))
+        }
+    }
+}
+
+/// The file a write_file / edit_file call would change and its text afterwards, without
+/// touching anything (None when the edit wouldn't apply).
+pub fn preview(cwd: &Path, name: &str, a: &Value) -> Vec<(PathBuf, String)> {
+    let path = PathBuf::from(fix_path(cwd, sa(a, "path")));
+    match name {
+        "write_file" => vec![(path, sa(a, "content").to_string())],
+        "edit_file" => std::fs::read_to_string(&path).ok()
+            .and_then(|text| edit_text(&text, sa(a, "old"), sa(a, "new")).ok()).map(|(t, _)| (path, t)).into_iter().collect(),
+        "rename_symbol" => {
+            let Ok(pat) = word(sa(a, "old")) else { return vec![] };
+            source_files(cwd, sa(a, "path")).into_iter().filter(|(_, t)| pat.is_match(t))
+                .map(|(f, t)| { let after = pat.replace_all(&t, regex::NoExpand(sa(a, "new"))).into_owned(); (f, after) }).collect()
+        }
+        _ => vec![],
+    }
 }
 
 fn remember(cwd: &Path, a: &Value) -> Result<String, String> {
@@ -213,7 +240,7 @@ const SKIP_DIRS: [&str; 7] = [".git", ".venv", "venv", "node_modules", "__pycach
 pub fn source_files(cwd: &Path, root: &str) -> Vec<(PathBuf, String)> {
     let root = if root.is_empty() { cwd.to_path_buf() } else { resolve(cwd, root) };
     let git = Command::new("git").arg("ls-files").current_dir(&root).output();
-    let files: Vec<PathBuf> = match git {
+    let files: Vec<PathBuf> = if root.is_file() { vec![root.clone()] } else { match git {
         Ok(o) if o.status.success() && !o.stdout.is_empty() => {
             String::from_utf8_lossy(&o.stdout).lines().map(|f| root.join(f)).collect()
         }
@@ -235,7 +262,7 @@ pub fn source_files(cwd: &Path, root: &str) -> Vec<(PathBuf, String)> {
             }
             out
         }
-    };
+    } };
     files.into_iter().filter_map(|f| {
         let md = std::fs::metadata(&f).ok()?;
         if md.len() >= 1_000_000 {

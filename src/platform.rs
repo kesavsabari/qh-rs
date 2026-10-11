@@ -287,7 +287,14 @@ pub fn write_private(path: &Path, body: &[u8]) -> std::io::Result<()> {
         o.mode(0o600);
     }
     // Windows: files under %APPDATA% already inherit a per-user ACL
-    o.open(path)?.write_all(body)
+    let mut f = o.open(path)?;
+    #[cfg(unix)]
+    {
+        // `mode` only applies to a new file: one made readable by an older version is fixed here
+        use std::os::unix::fs::PermissionsExt;
+        f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    f.write_all(body)
 }
 
 /// Unified-style diff of two texts: `diff -u` when it exists, else a small LCS diff.

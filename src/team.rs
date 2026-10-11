@@ -12,6 +12,21 @@
 //! nothing changes) and fetched with git when something did. The team is whoever can push to
 //! the repo; on a public repo outsiders see only noise. A message into someone's session runs
 //! on their machine, only after they allow it.
+//!
+//! Removing someone (`/team remove`, repo admins only) makes a new team key, one `epoch` higher,
+//! wrapped for everyone but them, and lists them in `removed`; it also takes away their access to
+//! the repo. Members switch to the new key when they see it from someone GitHub says is an admin,
+//! so whatever is written after that is noise to the removed person.
+//!
+//! A newcomer is let in (sent the team key) only once a member approves them: everyone you
+//! invited is approved up front, others ask. An invite also leaves the key sealed with a one-off
+//! code in `invites/<login>`, so the newcomer gets in with that code even when nobody is online.
+//! Several projects can be connected at once; the UI shows one at a time (`set_current`).
+//!
+//! Git is slow (seconds) but durable. Teammates who are online also hold a direct line (see
+//! link.rs): the same sealed `data`, minus transcripts, goes over it the moment it changes, and
+//! is taken in exactly like a fetched folder. Everything still goes through git as well, so a
+//! dropped line loses nothing; it only gets slower.
 use crate::backend::http;
 use crate::teamcrypto::{self as tc, Key};
 use serde_json::{json, Value};
@@ -25,16 +40,32 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const API: &str = "https://api.github.com";
 const MIN_WRITE: Duration = Duration::from_secs(10);
+const MIN_LINK_WRITE: Duration = Duration::from_secs(1); // floor for the address-change exemption
 const KEEPALIVE: Duration = Duration::from_secs(120);
 const POLL: Duration = Duration::from_secs(3);
 const OFFLINE_AFTER: u64 = 300; // seconds without a write before someone counts as offline
+const CLAIM_HOT: u64 = 600;     // a function someone edited this recently is theirs: others pause
+
+/// Who changed which functions, per session: file -> function -> when (unix seconds).
+pub type Claims = HashMap<String, HashMap<String, u64>>;
+
+/// A session paused because a teammate is changing the function it wanted to edit.
+#[derive(Clone, Debug, Default)]
+pub struct Wait {
+    pub session: String,
+    pub file: String,
+    pub func: String,
+    pub on: String, // the teammate's login
+    pub since: u64,
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct Peer {
     pub login: String,
     pub online: bool,
     pub ts: u64,
-    pub locked: bool, // we can't read their data (no team key yet)
+    pub locked: bool, // they have data we can't read (we have no team key yet)
+    pub joined: bool, // their data opened with our key: they're in the team
     pub sessions: Vec<(String, String, String)>, // name, status, role
     pub files: Vec<String>,
     pub transcripts: HashMap<String, Vec<(String, String)>>, // session -> (role, text)
@@ -42,6 +73,35 @@ pub struct Peer {
     wrapped: HashMap<String, String>, // keys/<login> in their folder
     outbox: Vec<Value>,
     acks: HashMap<String, u64>,
+    roles: HashMap<String, String>, // the roles they gave people, so we know ours with them
+    details: HashMap<String, SessionView>, // session -> topic, now, files, branch
+    invites: HashMap<String, String>,       // invites/<login>: the team key sealed with an invite code
+    epoch: u64,                             // which team key generation their folder is on
+    removed: Vec<String>,                   // who they say was removed from the team
+    chat: Vec<(u64, u64, String)>,          // their team chat lines: id, ts, text
+    notes: Vec<(u64, String, String, Vec<String>)>, // their change notes: id, text, file, functions/names changed
+    pub claims: HashMap<String, Claims>,    // session -> what it changed lately
+    pub uses: HashMap<String, HashMap<String, u64>>, // session -> names its fresh code uses -> when
+    pub waiting: Vec<Wait>,                 // their sessions paused on someone
+    sheets: HashMap<String, Sheet>,         // session -> what it decided and does next
+    promises: Vec<Promise>,                 // what their sessions count on staying true
+    link: Vec<String>,                      // where their qh-link listens ("lan=1.2.3.4:5"), sealed like the rest
+    link_ms: u64,                           // when those addresses were current (their clock, ms)
+    seq: u64,                               // when this copy was made (ms): an older git copy can't undo a live one
+    sign: String,                           // their signing key (Ed25519), named in the folder
+    anchor: String,                         // the commit GitHub vouches for their keys on
+    signed: bool,                           // the folder's signature checks out against `sign`
+}
+
+/// A member's keys as we know them: (member key, signing key, GitHub confirmed them).
+type Pin = (String, String, bool);
+
+/// The model-written part of a session's fact sheet; the rest comes from claims and uses.
+#[derive(Clone, Debug, Default)]
+pub struct Sheet {
+    pub decided: String,
+    pub next: String,
+    pub ts: u64,
 }
 
 /// A message from a teammate into one of our sessions, waiting for our answer.
@@ -51,7 +111,41 @@ pub struct Incoming {
     pub id: u64,
     pub session: String,
     pub text: String,
+    pub question: Option<Question>, // a question for our agent, answered from a side copy
 }
+
+/// A teammate's agent asking one of our sessions something.
+#[derive(Clone, Debug)]
+pub struct Question {
+    pub repo: String,
+    pub from: String,         // their login
+    pub from_session: String, // their session, where the answer goes ("" = the person asked)
+    pub id: u64,
+    pub session: String,      // our session that's asked
+    pub text: String,
+}
+
+/// A behaviour contract: "whoever changes `name` keeps this true", held by the session that
+/// relies on it. Checked by a model when someone edits that function (opt-in: made by /promise).
+#[derive(Clone, Debug, Default)]
+pub struct Promise {
+    pub session: String, // our session (or theirs, on a peer) that counts on it
+    pub name: String,    // the function
+    pub text: String,    // what must stay true
+    pub ts: u64,
+}
+
+/// One of our questions to a teammate's agent, until it's answered.
+#[derive(Clone, Debug)]
+struct Asked {
+    id: u64,
+    session: String,
+    to: String,
+    q: String,
+    ts: u64,
+}
+
+const ANSWERS_PER_HOUR: usize = 20; // questions our agents answer for teammates, at our cost
 
 struct State {
     repo: String,
@@ -63,19 +157,80 @@ struct State {
     next_id: u64,
     seen: HashMap<String, u64>, // highest message id handled, per sender
     pending: Vec<Incoming>,
-    trusted: Vec<String>,
-    dirty: bool,                // something to publish now (sent message, decision)
+    roles: HashMap<String, String>, // login -> viewer | trusted (member when absent); our own rules for our sessions
+    approved: Vec<String>,          // people we'll let in without asking (invited, or let in before)
+    asking: Vec<String>,            // newcomers waiting for "let in"
+    invites: HashMap<String, String>, // login -> sealed key we publish for them
+    epoch: u64,                       // our team key's generation (0: never changed)
+    removed: Vec<String>,             // people removed from the team: never given the key again
+    admins: HashMap<String, bool>,    // repo admins, as GitHub told us (who may change the key)
+    pins: HashMap<String, Pin>,       // login -> the keys their folders must be signed with
+    gh_login: String,                 // who GitHub says we are (differs from `me` only in tests)
+    git_ms: HashMap<String, u64>,     // newest folder taken from git, per person: older ones are replays
+    asked_github: HashMap<String, Instant>, // "login sign" -> when we last asked GitHub to vouch for it
+    warned: Vec<String>,              // warnings already shown this run
+    my_sha: String,                   // the folder commit we pushed last
+    chat: Vec<(u64, String, String)>, // ts, from, text: the team's chat, oldest first
+    my_chat: Vec<Value>,            // my last chat lines, published: {id, ts, text}
+    chat_seen: HashMap<String, u64>, // highest chat id taken in, per person
+    my_notes: Vec<Value>,           // change notes for teammates' agents, published: {id, ts, file, text}
+    notes_seen: HashMap<String, u64>, // highest note id taken in, per person
+    claims: HashMap<String, Claims>,  // our sessions' recent changes, published
+    uses: HashMap<String, HashMap<String, u64>>, // names our sessions' fresh code uses, published
+    waiting: Vec<Wait>,               // our sessions paused on a teammate
+    sheets: HashMap<String, Sheet>,   // our sessions' decided/next lines, published
+    asked: Vec<Asked>,                // our questions still out
+    answered: Vec<u64>,               // when we answered teammates' questions (the budget)
+    answers: String,                  // auto | ask | off: whether teammates' agents may ask ours
+    answerer: Option<std::sync::Arc<dyn Fn(Question) + Send + Sync>>,
+    promises: Vec<Promise>,           // what our sessions count on teammates keeping true, published
+    last_answer: HashMap<String, (String, Vec<String>, String)>, // session -> (who, names, answer): /promise turns it into promises
+    unread: usize,
+    dirty: bool,                    // something to publish now (sent message, decision)
+    running: std::sync::Arc<AtomicBool>,
+    finished: std::sync::Arc<AtomicBool>,
 }
 
-static STATE: Mutex<Option<State>> = Mutex::new(None);
-static RUNNING: AtomicBool = AtomicBool::new(false);
-static FINISHED: AtomicBool = AtomicBool::new(true); // the worker has written its goodbye
+static STATES: Mutex<Option<HashMap<String, State>>> = Mutex::new(None);
+static CURRENT: Mutex<String> = Mutex::new(String::new());
+
+/// Run `f` on one project's state.
+fn with<R>(repo: &str, f: impl FnOnce(&mut State) -> R) -> Option<R> {
+    STATES.lock().unwrap().get_or_insert_with(HashMap::new).get_mut(repo).map(f)
+}
+
+/// Run `f` on the project the UI is showing.
+fn cur<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> {
+    let repo = CURRENT.lock().unwrap().clone();
+    with(&repo, |s| if s.running.load(Relaxed) { Some(f(s)) } else { None }).flatten()
+}
+
+/// Which connected project the UI shows (team room, status bar, /team).
+pub fn set_current(repo: &str) {
+    *CURRENT.lock().unwrap() = repo.to_string();
+}
+
+pub fn running_for(repo: &str) -> bool {
+    with(repo, |s| s.running.load(Relaxed)).unwrap_or(false)
+}
+
+pub fn running() -> bool {
+    cur(|_| ()).is_some()
+}
+
+pub fn repo() -> Option<String> {
+    cur(|s| s.repo.clone())
+}
 
 fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
 fn git_in(root: &Path, args: &[&str], input: Option<&[u8]>, env: &[(&str, String)]) -> Option<String> {
+    git_raw(root, args, input, env).map(|o| String::from_utf8_lossy(&o).trim_end().to_string())
+}
+
+fn git_raw(root: &Path, args: &[&str], input: Option<&[u8]>, env: &[(&str, String)]) -> Option<Vec<u8>> {
     let mut c = Command::new("git");
     c.current_dir(root).args(args).env("GIT_TERMINAL_PROMPT", "0")
         .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() }) // never the UI's terminal
@@ -86,7 +241,7 @@ fn git_in(root: &Path, args: &[&str], input: Option<&[u8]>, env: &[(&str, String
         let _ = i.write_all(data);
     }
     let o = child.wait_with_output().ok()?;
-    o.status.success().then(|| String::from_utf8_lossy(&o.stdout).trim_end().to_string())
+    o.status.success().then_some(o.stdout)
 }
 
 fn git(root: &Path, args: &[&str]) -> Option<String> {
@@ -144,25 +299,200 @@ fn blob(root: &Path, data: &str) -> Option<String> {
     git_in(root, &["hash-object", "-w", "--stdin"], Some(data.as_bytes()), &[])
 }
 
-/// Build my folder as a tree and push it as a history-less commit to my ref.
-fn publish(root: &Path, repo: &str, me: &str, tok: &str, files: &[(String, String)], message: &Value) -> Result<(), String> {
-    let (mut top, mut keys) = (String::new(), String::new());
+/// Build my folder as a tree and push it to my ref, as a commit whose only parent is my identity
+/// commit (so that stays on the board). Names may have one folder level ("keys/bob").
+fn publish(root: &Path, repo: &str, me: &str, tok: &str, files: &[(String, String)], message: &Value, parent: &str) -> Result<String, String> {
+    let commit = folder_commit(root, files, message, parent)?;
+    git_in(root, &["push", "-q", "-f", &format!("https://github.com/{repo}.git"), &format!("{commit}:refs/qh/peers/{me}")], None, &auth_env(tok))
+        .map(|_| commit).ok_or_else(|| "push to the board failed".into())
+}
+
+fn folder_commit(root: &Path, files: &[(String, String)], message: &Value, parent: &str) -> Result<String, String> {
+    let mut top = String::new();
+    let mut dirs: std::collections::BTreeMap<String, String> = Default::default();
     for (name, content) in files {
         let sha = blob(root, content).ok_or("git couldn't store a board file")?;
-        match name.strip_prefix("keys/") {
-            Some(k) => keys += &format!("100644 blob {sha}\t{k}\n"),
+        match name.split_once('/') {
+            Some((d, f)) => *dirs.entry(d.to_string()).or_default() += &format!("100644 blob {sha}\t{f}\n"),
             None => top += &format!("100644 blob {sha}\t{name}\n"),
         }
     }
-    if !keys.is_empty() {
-        let t = git_in(root, &["mktree"], Some(keys.as_bytes()), &[]).ok_or("git couldn't build keys/")?;
-        top += &format!("040000 tree {t}\tkeys\n");
+    for (d, list) in dirs {
+        let t = git_in(root, &["mktree"], Some(list.as_bytes()), &[]).ok_or("git couldn't build a board folder")?;
+        top += &format!("040000 tree {t}\t{d}\n");
     }
     let tree = git_in(root, &["mktree"], Some(top.as_bytes()), &[]).ok_or("git couldn't build the folder")?;
-    let commit = git(root, &["-c", "user.name=qh", "-c", "user.email=qh@localhost", "commit-tree", &tree, "-m", &message.to_string()])
-        .ok_or("git couldn't create the board commit")?;
-    git_in(root, &["push", "-q", "-f", &format!("https://github.com/{repo}.git"), &format!("{commit}:refs/qh/peers/{me}")], None, &auth_env(tok))
-        .map(|_| ()).ok_or_else(|| "push to the board failed".into())
+    git(root, &["-c", "user.name=qh", "-c", "user.email=qh@localhost", "commit-tree", &tree, "-p", parent, "-m", &message.to_string()])
+        .ok_or_else(|| "git couldn't create the board commit".into())
+}
+
+/// The commit GitHub vouches for our keys on (see `vouch`): a tree of our member key and signing
+/// key, with fixed dates so the same keys always give the same commit.
+fn identity_commit(root: &Path, me: &str, my_pub: &str, sign_pub: &str) -> Option<String> {
+    let list = format!("100644 blob {}\tpub\n100644 blob {}\tsign\n", blob(root, my_pub)?, blob(root, sign_pub)?);
+    let tree = git_in(root, &["mktree"], Some(list.as_bytes()), &[])?;
+    let date = "1700000000 +0000".to_string();
+    git_in(root, &["-c", "user.name=qh", "-c", "user.email=qh@localhost", "commit-tree", &tree, "-m", &format!("qh identity {me}")],
+           None, &[("GIT_AUTHOR_DATE", date.clone()), ("GIT_COMMITTER_DATE", date)])
+}
+
+/// Git doesn't record who pushed a ref, but GitHub does record who posted a commit status. So
+/// once per key and repo we post a "qh/identity" status naming our keys on our identity commit;
+/// a teammate meeting us checks that GitHub says *we* posted it (`vouched`).
+fn vouch(repo: &str, tok: &str, idc: &str, sign_pub: &str, my_pub: &str) {
+    let done = per_repo("team-vouched", repo);
+    if std::fs::read_to_string(&done).is_ok_and(|d| d.trim() == idc) {
+        return;
+    }
+    let body = json!({"state": "success", "context": "qh/identity", "description": format!("{sign_pub} {my_pub}")});
+    match api("POST", &format!("/repos/{repo}/statuses/{idc}"), tok, Some(&body), None) {
+        Ok((201, _, _)) => {
+            let _ = std::fs::create_dir_all(done.parent().unwrap_or(&done));
+            let _ = std::fs::write(&done, idc);
+        }
+        r => {
+            let why = match r { Ok((c, _, _)) => format!("GitHub answered {c}"), Err(e) => e };
+            warn_once(repo, None, "vouch", format!("couldn't get GitHub to vouch for your member key ({why}): teammates meeting you for the first time will see you as unconfirmed"));
+        }
+    }
+}
+
+/// Whether GitHub vouches that `p`'s keys are really `p.login`'s (see `vouch`). Asked at most
+/// every ten minutes per login and key.
+fn vouched(repo: &str, tok: &str, p: &Peer) -> bool {
+    if p.anchor.len() != 40 || !p.anchor.bytes().all(|c| c.is_ascii_hexdigit()) {
+        return false;
+    }
+    let tag = format!("{} {}", p.login, p.sign);
+    let Some((due, poster)) = with(repo, |s| {
+        let due = s.asked_github.get(&tag).map_or(true, |t| t.elapsed() >= Duration::from_secs(600));
+        if due { s.asked_github.insert(tag.clone(), Instant::now()); }
+        // tests run several pretend people from one GitHub account: that account posts for all
+        (due, if testing() { s.gh_login.clone() } else { p.login.clone() })
+    }) else { return false };
+    if !due {
+        return false;
+    }
+    let want = format!("{} {}", p.sign, p.pub_key);
+    api("GET", &format!("/repos/{repo}/commits/{}/statuses?per_page=100", p.anchor), tok, None, None).is_ok_and(|(c, _, v)| {
+        c == 200 && v.as_array().into_iter().flatten().any(|st| st["context"] == "qh/identity" && st["description"] == want.as_str()
+            && st["creator"]["login"].as_str().is_some_and(|l| l.eq_ignore_ascii_case(&poster)))
+    })
+}
+
+fn testing() -> bool {
+    std::env::var("QH_TEAM_LOGIN").is_ok_and(|l| !l.is_empty())
+}
+
+/// Say something once per run (a repeated attack shouldn't flood the screen).
+fn warn_once(repo: &str, hooks: Option<&Hooks>, tag: &str, text: String) {
+    let first = with(repo, |s| if s.warned.iter().any(|w| w == tag) { false } else { s.warned.push(tag.to_string()); true }).unwrap_or(false);
+    if first {
+        match hooks {
+            Some(h) => say(repo, h, text),
+            None => log_to(repo, &text),
+        }
+    }
+}
+
+/// Whether to take this folder: it must be signed with the keys we know for that login. Keys
+/// seen for the first time are trusted as first seen, or confirmed if GitHub vouches for them;
+/// a change of keys is taken only if GitHub vouches for the new ones.
+fn vet(repo: &str, tok: &str, p: &Peer, hooks: &Hooks) -> bool {
+    let login = &p.login;
+    if !p.signed {
+        warn_once(repo, Some(hooks), &format!("unsigned {login}"), format!(
+            "ignored {login}'s board folder: it isn't signed with their member key (they run an old qh, or someone else wrote it)"));
+        return false;
+    }
+    let Some((pin, newest)) = with(repo, |s| (s.pins.get(login).cloned(), s.git_ms.get(login).copied().unwrap_or(0))) else { return false };
+    if p.seq < newest {
+        log_to(repo, &format!("ignored an older copy of {login}'s folder"));
+        return false;
+    }
+    let ok = match pin {
+        Some((pk, sk, confirmed)) if pk == p.pub_key && sk == p.sign => {
+            if !confirmed && vouched(repo, tok, p) {
+                pin_keys(repo, p, true);
+            }
+            true
+        }
+        Some((old, _, _)) => {
+            if vouched(repo, tok, p) {
+                pin_keys(repo, p, true);
+                if let Some(l) = link() { l.forget(&old) }
+                say(repo, hooks, format!("{login}'s member key changed (a new machine?): GitHub confirms it's them"));
+                true
+            } else {
+                warn_once(repo, Some(hooks), &format!("key {login} {}", p.sign), format!(
+                    "someone wrote a board folder as {login} with keys that aren't theirs: ignored (GitHub doesn't vouch for them)"));
+                false
+            }
+        }
+        None => {
+            let confirmed = vouched(repo, tok, p);
+            pin_keys(repo, p, confirmed);
+            if !confirmed {
+                log_to(repo, &format!("{login}'s member key isn't confirmed by GitHub yet: trusting it as first seen"));
+            }
+            true
+        }
+    };
+    if ok {
+        with(repo, |s| s.git_ms.insert(login.clone(), p.seq));
+    }
+    ok
+}
+
+fn pin_keys(repo: &str, p: &Peer, confirmed: bool) {
+    with(repo, |s| {
+        s.pins.insert(p.login.clone(), (p.pub_key.clone(), p.sign.clone(), confirmed));
+        save_json("team-pins", &s.repo, &json!(s.pins));
+    });
+}
+
+fn confirmed(repo: &str, login: &str) -> bool {
+    with(repo, |s| s.pins.get(login).is_some_and(|p| p.2)).unwrap_or(false)
+}
+
+/// A folder as pushed: the commit message and every file (path, exact contents).
+struct Folder {
+    msg: String,
+    files: Vec<(String, String)>,
+}
+
+impl Folder {
+    fn get(&self, name: &str) -> &str {
+        self.files.iter().find(|(n, _)| n == name).map_or("", |(_, c)| c.as_str())
+    }
+}
+
+fn folder_files(root: &Path, sha: &str) -> Folder {
+    let commit = git_raw(root, &["cat-file", "commit", sha], None, &[]).unwrap_or_default();
+    let commit = String::from_utf8_lossy(&commit);
+    let msg = commit.split_once("\n\n").map_or("", |(_, m)| m).to_string();
+    let list = git_raw(root, &["ls-tree", "-r", "-z", sha], None, &[]).unwrap_or_default();
+    let entries: Vec<(String, String)> = list.split(|b| *b == 0).filter_map(|e| {
+        let (meta, path) = std::str::from_utf8(e).ok()?.split_once('\t')?;
+        let m: Vec<&str> = meta.split(' ').collect();
+        (m.get(1) == Some(&"blob")).then(|| m.get(2).map(|b| (b.to_string(), path.to_string()))).flatten()
+    }).collect();
+    let mut files = vec![];
+    if !entries.is_empty() {
+        let ask: String = entries.iter().map(|(b, _)| format!("{b}\n")).collect();
+        let out = git_raw(root, &["cat-file", "--batch"], Some(ask.as_bytes()), &[]).unwrap_or_default();
+        let mut at = 0;
+        for (_, path) in &entries {
+            let Some(nl) = out[at..].iter().position(|b| *b == b'\n') else { break };
+            let head = String::from_utf8_lossy(&out[at..at + nl]).to_string();
+            let Some(size) = head.rsplit(' ').next().and_then(|n| n.parse::<usize>().ok()) else { break };
+            let start = at + nl + 1;
+            let Some(body) = out.get(start..start + size) else { break };
+            files.push((path.clone(), String::from_utf8_lossy(body).to_string()));
+            at = start + size + 1;
+        }
+    }
+    Folder { msg, files }
 }
 
 /// Everyone's folders into refs/qh/board/*, listed as (login, commit).
@@ -173,46 +503,123 @@ fn fetch_board(root: &Path, repo: &str, tok: &str) -> Result<Vec<(String, String
     Ok(list.lines().filter_map(|l| l.split_once(' ').map(|(a, b)| (a.to_string(), b.to_string()))).collect())
 }
 
-fn read_folder(root: &Path, sha: &str, login: &str, key: Option<&Key>) -> Peer {
-    let msg: Value = serde_json::from_str(&git(root, &["log", "-1", "--format=%B", sha]).unwrap_or_default()).unwrap_or_default();
+fn read_folder(f: &Folder, repo: &str, login: &str, key: Option<&Key>) -> Peer {
+    let msg: Value = serde_json::from_str(&f.msg).unwrap_or_default();
     let ts = msg["ts"].as_u64().unwrap_or(0);
+    let sign = f.get("sign").trim().to_string();
     let mut p = Peer {
-        login: login.into(), ts,
+        login: login.into(), ts, seq: msg["ms"].as_u64().unwrap_or(ts * 1000),
         online: msg["state"] == "online" && now().saturating_sub(ts) < OFFLINE_AFTER,
-        pub_key: git(root, &["show", &format!("{sha}:pub")]).unwrap_or_default(),
+        pub_key: f.get("pub").trim().to_string(),
+        signed: !sign.is_empty() && tc::folder_signed_by(&sign, f.get("sig"), repo, login, &f.msg, &f.files),
+        anchor: f.get("anchor").trim().to_string(), sign,
         ..Default::default()
     };
-    for name in git(root, &["ls-tree", "--name-only", &format!("{sha}:keys")]).unwrap_or_default().lines() {
-        if let Some(w) = git(root, &["show", &format!("{sha}:keys/{name}")]) {
-            p.wrapped.insert(name.to_string(), w);
+    for (name, content) in &f.files {
+        if let Some(n) = name.strip_prefix("keys/") {
+            p.wrapped.insert(n.to_string(), content.trim().to_string());
+        } else if let Some(n) = name.strip_prefix("invites/") {
+            p.invites.insert(n.to_string(), content.trim().to_string());
         }
     }
-    let sealed = git(root, &["show", &format!("{sha}:data")]).unwrap_or_default();
-    let data: Option<Value> = key.and_then(|k| tc::open(k, &format!("data:{login}"), &sealed)).and_then(|b| serde_json::from_slice(&b).ok());
+    p.epoch = f.get("epoch").trim().parse().unwrap_or(0);
+    p.removed = f.get("removed").lines().map(String::from).filter(|l| !l.is_empty()).collect();
+    let sealed = f.get("data").trim();
+    let data: Option<Value> = key.and_then(|k| tc::open(k, &format!("data:{login}"), sealed)).and_then(|b| serde_json::from_slice(&b).ok());
     match data {
         None => p.locked = !sealed.is_empty(),
-        Some(d) => {
-            p.sessions = d["sessions"].as_array().into_iter().flatten().map(|s| (
-                s["name"].as_str().unwrap_or("").into(), s["status"].as_str().unwrap_or("").into(), s["role"].as_str().unwrap_or("").into(),
-            )).collect();
-            p.files = d["files"].as_array().into_iter().flatten().filter_map(|f| f.as_str().map(String::from)).collect();
-            if let Some(t) = d["transcripts"].as_object() {
-                for (s, msgs) in t {
-                    p.transcripts.insert(s.clone(), msgs.as_array().into_iter().flatten().map(|m| (
-                        m[0].as_str().unwrap_or("").to_string(), m[1].as_str().unwrap_or("").to_string())).collect());
-                }
-            }
-            p.outbox = d["outbox"].as_array().cloned().unwrap_or_default();
-            if let Some(a) = d["acks"].as_object() {
-                p.acks = a.iter().map(|(k, v)| (k.clone(), v.as_u64().unwrap_or(0))).collect();
-            }
-        }
+        Some(d) => parse_data(&mut p, &d),
     }
     p
 }
 
+/// A teammate's sealed data, opened: their sessions, claims, notes, messages…
+fn parse_data(p: &mut Peer, d: &Value) {
+    p.joined = true;
+    p.sessions = d["sessions"].as_array().into_iter().flatten().map(|s| (
+        s["name"].as_str().unwrap_or("").into(), s["status"].as_str().unwrap_or("").into(), s["role"].as_str().unwrap_or("").into(),
+    )).collect();
+    for s in d["sessions"].as_array().into_iter().flatten() {
+        let name = s["name"].as_str().unwrap_or("").to_string();
+        p.details.insert(name, SessionView {
+            topic: s["topic"].as_str().unwrap_or("").into(),
+            now: s["now"].as_str().unwrap_or("").into(),
+            branch: s["branch"].as_str().unwrap_or("").into(),
+            files: s["files"].as_array().into_iter().flatten().filter_map(|f| f.as_str().map(String::from)).collect(),
+            ..Default::default()
+        });
+    }
+    p.files = d["files"].as_array().into_iter().flatten().filter_map(|f| f.as_str().map(String::from)).collect();
+    if let Some(t) = d["transcripts"].as_object() {
+        for (s, msgs) in t {
+            p.transcripts.insert(s.clone(), msgs.as_array().into_iter().flatten().map(|m| (
+                m[0].as_str().unwrap_or("").to_string(), m[1].as_str().unwrap_or("").to_string())).collect());
+        }
+    }
+    p.outbox = d["outbox"].as_array().cloned().unwrap_or_default();
+    if let Some(r) = d["roles"].as_object() {
+        p.roles = r.iter().map(|(k, v)| (k.clone(), v.as_str().unwrap_or("member").to_string())).collect();
+    }
+    p.chat = d["chat"].as_array().into_iter().flatten().map(|c| (
+        c["id"].as_u64().unwrap_or(0), c["ts"].as_u64().unwrap_or(0), c["text"].as_str().unwrap_or("").to_string())).collect();
+    if let Some(c) = d["claims"].as_object() {
+        p.claims = c.iter().map(|(sess, files)| (sess.clone(), files.as_object().into_iter().flatten().map(|(f, fns)| (f.clone(),
+            fns.as_object().into_iter().flatten().map(|(n, t)| (n.clone(), t.as_u64().unwrap_or(0))).collect())).collect())).collect();
+    }
+    if let Some(u) = d["uses"].as_object() {
+        p.uses = u.iter().map(|(sess, names)| (sess.clone(), names.as_object().into_iter().flatten()
+            .map(|(n, t)| (n.clone(), t.as_u64().unwrap_or(0))).collect())).collect();
+    }
+    p.waiting = d["waiting"].as_array().into_iter().flatten().map(|w| Wait {
+        session: w["session"].as_str().unwrap_or("").into(), file: w["file"].as_str().unwrap_or("").into(),
+        func: w["func"].as_str().unwrap_or("").into(), on: w["on"].as_str().unwrap_or("").into(), since: w["since"].as_u64().unwrap_or(0),
+    }).collect();
+    p.promises = d["promises"].as_array().into_iter().flatten().map(promise_of).collect();
+    p.sheets = d["sheets"].as_object().into_iter().flatten().map(|(k, v)| (k.clone(), Sheet {
+        decided: v["decided"].as_str().unwrap_or("").into(), next: v["next"].as_str().unwrap_or("").into(), ts: v["ts"].as_u64().unwrap_or(0),
+    })).collect();
+    p.notes = d["notes"].as_array().into_iter().flatten().map(|n| (
+        n["id"].as_u64().unwrap_or(0), n["text"].as_str().unwrap_or("").to_string(), n["file"].as_str().unwrap_or("").to_string(),
+        n["names"].as_array().into_iter().flatten().filter_map(|x| x.as_str().map(String::from)).collect())).collect();
+    if let Some(a) = d["acks"].as_object() {
+        p.acks = a.iter().map(|(k, v)| (k.clone(), v.as_u64().unwrap_or(0))).collect();
+    }
+    p.link = d["link"].as_array().into_iter().flatten().filter_map(|a| a.as_str().map(String::from)).collect();
+    p.link_ms = d["link_ms"].as_u64().unwrap_or(0);
+}
+
 fn per_repo(dir: &str, repo: &str) -> PathBuf {
     crate::config::state_dir().join(dir).join(repo.replace('/', "__"))
+}
+
+pub const ROLES: [&str; 3] = ["viewer", "member", "trusted"];
+
+/// What each role may do in *our* sessions. We enforce it ourselves: their messages only
+/// run on our machine if our qh lets them in.
+pub fn role_help(role: &str) -> &'static str {
+    match role {
+        "viewer" => "sees your sessions and who's online; can't write into them",
+        "trusted" => "sees your sessions; what they write goes straight in",
+        _ => "sees your sessions; you allow each thing they write",
+    }
+}
+
+fn load_roles(repo: &str) -> HashMap<String, String> {
+    serde_json::from_str(&std::fs::read_to_string(per_repo("team-roles", repo)).unwrap_or_default()).unwrap_or_default()
+}
+
+/// Give `login` a role in `repo`; works whether or not team mode is on.
+pub fn set_role(repo: &str, login: &str, role: &str) -> Result<String, String> {
+    if !ROLES.contains(&role) {
+        return Err(format!("roles are {}", ROLES.join(", ")));
+    }
+    let mut roles = load_roles(repo);
+    if role == "member" { roles.remove(login); } else { roles.insert(login.to_string(), role.to_string()); }
+    let p = per_repo("team-roles", repo);
+    let _ = std::fs::create_dir_all(p.parent().unwrap_or(&p));
+    std::fs::write(&p, serde_json::to_string(&roles).unwrap_or_default()).map_err(|e| e.to_string())?;
+    with(repo, |s| { s.roles = roles; s.dirty = true; });
+    Ok(format!("{login} is now a {role} in your sessions: {}", role_help(role)))
 }
 
 fn load_key(repo: &str) -> Option<Key> {
@@ -226,7 +633,56 @@ fn save_key(repo: &str, k: &Key) {
     let _ = crate::platform::write_private(&p, crate::oauth::b64url(k).as_bytes());
 }
 
-/// What our own sessions look like, supplied by the UI: {sessions:[{name,status,role}], files:[], transcripts:{name:[[role,text]]}}.
+fn load_list(dir: &str, repo: &str) -> Vec<String> {
+    serde_json::from_str(&std::fs::read_to_string(per_repo(dir, repo)).unwrap_or_default()).unwrap_or_default()
+}
+
+fn save_json(dir: &str, repo: &str, v: &Value) {
+    let p = per_repo(dir, repo);
+    let _ = std::fs::create_dir_all(p.parent().unwrap_or(&p));
+    let _ = crate::platform::write_private(&p, v.to_string().as_bytes());
+}
+
+/// Let `login` in without asking when they turn up (you invited them).
+pub fn approve(repo: &str, login: &str) {
+    let mut v = load_list("team-approved", repo);
+    if !v.iter().any(|x| x == login) { v.push(login.to_string()) }
+    save_json("team-approved", repo, &json!(v));
+    with(repo, |s| {
+        if !s.approved.iter().any(|x| x == login) { s.approved.push(login.to_string()) }
+        s.asking.retain(|x| x != login);
+        s.dirty = true;
+    });
+}
+
+/// Make sure a team key exists for `repo` before anyone has connected (team create does this,
+/// so the first invites can carry the key).
+pub fn ensure_key(repo: &str) {
+    if load_key(repo).is_none() { save_key(repo, &tc::new_team_key()) }
+}
+
+/// An invite for `login`: approve them and, if we hold the team key, publish it sealed with a
+/// fresh code. Returns the code to give them (`qh join owner/repo CODE`).
+pub fn add_invite(repo: &str, login: &str) -> Option<String> {
+    approve(repo, login);
+    let key = load_key(repo)?;
+    let code: [u8; 32] = crate::oauth::random();
+    let sealed = tc::seal(&code, &format!("invite:{repo}:{login}"), &key);
+    let mut all: HashMap<String, String> = serde_json::from_str(&std::fs::read_to_string(per_repo("team-invites", repo)).unwrap_or_default()).unwrap_or_default();
+    all.insert(login.to_string(), sealed.clone());
+    save_json("team-invites", repo, &json!(all));
+    with(repo, |s| { s.invites.insert(login.to_string(), sealed); s.dirty = true; });
+    Some(crate::oauth::b64url(&code))
+}
+
+/// The code from `qh join owner/repo CODE`, kept until it has opened the team key.
+pub fn set_join_code(repo: &str, code: &str) {
+    let p = per_repo("team-codes", repo);
+    let _ = std::fs::create_dir_all(p.parent().unwrap_or(&p));
+    let _ = crate::platform::write_private(&p, code.trim().as_bytes());
+}
+
+/// What our own sessions look like, supplied by the UI: {sessions:[{name,status,role,topic,now,files,branch}], files:[], transcripts:{name:[[role,text]]}}.
 pub type Summary = Box<dyn Fn() -> Value + Send>;
 
 /// Callbacks into the UI: say a line, deliver a message to a session, ask whether to allow one.
@@ -235,50 +691,116 @@ pub struct Hooks {
     pub deliver: Box<dyn Fn(&str, &str) + Send>,
     pub ask: Box<dyn Fn(&Incoming) + Send>,
     pub refresh: Box<dyn Fn() + Send>, // redraw: the status line changed
+    /// Answer a teammate's question from a read-only copy of the asked session (returns at once).
+    pub answer: std::sync::Arc<dyn Fn(Question) + Send + Sync>,
+    /// An answer came back for one of our sessions: hand it over (now, or before its next call).
+    pub answered: Box<dyn Fn(&str, &str) + Send>,
 }
 
+/// Connect this folder's project (or just show it, if it's already connected).
 pub fn start(cwd: &Path, summary: Summary, hooks: Hooks) -> Result<String, String> {
-    if RUNNING.load(Relaxed) {
-        return Err("team mode is already on".into());
-    }
     let (root, repo) = github_repo(cwd).ok_or("this folder's git remote isn't on GitHub (other hosts come later)")?;
+    if running_for(&repo) {
+        set_current(&repo);
+        return Ok(format!("team {repo} is connected"));
+    }
     let tok = token().ok_or("no GitHub login found: run `gh auth login`, or set GITHUB_TOKEN")?;
     let (_, _, user) = api("GET", "/user", &tok, None, None)?;
     let me = user["login"].as_str().ok_or("GitHub didn't say who you are")?.to_string();
+    let gh_login = me.clone();
     let me = std::env::var("QH_TEAM_LOGIN").ok().filter(|l| !l.is_empty()).unwrap_or(me); // testing two people on one machine
     let (secret, my_pub) = tc::identity();
+    let sign_pub = tc::sign_pub(&secret);
+    let idc = identity_commit(&root, &me, &my_pub, &sign_pub).ok_or("git couldn't create your identity commit")?;
     let seen: HashMap<String, u64> = serde_json::from_str(&std::fs::read_to_string(per_repo("team-seen", &repo)).unwrap_or_default()).unwrap_or_default();
-    *STATE.lock().unwrap() = Some(State {
+    let invites: HashMap<String, String> = serde_json::from_str(&std::fs::read_to_string(per_repo("team-invites", &repo)).unwrap_or_default()).unwrap_or_default();
+    let chat: Vec<(u64, String, String)> = serde_json::from_str(&std::fs::read_to_string(per_repo("team-chat", &repo)).unwrap_or_default()).unwrap_or_default();
+    let mine: Vec<&(u64, String, String)> = chat.iter().filter(|(_, f, _)| *f == me).collect();
+    let my_chat: Vec<Value> = mine[mine.len().saturating_sub(30)..].iter().copied()
+        .enumerate().map(|(i, (ts, _, t))| json!({"id": ts * 1000 + i as u64, "ts": ts, "text": t})).collect();
+    let (running, finished) = (std::sync::Arc::new(AtomicBool::new(true)), std::sync::Arc::new(AtomicBool::new(false)));
+    STATES.lock().unwrap().get_or_insert_with(HashMap::new).insert(repo.clone(), State {
         repo: repo.clone(), me: me.clone(), peers: HashMap::new(), error: String::new(), key: load_key(&repo),
-        outbox: vec![], next_id: now() * 1000, seen, pending: vec![], trusted: vec![], dirty: true,
+        outbox: vec![], next_id: now() * 1000, seen, pending: vec![], roles: load_roles(&repo),
+        approved: load_list("team-approved", &repo), asking: vec![], invites, chat,
+        epoch: std::fs::read_to_string(per_repo("team-epoch", &repo)).ok().and_then(|e| e.trim().parse().ok()).unwrap_or(0),
+        removed: load_list("team-removed", &repo), admins: HashMap::new(),
+        pins: serde_json::from_str(&std::fs::read_to_string(per_repo("team-pins", &repo)).unwrap_or_default()).unwrap_or_default(),
+        gh_login: gh_login.clone(), git_ms: HashMap::new(), asked_github: HashMap::new(), warned: vec![], my_sha: String::new(), my_chat, chat_seen: HashMap::new(), unread: 0,
+        my_notes: vec![], notes_seen: HashMap::new(), claims: HashMap::new(), waiting: vec![], uses: HashMap::new(),
+        sheets: HashMap::new(), asked: vec![], answered: vec![], answerer: Some(hooks.answer.clone()),
+        promises: serde_json::from_str::<Vec<Value>>(&std::fs::read_to_string(per_repo("team-promises", &repo)).unwrap_or_default())
+            .unwrap_or_default().iter().map(promise_of).collect(),
+        last_answer: HashMap::new(),
+        answers: std::fs::read_to_string(per_repo("team-answers", &repo)).ok().map(|s| s.trim().to_string())
+            .filter(|s| ["auto", "ask", "off"].contains(&s.as_str())).unwrap_or_else(|| "auto".into()),
+        dirty: true, running: running.clone(), finished: finished.clone(),
     });
-    RUNNING.store(true, Relaxed);
-    FINISHED.store(false, Relaxed);
+    set_current(&repo);
     let (repo2, me2) = (repo.clone(), me.clone());
-    std::thread::Builder::new().name("qh-team".into()).spawn(move || {
+    let (live_tx, live_rx) = std::sync::mpsc::channel();
+    LIVE.lock().unwrap().get_or_insert_with(HashMap::new).insert(repo.clone(), live_tx);
+    let line = link();
+    std::thread::Builder::new().name(format!("qh-team-{repo}")).spawn(move || {
         let mut etag: Option<String> = None;
         let mut shas: HashMap<String, String> = HashMap::new();
         let (mut last_files, mut last_write, mut last_poll) = (vec![], Instant::now() - KEEPALIVE, Instant::now() - POLL);
+        let mut last_link_ms = 0u64; // the address stamp in the last folder we wrote
         let mut fetched = false;
-        let build = |state_word: &str| -> (Vec<(String, String)>, Value) {
+        let mut live = Live { last: None, at: Instant::now(), pulse: 0, told: vec![] };
+        // my folder: the files for git, and the commit message (presence); plus the data without
+        // transcripts, for the direct line
+        let build = |state_word: &str| -> (Vec<(String, String)>, Value, Option<Value>) {
+            let mut quick = None;
             let mut files = vec![("pub".to_string(), my_pub.clone())];
             let d = summary(); // outside the lock: it reads the hub
-            let g = STATE.lock().unwrap();
-            if let Some(s) = g.as_ref() {
+            with(&repo2, |s| {
                 if let Some(k) = &s.key {
-                    let mut wraps: Vec<(String, String)> = s.peers.values().filter(|p| !p.pub_key.is_empty())
+                    // the key goes to members, and to newcomers we approved; nobody else
+                    let mut wraps: Vec<(String, String)> = s.peers.values()
+                        .filter(|p| !p.pub_key.is_empty() && (p.joined || s.approved.contains(&p.login)) && !s.removed.contains(&p.login))
                         .filter_map(|p| Some((format!("keys/{}", p.login), tc::wrap(k, &secret, &p.pub_key, &s.repo)?))).collect();
                     wraps.sort();
                     files.extend(wraps);
-                    let mut d = d;
+                    if s.epoch > 0 {
+                        files.push(("epoch".into(), s.epoch.to_string()));
+                    }
+                    if !s.removed.is_empty() {
+                        files.push(("removed".into(), s.removed.join("\n")));
+                    }
+                    let mut inv: Vec<(String, String)> = s.invites.iter().map(|(l, v)| (format!("invites/{l}"), v.clone())).collect();
+                    inv.sort();
+                    files.extend(inv);
+                    let mut d = d.clone();
                     d["outbox"] = Value::from(s.outbox.clone());
                     d["acks"] = json!(s.seen);
+                    d["roles"] = json!(s.roles);
+                    d["chat"] = Value::from(s.my_chat.clone());
+                    d["notes"] = Value::from(s.my_notes.clone());
+                    d["claims"] = json!(s.claims);
+                    d["uses"] = json!(s.uses);
+                    d["promises"] = promises_json(&s.promises);
+                    d["sheets"] = s.sheets.iter().map(|(k, v)| (k.clone(), json!({"decided": v.decided, "next": v.next, "ts": v.ts})))
+                        .collect::<serde_json::Map<_, _>>().into();
+                    d["waiting"] = Value::from(s.waiting.iter().map(|w| json!({"session": w.session, "file": w.file, "func": w.func, "on": w.on, "since": w.since})).collect::<Vec<_>>());
+                    if let Some(l) = &line {
+                        d["link"] = json!(l.addrs());
+                        d["link_ms"] = json!(l.addrs_ms());
+                    }
                     files.push(("data".into(), tc::seal(k, &format!("data:{}", s.me), d.to_string().as_bytes())));
+                    let mut q = d;
+                    if let Some(o) = q.as_object_mut() { o.remove("transcripts"); }
+                    quick = Some(q);
                 }
-            }
-            (files, json!({"v": 2, "state": state_word, "ts": now()}))
+            });
+            let msg = json!({"v": 2, "state": state_word, "ts": now(), "ms": now_ms()});
+            files.push(("sign".into(), sign_pub.clone()));
+            files.push(("anchor".into(), idc.clone()));
+            let sig = tc::sign_folder(&secret, &repo2, &me2, &msg.to_string(), &files);
+            files.push(("sig".into(), sig));
+            (files, msg, quick)
         };
-        while RUNNING.load(Relaxed) {
+        while running.load(Relaxed) {
             // read the board: one conditional request, a git fetch only when something changed
             if last_poll.elapsed() >= POLL {
                 last_poll = Instant::now();
@@ -291,39 +813,60 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks) -> Result<String, Strin
                         etag = tag;
                         if changed || !fetched {
                             match fetch_board(&root, &repo2, &tok) {
-                                Ok(list) => { fetched = true; absorb(&root, &list, &mut shas, &secret, &hooks); (hooks.refresh)() }
-                                Err(e) => set_error(e),
+                                Ok(list) => { fetched = true; absorb(&repo2, &root, &list, &mut shas, &secret, &tok, &hooks); (hooks.refresh)() }
+                                Err(e) => set_error(&repo2, e),
                             }
                         }
                     }
-                    Ok((404, _, _)) => { fetched = true; settle_key() } // an empty board
+                    Ok((404, _, _)) => { fetched = true; settle_key(&repo2) } // an empty board
                     Ok(_) => {}
-                    Err(e) => set_error(e),
+                    Err(e) => set_error(&repo2, e),
                 }
-                stale_check(&hooks);
+                stale_check(&repo2, &hooks);
+                wake_check(&repo2, &root, &hooks);
             }
             // write my folder: when it changed (throttled), when asked (dirty), or as a keep-alive.
             // Wrapped keys are fresh nonces each time, so compare without them.
-            let (files, msg) = build("online");
-            let dirty = STATE.lock().unwrap().as_ref().is_some_and(|s| s.dirty);
-            let plain = |f: &[(String, String)]| -> Vec<String> { f.iter().map(|(n, c)| if n == "data" || n.starts_with("keys/") { n.clone() } else { format!("{n}={c}") }).collect() };
-            let summary_now = STATE.lock().unwrap().as_ref().and_then(|s| s.key.map(|_| ())).is_some();
-            let changed = plain(&files) != plain(&last_files) || (summary_now && data_changed(&files, &last_files));
-            if fetched && (((changed || dirty) && last_write.elapsed() >= MIN_WRITE) || last_write.elapsed() >= KEEPALIVE) {
-                match publish(&root, &repo2, &me2, &tok, &files, &msg) {
-                    Ok(()) => {
+            let (files, msg, quick) = build("online");
+            if let (Some(l), Some(d)) = (&line, quick) {
+                push_live(&repo2, &me2, l, d, &mut live);
+            }
+            let dirty = with(&repo2, |s| s.dirty).unwrap_or(false);
+            let plain = |f: &[(String, String)]| -> Vec<String> { f.iter().map(|(n, c)| if n == "data" || n == "sig" || n.contains('/') { n.clone() } else { format!("{n}={c}") }).collect() };
+            let changed = plain(&files) != plain(&last_files) || data_changed(&repo2, &files, &last_files);
+            // new line addresses skip the throttle: until they're out, teammates can't reach us directly
+            let link_ms = line.as_ref().map_or(0, |l| l.addrs_ms());
+            let moved = link_ms != last_link_ms && last_write.elapsed() >= MIN_LINK_WRITE;
+            if fetched && (((changed || dirty) && (last_write.elapsed() >= MIN_WRITE || moved)) || last_write.elapsed() >= KEEPALIVE) {
+                match publish(&root, &repo2, &me2, &tok, &files, &msg, &idc) {
+                    Ok(sha) => {
                         last_files = files;
-                        if let Some(s) = STATE.lock().unwrap().as_mut() { s.dirty = false; s.error.clear() }
+                        last_link_ms = link_ms;
+                        with(&repo2, |s| { s.dirty = false; s.error.clear(); s.my_sha = sha });
+                        vouch(&repo2, &tok, &idc, &sign_pub, &my_pub);
                     }
-                    Err(e) => set_error(e),
+                    Err(e) => set_error(&repo2, e),
                 }
                 last_write = Instant::now();
             }
-            std::thread::sleep(Duration::from_millis(500));
+            // wait half a second, but take in what comes over the line at once, and go round
+            // early when a message, answer or note of ours is waiting to go out
+            let until = Instant::now() + Duration::from_millis(500);
+            while let Some(left) = until.checked_duration_since(Instant::now()) {
+                match live_rx.recv_timeout(left.min(Duration::from_millis(100))) {
+                    Ok((from, bytes)) => {
+                        take_live(&repo2, &from, &bytes, &hooks);
+                        (hooks.refresh)();
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => if line.is_some() && pulse(&repo2) != live.pulse { break },
+                    Err(_) => std::thread::sleep(left),
+                }
+            }
         }
-        let (files, msg) = build("offline");
-        let _ = publish(&root, &repo2, &me2, &tok, &files, &msg);
-        FINISHED.store(true, Relaxed);
+        if let Some(m) = LIVE.lock().unwrap().as_mut() { m.remove(&repo2); }
+        let (files, msg, _) = build("offline");
+        let _ = publish(&root, &repo2, &me2, &tok, &files, &msg, &idc);
+        finished.store(true, Relaxed);
     }).map_err(|e| e.to_string())?;
     remember(&repo, true);
     Ok(format!("team mode on for {repo} as {me} (shared data is encrypted for the team)"))
@@ -331,190 +874,1376 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks) -> Result<String, Strin
 
 /// Whether the sealed `data` says something different (it's re-sealed with a new nonce every
 /// build, so compare what it decrypts to).
-fn data_changed(a: &[(String, String)], b: &[(String, String)]) -> bool {
-    let g = STATE.lock().unwrap();
-    let Some(s) = g.as_ref() else { return false };
-    let Some(k) = s.key else { return false };
-    let get = |f: &[(String, String)]| f.iter().find(|(n, _)| n == "data").and_then(|(_, c)| tc::open(&k, &format!("data:{}", s.me), c));
-    get(a) != get(b)
+fn data_changed(repo: &str, a: &[(String, String)], b: &[(String, String)]) -> bool {
+    with(repo, |s| {
+        let Some(k) = s.key else { return false };
+        let get = |f: &[(String, String)]| f.iter().find(|(n, _)| n == "data").and_then(|(_, c)| tc::open(&k, &format!("data:{}", s.me), c));
+        get(a) != get(b)
+    }).unwrap_or(false)
 }
 
-fn set_error(e: String) {
-    if let Some(s) = STATE.lock().unwrap().as_mut() { s.error = e }
+fn set_error(repo: &str, e: String) {
+    with(repo, |s| s.error = e);
 }
 
-/// Take in freshly fetched folders: our key if someone wrapped it for us, presence,
-/// transcripts, and messages addressed to our sessions.
-fn absorb(root: &Path, list: &[(String, String)], shas: &mut HashMap<String, String>,
-          secret: &x25519_dalek::StaticSecret, hooks: &Hooks) {
-    let (me, repo, mut key) = {
-        let g = STATE.lock().unwrap();
-        let Some(s) = g.as_ref() else { return };
-        (s.me.clone(), s.repo.clone(), s.key)
-    };
+/// Take in freshly fetched folders: our key if someone wrapped it for us (or left it under our
+/// invite code), presence, newcomers, chat, transcripts, and messages to our sessions.
+fn absorb(repo: &str, root: &Path, list: &[(String, String)], shas: &mut HashMap<String, String>,
+          secret: &x25519_dalek::StaticSecret, tok: &str, hooks: &Hooks) {
+    let Some((me, my_sha)) = with(repo, |s| (s.me.clone(), s.my_sha.clone())) else { return };
+    // our own folder, rewritten by someone else: put ours back at once
+    if let Some((_, sha)) = list.iter().find(|(l, _)| *l == me).filter(|(_, sha)| !my_sha.is_empty() && *sha != my_sha) {
+        let ours = read_folder(&folder_files(root, sha), repo, &me, None);
+        if !ours.signed || ours.sign != tc::sign_pub(secret) {
+            with(repo, |s| s.dirty = true);
+            warn_once(repo, Some(hooks), &format!("overwritten {sha}"), "someone overwrote your board folder: writing yours back".into());
+        }
+    }
+    let mut folders = vec![];
+    for (login, sha) in list.iter().filter(|(l, _)| *l != me) {
+        shas.insert(login.clone(), sha.clone());
+        let f = folder_files(root, sha);
+        let p = read_folder(&f, repo, login, None);
+        if vet(repo, tok, &p, hooks) {
+            folders.push((f, p));
+        }
+    }
+    newer_key(repo, &folders, secret, tok, hooks);
+    let Some(mut key) = with(repo, |s| s.key) else { return };
     if key.is_none() {
-        for (login, sha) in list.iter().filter(|(l, _)| *l != me) {
-            let p = read_folder(root, sha, login, None);
-            if let Some(k) = p.wrapped.get(&me).and_then(|w| tc::unwrap(w, secret, &p.pub_key, &repo)) {
-                save_key(&repo, &k);
+        let code = std::fs::read_to_string(per_repo("team-codes", repo)).ok()
+            .and_then(|c| <[u8; 32]>::try_from(crate::oauth::b64url_decode(c.trim())).ok());
+        for (_, p) in &folders {
+            let login = &p.login;
+            let by_wrap = p.wrapped.get(&me).and_then(|w| tc::unwrap(w, secret, &p.pub_key, repo));
+            let by_code = || code.and_then(|c| p.invites.get(&me).and_then(|b| tc::open(&c, &format!("invite:{repo}:{me}"), b)))
+                .and_then(|k| <Key>::try_from(k).ok());
+            if let Some(k) = by_wrap.or_else(by_code) {
+                save_key(repo, &k);
+                let _ = std::fs::remove_file(per_repo("team-codes", repo));
                 key = Some(k);
-                (hooks.say)(format!("👥 {login} let you into the team: you can see everyone's sessions now"));
+                say(repo, hooks, format!("you're in the team: you can see everyone's sessions now (thanks to {login})"));
                 break;
             }
         }
     }
-    for (login, sha) in list.iter().filter(|(l, _)| *l != me) {
-        shas.insert(login.clone(), sha.clone());
-        let p = read_folder(root, sha, login, key.as_ref());
-        let mut g = STATE.lock().unwrap();
-        let Some(s) = g.as_mut() else { return };
-        s.key = key;
-        let was = s.peers.get(login).is_some_and(|x| x.online);
-        if p.online && !was { (hooks.say)(format!("👥 {login} is online")) }
-        if !p.online && was { (hooks.say)(format!("👥 {login} went offline")) }
-        if !s.peers.contains_key(login) && !p.pub_key.is_empty() { s.dirty = true } // a new member to wrap the key for
-        // their acks let us drop what they already handled
-        let acked = p.acks.get(&me).copied().unwrap_or(0);
-        let before = s.outbox.len();
-        s.outbox.retain(|m| !(m["to"] == login.as_str() && m["id"].as_u64().unwrap_or(0) <= acked));
-        if s.outbox.len() != before { s.dirty = true }
-        for m in p.outbox.iter().filter(|m| m["to"] == me.as_str()) {
-            let id = m["id"].as_u64().unwrap_or(0);
-            if id <= s.seen.get(login).copied().unwrap_or(0) || s.pending.iter().any(|x| x.from == *login && x.id == id) {
+    let mut new_chat = false;
+    for (f, p) in &folders {
+        let p = read_folder(f, repo, &p.login, key.as_ref());
+        take_in(repo, &me, key, p, hooks, &mut new_chat);
+    }
+    if new_chat { save_chat(repo) }
+    save_seen(repo);
+    settle_key(repo);
+}
+
+/// Someone removed a member and made a new team key: switch to it, if GitHub says they're a repo
+/// admin and vouched for their member key (a folder signed with keys we only trust on first
+/// sight isn't enough: anyone with push access could have written it). If we are the one
+/// removed, say so.
+fn newer_key(repo: &str, folders: &[(Folder, Peer)], secret: &x25519_dalek::StaticSecret, tok: &str, hooks: &Hooks) {
+    let Some((me, epoch, has_key)) = with(repo, |s| (s.me.clone(), s.epoch, s.key.is_some())) else { return };
+    if !has_key {
+        return; // newcomers take whatever key they're given, the usual way
+    }
+    for (_, p) in folders {
+        let login = &p.login;
+        if p.epoch <= epoch {
+            continue;
+        }
+        if !confirmed(repo, login) {
+            warn_once(repo, Some(hooks), &format!("rotate {login} {}", p.epoch), format!(
+                "ignored a team key change from {login}: GitHub hasn't vouched for their member key"));
+            continue;
+        }
+        if !is_admin(repo, login, tok) {
+            log_to(repo, &format!("ignored a team key change from {login}: only repo admins can change it"));
+            continue;
+        }
+        if p.removed.contains(&me) {
+            let told = with(repo, |s| std::mem::replace(&mut s.epoch, p.epoch) == p.epoch).unwrap_or(true);
+            if !told {
+                say(repo, hooks, format!("{login} removed you from the team: you can't read what the team writes from now on"));
+            }
+            return;
+        }
+        let Some(k) = p.wrapped.get(&me).and_then(|w| tc::unwrap(w, secret, &p.pub_key, repo)) else { continue };
+        save_key(repo, &k);
+        let gone = with(repo, |s| {
+            // everyone we knew as a member keeps getting the key from us too (their data stays
+            // locked to us until they switch, so "joined" alone would drop them)
+            let keep: Vec<String> = s.peers.values().filter(|x| x.joined && !p.removed.contains(&x.login)).map(|x| x.login.clone()).collect();
+            s.key = Some(k);
+            s.epoch = p.epoch;
+            let newly: Vec<String> = p.removed.iter().filter(|r| !s.removed.contains(r)).cloned().collect();
+            s.removed.extend(newly.iter().cloned());
+            s.approved.retain(|a| !s.removed.contains(a));
+            s.dirty = true;
+            (keep, newly)
+        });
+        let Some((keep, newly)) = gone else { return };
+        persist_membership(repo);
+        for l in keep {
+            approve(repo, &l);
+        }
+        forget_lines(repo, &newly);
+        let who = if newly.is_empty() { String::new() } else { format!(": {} removed", newly.join(", ")) };
+        say(repo, hooks, format!("{login} changed the team key{who}"));
+        return;
+    }
+}
+
+/// Whether GitHub says `login` is an admin of `repo` (asked once per person, then remembered).
+fn is_admin(repo: &str, login: &str, tok: &str) -> bool {
+    if let Ok(list) = std::env::var("QH_TEAM_ADMINS") {
+        return list.split(',').any(|a| a.trim() == login); // testing several people on one machine (with QH_TEAM_LOGIN)
+    }
+    if let Some(a) = with(repo, |s| s.admins.get(login).copied()).flatten() {
+        return a;
+    }
+    let a = api("GET", &format!("/repos/{repo}/collaborators/{login}/permission"), tok, None, None)
+        .map(|(c, _, v)| c == 200 && (v["permission"] == "admin" || v["role_name"] == "admin")).unwrap_or(false);
+    with(repo, |s| s.admins.insert(login.to_string(), a));
+    a
+}
+
+fn persist_membership(repo: &str) {
+    with(repo, |s| {
+        let e = per_repo("team-epoch", &s.repo);
+        let _ = std::fs::create_dir_all(e.parent().unwrap_or(&e));
+        let _ = std::fs::write(e, s.epoch.to_string());
+        save_json("team-removed", &s.repo, &json!(s.removed));
+        save_json("team-approved", &s.repo, &json!(s.approved));
+    });
+}
+
+/// Drop removed people's direct lines (and our memory of where they were).
+fn forget_lines(repo: &str, logins: &[String]) {
+    let keys: Vec<String> = with(repo, |s| logins.iter().filter_map(|l| s.peers.get(l).map(|p| p.pub_key.clone())).collect()).unwrap_or_default();
+    if let Some(l) = link() {
+        for k in keys.iter().filter(|k| !k.is_empty()) {
+            l.forget(k);
+        }
+    }
+}
+
+/// Remove `login` from the team: a new team key for everyone else, and no more access to the repo.
+/// Only a repo admin can do it (GitHub decides who that is).
+pub fn remove(repo: &str, login: &str) -> Result<String, String> {
+    let tok = token().ok_or("no GitHub login found: run `gh auth login`")?;
+    let me = with(repo, |s| s.me.clone()).ok_or("team mode isn't on for this project: /team on first")?;
+    if login == me {
+        return Err("you can't remove yourself; leave with /team off".into());
+    }
+    if !is_admin(repo, &me, &tok) {
+        return Err("only a repo admin can remove people (GitHub says you aren't one)".into());
+    }
+    let known = with(repo, |s| s.peers.contains_key(login) || s.approved.iter().any(|a| a == login)).unwrap_or(false);
+    if !known {
+        return Err(format!("{login} isn't in this team"));
+    }
+    with(repo, |s| {
+        let keep: Vec<String> = s.peers.values().filter(|p| p.joined && p.login != login).map(|p| p.login.clone()).collect();
+        for l in keep {
+            if !s.approved.contains(&l) { s.approved.push(l) }
+        }
+        s.approved.retain(|a| a != login);
+        s.asking.retain(|a| a != login);
+        s.invites.remove(login);
+        if !s.removed.iter().any(|r| r == login) { s.removed.push(login.to_string()) }
+        let k = tc::new_team_key();
+        save_key(&s.repo, &k);
+        s.key = Some(k);
+        s.epoch += 1;
+        s.dirty = true;
+        save_json("team-invites", &s.repo, &json!(s.invites));
+    });
+    persist_membership(repo);
+    forget_lines(repo, &[login.to_string()]);
+    // and their access to the repo itself, or they could still read the code and write noise
+    let testing = std::env::var("QH_TEAM_ADMINS").is_ok(); // pretend people: never touch real GitHub users
+    let access = if testing { format!("(test run: {login}'s repo access left alone)") } else { match api("DELETE", &format!("/repos/{repo}/collaborators/{login}"), &tok, None, None) {
+        Ok((204, _, _)) => format!("{login} no longer has access to {repo}"),
+        Ok((404, _, _)) => format!("{login} had no direct access to {repo} (check org teams if they still can see it)"),
+        Ok((c, _, _)) => format!("GitHub answered {c} when removing {login}'s access: check the repo's settings"),
+        Err(e) => format!("couldn't remove {login}'s access to {repo}: {e}"),
+    } };
+    log_to(repo, &format!("removed {login}: new team key"));
+    Ok(format!("{login} is out of the team: everyone else gets a new team key, so nothing written from now on is readable to them.\n{access}"))
+}
+
+fn save_chat(repo: &str) {
+    with(repo, |s| {
+        let keep: Vec<_> = s.chat.iter().rev().take(300).rev().cloned().collect();
+        save_json("team-chat", repo, &json!(keep));
+    });
+}
+
+/// One teammate's folder, read from git or sent live over the link: presence, newcomers, chat,
+/// notes, and messages to our sessions.
+fn take_in(repo: &str, me: &String, key: Option<Key>, mut p: Peer, hooks: &Hooks, new_chat: &mut bool) {
+    let login = &p.login.clone();
+    let mut g = STATES.lock().unwrap();
+    let Some(s) = g.get_or_insert_with(HashMap::new).get_mut(repo) else { return };
+    s.key = key;
+    // a git copy older than what came over the link: keep the live data, take only what git alone carries
+    if let Some(old) = s.peers.get(login).filter(|o| o.seq > p.seq) {
+        let mut m = old.clone();
+        m.ts = m.ts.max(p.ts);
+        m.online = m.online || p.online;
+        m.pub_key = std::mem::take(&mut p.pub_key);
+        m.wrapped = std::mem::take(&mut p.wrapped);
+        m.invites = std::mem::take(&mut p.invites);
+        if !p.transcripts.is_empty() { m.transcripts = std::mem::take(&mut p.transcripts) }
+        p = m;
+    }
+    let first = !s.peers.contains_key(login);
+    let was = s.peers.get(login).is_some_and(|x| x.online);
+    // someone who posted a key but has no team data yet: a newcomer. Let them in only if
+    // approved (invited, or "let in"); otherwise ask.
+    let newcomer = s.key.is_some() && !p.pub_key.is_empty() && !p.joined && !p.locked && !s.removed.contains(login);
+    if newcomer {
+        if s.approved.contains(login) {
+            if first { log_to(repo, &format!("letting {login} in (you invited them)")); s.dirty = true }
+        } else if !s.asking.contains(login) {
+            s.asking.push(login.clone());
+            drop(g);
+            say(repo, hooks, format!("{login} wants to join the team: Ctrl+T to let them in"));
+            g = STATES.lock().unwrap();
+        }
+    }
+    let Some(s) = g.get_or_insert_with(HashMap::new).get_mut(repo) else { return };
+    if p.joined && s.invites.remove(login).is_some() {
+        // they're in: their invite code has done its job
+        save_json("team-invites", repo, &json!(s.invites));
+        s.dirty = true;
+    }
+    if p.online && !was && p.joined { say_locked(repo, s, hooks, format!("{login} is online")) }
+    if !p.online && was { say_locked(repo, s, hooks, format!("{login} went offline")) }
+    if first && !p.pub_key.is_empty() { s.dirty = true } // a new member to wrap the key for
+    // team chat: lines we haven't taken in yet
+    let upto = s.chat_seen.get(login).copied().unwrap_or(0);
+    let mut fresh: Vec<&(u64, u64, String)> = p.chat.iter().filter(|(id, _, _)| *id > upto).collect();
+    fresh.sort();
+    let seen_before = s.chat_seen.contains_key(login);
+    for (id, ts, text) in fresh {
+        if !s.chat.iter().any(|(t, f, x)| t == ts && f == login && x == text) {
+            s.chat.push((*ts, login.clone(), text.clone()));
+            if seen_before { s.unread += 1; *new_chat = true }
+        }
+        s.chat_seen.insert(login.clone(), *id);
+    }
+    s.chat_seen.entry(login.clone()).or_insert(0);
+    // change notes: what they changed, for our agents (the first read only catches up)
+    let upto = s.notes_seen.get(login).copied();
+    for (id, text, file, names) in p.notes.iter().filter(|n| upto.is_none_or(|u| n.0 > u)) {
+        if upto.is_some() {
+            push_note(repo, text, file, names);
+            log_to(repo, &format!("note: {}", text.lines().next().unwrap_or("")));
+        }
+        s.notes_seen.insert(login.clone(), (*id).max(s.notes_seen.get(login).copied().unwrap_or(0)));
+    }
+    s.notes_seen.entry(login.clone()).or_insert(0);
+    // their acks let us drop what they already handled
+    let acked = p.acks.get(me).copied().unwrap_or(0);
+    let before = s.outbox.len();
+    s.outbox.retain(|m| !(m["to"] == login.as_str() && m["id"].as_u64().unwrap_or(0) <= acked));
+    if s.outbox.len() != before { s.dirty = true }
+    for m in p.outbox.iter().filter(|m| m["to"] == me.as_str()) {
+        let id = m["id"].as_u64().unwrap_or(0);
+        if id <= s.seen.get(login).copied().unwrap_or(0) || s.pending.iter().any(|x| x.from == *login && x.id == id) {
+            continue;
+        }
+        let mut inc = Incoming { from: login.clone(), id, session: m["session"].as_str().unwrap_or("main").into(),
+                                 text: m["text"].as_str().unwrap_or("").into(), question: None };
+        let role = s.roles.get(login).map(String::as_str).unwrap_or("member");
+        if m["kind"] == "a" {
+            // an answer to one of our questions
+            s.seen.insert(login.clone(), id);
+            s.dirty = true;
+            let re = m["re"].as_u64().unwrap_or(0);
+            let Some(i) = s.asked.iter().position(|a| a.id == re) else { continue };
+            let q = s.asked.remove(i);
+            // what the answer relied on is now something our code counts on: a contract
+            let relied: Vec<String> = m["relied"].as_array().into_iter().flatten().filter_map(|n| n.as_str().map(String::from)).collect();
+            let u = s.uses.entry(q.session.clone()).or_default();
+            for n in &relied { u.insert(n.clone(), now()); }
+            let from = format!("{login}/{}", m["from_session"].as_str().unwrap_or(""));
+            if !relied.is_empty() {
+                s.last_answer.insert(q.session.clone(), (from.clone(), relied.clone(), format!("Q: {} A: {}", q.q, inc.text)));
+            }
+            let head = inc.text.lines().next().unwrap_or("").chars().take(100).collect::<String>();
+            if q.session.is_empty() {
+                say_locked(repo, s, hooks, format!("{from} answered you: {head}"));
+            } else {
+                say_locked(repo, s, hooks, format!("{from} answered your {}: {head}", q.session));
+                (hooks.answered)(&q.session, &format!("[team answer from {from}] You asked: {}\n\n{}{}", q.q, inc.text,
+                    if relied.is_empty() { String::new() } else { format!("\n\n(Their side now knows you rely on: {}. If they change those, they're told first. \
+If this answer matters a lot, the user can make it a checked promise with /promise.)", relied.join(", ")) }));
+            }
+            continue;
+        }
+        if m["kind"] == "q" {
+            let q = Question { repo: repo.into(), from: login.clone(), from_session: m["from_session"].as_str().unwrap_or("").into(),
+                               id, session: inc.session.clone(), text: inc.text.clone() };
+            let who = if q.from_session.is_empty() { login.clone() } else { format!("{login}/{}", q.from_session) };
+            log_to(repo, &format!("{who} asks your {}: {}", q.session, q.text));
+            let now = now();
+            s.answered.retain(|t| now.saturating_sub(*t) < 3600);
+            let refuse = if role == "viewer" { Some("they have you as view only".to_string()) }
+                else if s.answers == "off" { Some(format!("{me} has turned off questions from teammates' agents (/answers)")) }
+                else if s.answered.len() >= ANSWERS_PER_HOUR { Some(format!("{me}'s agents have answered {ANSWERS_PER_HOUR} questions this hour, the limit")) }
+                else { None };
+            if let Some(why) = refuse {
+                s.seen.insert(login.clone(), id);
+                reply_locked(s, &q, &format!("(not answered: {why}. Use their fact sheet, or ask {login} directly.)"), &[]);
+                say_locked(repo, s, hooks, format!("didn't answer {who}'s question: {why}"));
                 continue;
             }
-            let inc = Incoming { from: login.clone(), id, session: m["session"].as_str().unwrap_or("main").into(),
-                                 text: m["text"].as_str().unwrap_or("").into() };
-            if s.trusted.contains(login) {
-                (hooks.deliver)(&inc.session, &format!("[from {} via team] {}", inc.from, inc.text));
-                s.seen.insert(login.clone(), id);
-                s.dirty = true;
-            } else {
+            if s.answers == "ask" && role != "trusted" {
+                inc.text = format!("question: {}", q.text);
+                inc.question = Some(q);
                 (hooks.ask)(&inc);
                 s.pending.push(inc);
+                continue;
             }
+            s.seen.insert(login.clone(), id);
+            s.answered.push(now);
+            s.dirty = true;
+            say_locked(repo, s, hooks, format!("{who} asked your {}: \"{}\" (answering from a read-only copy)", q.session, q.text.chars().take(80).collect::<String>()));
+            (hooks.answer)(q);
+            continue;
         }
-        s.peers.insert(login.clone(), p);
+        if role == "trusted" {
+            (hooks.deliver)(&inc.session, &format!("[from {} via team] {}", inc.from, inc.text));
+            s.seen.insert(login.clone(), id);
+            s.dirty = true;
+        } else if role == "viewer" {
+            say_locked(repo, s, hooks, format!("dropped {login}'s request to your {}: they're view only", inc.session));
+            s.seen.insert(login.clone(), id);
+            s.dirty = true;
+        } else {
+            log_to(repo, &format!("{} asks your {}: {}", inc.from, inc.session, inc.text));
+            (hooks.ask)(&inc);
+            s.pending.push(inc);
+        }
     }
-    save_seen();
-    settle_key();
+    // every member, even before their addresses are out: the beacon, a relay or our memory of them
+    // may reach them first (and a hello from someone not registered here is dropped)
+    let line = (p.joined && !p.pub_key.is_empty()).then(|| (p.pub_key.clone(), p.link.clone(), p.link_ms));
+    s.peers.insert(login.clone(), p);
+    drop(g);
+    if let (Some((key, addrs, ms)), Some(l)) = (line, link()) {
+        l.peer(&key, &addrs, ms);
+    }
 }
 
 /// Nobody on the board holds a team key yet: the first member creates it. If someone already
 /// did (their data is sealed, or they wrap keys), wait for them to wrap a copy for us.
-fn settle_key() {
-    let mut g = STATE.lock().unwrap();
-    let Some(s) = g.as_mut() else { return };
-    if s.key.is_some() {
-        return;
-    }
-    if !s.peers.values().any(|p| !p.wrapped.is_empty() || p.locked) {
-        let k = tc::new_team_key();
-        save_key(&s.repo, &k);
-        s.key = Some(k);
-        s.dirty = true;
-    }
-}
-
-fn stale_check(hooks: &Hooks) {
-    if let Some(s) = STATE.lock().unwrap().as_mut() {
-        for p in s.peers.values_mut() {
-            if p.online && now().saturating_sub(p.ts) >= OFFLINE_AFTER {
-                p.online = false;
-                (hooks.say)(format!("👥 {} went offline", p.login));
+fn settle_key(repo: &str) {
+    with(repo, |s| {
+        if s.key.is_some() {
+            // Two people started on an empty board at the same moment and both made a key, so
+            // each sees the other as noise. The later name gives up theirs (only a key made in
+            // the last ten minutes that nobody else can read with) and asks to be let in.
+            let fresh = std::fs::metadata(per_repo("team-keys", &s.repo)).and_then(|m| m.modified()).ok()
+                .and_then(|t| t.elapsed().ok()).is_some_and(|e| e < Duration::from_secs(600));
+            let alone = !s.peers.values().any(|p| p.joined);
+            // after someone was removed, locked folders mean a key change, not a double start
+            let rotated = s.epoch > 0 || s.peers.values().any(|p| p.epoch > 0);
+            if fresh && alone && !rotated && s.peers.values().any(|p| p.locked && p.login < s.me) {
+                let _ = std::fs::remove_file(per_repo("team-keys", &s.repo));
+                s.key = None;
+                s.dirty = true;
+                log_to(&s.repo, "someone else set the team up at the same moment: asking them to let you in");
             }
+            return;
         }
-    }
+        if !s.peers.values().any(|p| !p.wrapped.is_empty() || p.locked) {
+            let k = tc::new_team_key();
+            save_key(&s.repo, &k);
+            s.key = Some(k);
+            s.dirty = true;
+        }
+    });
 }
 
-fn save_seen() {
-    if let Some(s) = STATE.lock().unwrap().as_ref() {
-        let p = per_repo("team-seen", &s.repo);
-        let _ = std::fs::create_dir_all(p.parent().unwrap_or(&p));
-        let _ = std::fs::write(&p, json!(s.seen).to_string());
-    }
+fn stale_check(repo: &str, hooks: &Hooks) {
+    let gone: Vec<String> = with(repo, |s| s.peers.values_mut()
+        .filter(|p| p.online && now().saturating_sub(p.ts) >= OFFLINE_AFTER)
+        .map(|p| { p.online = false; p.login.clone() }).collect()).unwrap_or_default();
+    for g in gone { say(repo, hooks, format!("{g} went offline")) }
 }
 
-/// Queue a message into a teammate's session; it travels with our next write.
+fn save_seen(repo: &str) {
+    with(repo, |s| save_json("team-seen", repo, &json!(s.seen)));
+}
+
+/// Ask a teammate's agent to do something in one of their sessions; it travels with our next
+/// write and runs on their machine once they allow it.
 pub fn send(to: &str, session: &str, text: &str) -> Result<String, String> {
-    let mut g = STATE.lock().unwrap();
-    let s = g.as_mut().filter(|_| running()).ok_or("team mode is off: /team on")?;
-    if s.key.is_none() {
-        return Err("you're not in the team yet: waiting for a teammate to let you in".into());
+    cur(|s| {
+        if s.key.is_none() {
+            return Err("you're not in the team yet: waiting to be let in".to_string());
+        }
+        let p = s.peers.get(to).ok_or_else(|| format!("no teammate {to}"))?;
+        if !p.sessions.iter().any(|(n, _, _)| n == session) {
+            return Err(format!("{to} has no session {session}"));
+        }
+        if p.roles.get(&s.me).is_some_and(|r| r == "viewer") {
+            return Err(format!("{to} has you as view only: you can read their sessions but not ask their agent"));
+        }
+        let online = p.online;
+        s.next_id += 1;
+        let id = s.next_id;
+        s.outbox.push(json!({"id": id, "to": to, "session": session, "text": text, "ts": now()}));
+        s.dirty = true;
+        Ok((format!("you asked {to}'s {session}: {text}"),
+            format!("asked {to}'s {session}: it runs on their machine once they allow it{}",
+                    if online { "" } else { " (they're offline, so it waits for them)" })))
+    }).ok_or("team mode is off".to_string())?.map(|(log_line, msg)| { log(&log_line); msg })
+}
+
+/// Say something in the team chat (to people, not agents: nothing runs).
+pub fn chat_send(text: &str) -> Result<(), String> {
+    let repo = cur(|s| {
+        let ts = now();
+        let id = ts * 1000 + (s.my_chat.len() as u64 % 1000);
+        s.my_chat.push(json!({"id": id, "ts": ts, "text": text}));
+        let n = s.my_chat.len();
+        if n > 30 { s.my_chat.drain(..n - 30); }
+        s.chat.push((ts, s.me.clone(), text.to_string()));
+        s.dirty = true;
+        s.repo.clone()
+    }).ok_or("team mode is off")?;
+    with(&repo, |s| {
+        let keep: Vec<_> = s.chat.iter().rev().take(300).rev().cloned().collect();
+        save_json("team-chat", &repo, &json!(keep));
+    });
+    Ok(())
+}
+
+/// The team chat, oldest first: (when, who, text); "you" for your own lines.
+pub fn chat() -> Vec<(String, String, String)> {
+    cur(|s| s.chat.iter().map(|(t, f, x)| (ago(*t), if *f == s.me { "you".into() } else { f.clone() }, x.clone())).collect()).unwrap_or_default()
+}
+
+pub fn chat_unread() -> usize {
+    cur(|s| s.unread).unwrap_or(0)
+}
+
+pub fn chat_read() {
+    cur(|s| s.unread = 0);
+}
+
+/// Newcomers waiting for "let in".
+pub fn join_requests() -> Vec<String> {
+    cur(|s| s.asking.clone()).unwrap_or_default()
+}
+
+pub fn let_in(login: &str) {
+    if let Some(repo) = repo() {
+        approve(&repo, login);
+        log(&format!("you let {login} in"));
     }
-    let p = s.peers.get(to).ok_or_else(|| format!("no teammate {to}; /team lists them"))?;
-    if !p.sessions.iter().any(|(n, _, _)| n == session) {
-        return Err(format!("{to} has no session {session}"));
-    }
-    let online = p.online;
-    s.next_id += 1;
-    let id = s.next_id;
-    s.outbox.push(json!({"id": id, "to": to, "session": session, "text": text, "ts": now()}));
-    s.dirty = true;
-    Ok(format!("sent to {to} / {session}: it runs on their machine once they allow it{}",
-               if online { "" } else { " (they're offline, so it waits for them)" }))
+}
+
+pub fn not_now(login: &str) {
+    cur(|s| s.asking.retain(|x| x != login));
+    log(&format!("you didn't let {login} in"));
 }
 
 /// Our answer to a waiting message: "once", "deny" or "always" (trust that person from now on).
 /// Returns (session, text) to deliver unless denied.
 pub fn decide(from: &str, id: u64, answer: &str) -> Option<(String, String)> {
-    let mut g = STATE.lock().unwrap();
-    let s = g.as_mut()?;
-    let i = s.pending.iter().position(|x| x.from == from && x.id == id)?;
-    let inc = s.pending.remove(i);
-    let prev = s.seen.get(from).copied().unwrap_or(0);
-    s.seen.insert(from.to_string(), id.max(prev));
-    s.dirty = true;
-    if answer == "always" && !s.trusted.contains(&inc.from) {
-        s.trusted.push(inc.from.clone());
+    let (inc, repo) = cur(|s| {
+        let i = s.pending.iter().position(|x| x.from == from && x.id == id)?;
+        let inc = s.pending.remove(i);
+        let prev = s.seen.get(from).copied().unwrap_or(0);
+        s.seen.insert(from.to_string(), id.max(prev));
+        s.dirty = true;
+        Some((inc, s.repo.clone()))
+    }).flatten()?;
+    log(&format!("{} {}'s {}", match answer { "deny" => "denied", "always" => "always allow", _ => "allowed" }, inc.from,
+                 if inc.question.is_some() { "question" } else { "request" }));
+    if answer == "always" {
+        let _ = set_role(&repo, &inc.from, "trusted");
     }
-    drop(g);
-    save_seen();
+    save_seen(&repo);
+    if let Some(q) = inc.question {
+        // a question: answered from a read-only copy, nothing runs in the session itself
+        let run = with(&repo, |s| {
+            if answer == "deny" {
+                reply_locked(s, &q, &format!("(not answered: {} said no. Use their fact sheet, or ask them directly.)", s.me), &[]);
+                return None;
+            }
+            s.answered.push(now());
+            s.answerer.clone()
+        }).flatten();
+        let session = q.session.clone();
+        return run.map(|f| { f(q); (String::new(), format!("your {session} is answering {}'s question (read-only)", inc.from)) });
+    }
     (answer != "deny").then(|| (inc.session.clone(), format!("[from {} via team] {}", inc.from, inc.text)))
 }
 
+// ---- behaviour contracts: promises about what a function does, checked by a model ----
+// Structure contracts (names, fields) are exact and free; behaviour ("rate is a fraction") needs a
+// model to judge, so it's opt-in: only promises someone made with /promise are checked.
+
+fn promise_of(v: &Value) -> Promise {
+    Promise { session: v["session"].as_str().unwrap_or("").into(), name: v["name"].as_str().unwrap_or("").into(),
+              text: v["text"].as_str().unwrap_or("").into(), ts: v["ts"].as_u64().unwrap_or(0) }
+}
+
+fn promises_json(p: &[Promise]) -> Value {
+    p.iter().map(|x| json!({"session": x.session, "name": x.name, "text": x.text, "ts": x.ts})).collect::<Vec<_>>().into()
+}
+
+/// `/promise` (the tab's last teammate answer becomes promises), `/promise <name> <what stays
+/// true>`, `/promise drop <name>`, `/promise list`.
+pub fn promise(session: &str, arg: &str) -> Result<String, String> {
+    let arg = arg.trim();
+    let out = cur(|s| -> Result<String, String> {
+        let mine = |s: &State| s.promises.iter().filter(|p| p.session == session)
+            .map(|p| format!("{}: {}", p.name, p.text)).collect::<Vec<_>>();
+        let msg = if arg.is_empty() {
+            let (who, names, text) = s.last_answer.remove(session)
+                .ok_or("no teammate answer to make a promise from yet: /promise <function> <what must stay true>")?;
+            let text: String = text.chars().take(400).collect();
+            for n in &names {
+                s.promises.retain(|p| !(p.session == session && p.name == *n));
+                s.promises.push(Promise { session: session.into(), name: n.clone(), text: text.clone(), ts: now() });
+            }
+            format!("promise made: whoever changes {} gets their edit checked against {who}'s answer first", names.join(", "))
+        } else if arg == "list" {
+            let l = mine(s);
+            if l.is_empty() { "this tab holds no promises · /promise <function> <what must stay true>".into() } else { l.join("\n") }
+        } else if let Some(n) = arg.strip_prefix("drop ") {
+            let before = s.promises.len();
+            s.promises.retain(|p| !(p.session == session && p.name == n.trim()));
+            if s.promises.len() == before { return Err(format!("no promise on {} in this tab", n.trim())) }
+            format!("dropped the promise on {}", n.trim())
+        } else {
+            let (name, text) = arg.split_once(' ').ok_or("usage: /promise <function> <what must stay true>")?;
+            s.promises.retain(|p| !(p.session == session && p.name == name));
+            s.promises.push(Promise { session: session.into(), name: name.into(), text: text.trim().chars().take(400).collect(), ts: now() });
+            format!("promise made: whoever changes {name} gets the edit checked against \"{}\" first", text.trim())
+        };
+        let n = s.promises.len();
+        if n > 50 { s.promises.drain(..n - 50); }
+        s.dirty = true;
+        save_json("team-promises", &s.repo, &promises_json(&s.promises));
+        Ok(msg)
+    }).ok_or("team mode is off")??;
+    log(&out);
+    Ok(out)
+}
+
+/// Teammates' promises on the functions an edit changes: (login/session, name, what stays true).
+fn promises_on(t: &Touched) -> Vec<(String, String, String)> {
+    with(&t.repo, |s| s.peers.values().filter(|p| p.joined).flat_map(|p| p.promises.iter()
+        .filter(|x| t.funcs.contains(&x.name)).map(|x| (format!("{}/{}", p.login, x.session), x.name.clone(), x.text.clone()))
+        .collect::<Vec<_>>()).collect()).unwrap_or_default()
+}
+
+/// Before an edit: the promises it could break, with the function before and after, for the model
+/// to judge. Empty when it touches no promised function or the user said /anyway.
+pub fn promises_at_risk(session: &str, t: &Touched) -> Vec<(String, String, String, String, String)> {
+    if ANYWAY.lock().unwrap().as_ref().and_then(|m| m.get(session)).is_some_and(|until| *until > now()) { return vec![] }
+    promises_on(t).into_iter().filter_map(|(who, name, text)| {
+        let (_, before, after) = t.bodies.iter().find(|b| b.0 == name)?;
+        (before != after).then(|| (who, name, text, before.clone(), after.clone()))
+    }).collect()
+}
+
+/// A model judged the edit breaks a teammate's promise: hold it, like a structure contract.
+pub fn promise_held(t: &Touched, who: &str, name: &str, text: &str, why: &str) -> (String, String) {
+    log_to(&t.repo, &format!("an edit would break what {who} counts on: {name} ({why})"));
+    (format!("held: this edit changes what {who} counts on in {name}: {why} · keep it or tell them · /anyway goes ahead"),
+     format!("error: held, your edit was NOT made. {who} (a teammate) counts on this about {name}: \"{text}\". A check of your change says it \
+breaks that: {why}. Either change it so that still holds, or stop and tell the user so they can agree it with {who}. If the user wants \
+it anyway, they type /anyway; the teammate's agent is then told to re-check."))
+}
+
+/// Promises a session holds (login "" = one of ours), for the map: (function, what stays true).
+pub fn promises_of(login: &str, session: &str) -> Vec<(String, String)> {
+    cur(|s| {
+        let list = if login.is_empty() { &s.promises } else { match s.peers.get(login) { Some(p) => &p.promises, None => return vec![] } };
+        list.iter().filter(|p| p.session == session).map(|p| (p.name.clone(), p.text.clone())).collect()
+    }).unwrap_or_default()
+}
+
+// ---- asking teammates' agents: fact sheet first (the asker pays), then their agent (they pay) ----
+
+/// Put an answer to a teammate's question in our outbox. `relied` = names the answer counts on.
+fn reply_locked(s: &mut State, q: &Question, text: &str, relied: &[String]) {
+    s.next_id += 1;
+    s.outbox.push(json!({"id": s.next_id, "to": q.from, "session": q.from_session, "kind": "a", "re": q.id,
+                         "from_session": q.session, "text": text, "relied": relied, "ts": now()}));
+    s.dirty = true;
+}
+
+/// Our agent's answer to a teammate's question is ready.
+pub fn reply(q: &Question, text: &str, relied: &[String]) {
+    let who = if q.from_session.is_empty() { q.from.clone() } else { format!("{}/{}", q.from, q.from_session) };
+    log_to(&q.repo, &format!("your {} → {who}: {}", q.session, text.chars().take(300).collect::<String>()));
+    with(&q.repo, |s| reply_locked(s, q, text, relied));
+}
+
+/// Whether teammates' agents may ask ours: auto (answer, within the hourly budget), ask (you
+/// allow each one), off.
+pub fn set_answers(mode: &str) -> Result<String, String> {
+    if !["auto", "ask", "off"].contains(&mode) { return Err("usage: /answers auto|ask|off".into()) }
+    let repo = cur(|s| { s.answers = mode.into(); s.repo.clone() }).ok_or("team mode is off")?;
+    let _ = std::fs::create_dir_all(crate::config::state_dir().join("team-answers"));
+    let _ = std::fs::write(per_repo("team-answers", &repo), mode);
+    Ok(match mode {
+        "auto" => format!("teammates' agents can ask yours; up to {ANSWERS_PER_HOUR} answers an hour, from a read-only copy"),
+        "ask" => "you'll be asked before your agents answer a teammate's question".into(),
+        _ => "teammates' agents can't ask yours; they still see your fact sheet".into(),
+    })
+}
+
+pub fn answers_mode() -> Option<String> {
+    cur(|s| s.answers.clone())
+}
+
+/// After a session finishes a task: what it decided and what comes next, for its fact sheet.
+pub fn set_sheet(session: &str, cwd: &Path, decided: &str, next: &str) {
+    let Some((_, repo)) = repo_of(cwd) else { return };
+    with(&repo, |s| {
+        s.sheets.insert(session.into(), Sheet { decided: decided.chars().take(200).collect(), next: next.chars().take(200).collect(), ts: now() });
+        s.dirty = true;
+    });
+}
+
+/// The decided/next lines of a session's fact sheet; login "" = one of ours.
+pub fn sheet_of(login: &str, session: &str) -> Option<Sheet> {
+    cur(|s| if login.is_empty() { s.sheets.get(session).cloned() } else { s.peers.get(login).and_then(|p| p.sheets.get(session).cloned()) }).flatten()
+}
+
+/// Whether this folder's project is connected (sessions there get team tools and notes).
+pub fn running_here(cwd: &Path) -> bool {
+    repo_of(cwd).is_some_and(|(_, r)| running_for(&r))
+}
+
+/// A teammate session's fact sheet: what it's doing, changing, using, decided and does next.
+fn sheet_text(p: &Peer, session: &str) -> String {
+    let d = p.details.get(session).cloned().unwrap_or_default();
+    let mut out = vec![format!("{}/{session} · {}", p.login, if p.online { "online".to_string() } else { format!("offline, last seen {}", ago(p.ts)) })];
+    let role = p.sessions.iter().find(|(n, _, _)| n == session).map(|(_, _, r)| r.clone()).unwrap_or_default();
+    let doing = [d.topic.as_str(), role.as_str()].into_iter().find(|x| !x.is_empty()).unwrap_or("").to_string();
+    if !doing.is_empty() { out.push(format!("doing: {doing}")) }
+    if !d.now.is_empty() { out.push(format!("right now: {}", d.now)) }
+    for (f, fns, ts) in claims_view(p.claims.get(session)).into_iter().take(8) {
+        out.push(format!("changing: {f}{} ({})", if fns.is_empty() { String::new() } else { format!(" › {}", fns.join(", ")) }, ago(ts)));
+    }
+    let mut uses = uses_view(p.uses.get(session));
+    uses.sort();
+    if !uses.is_empty() { out.push(format!("its fresh code uses: {}", uses.iter().take(20).cloned().collect::<Vec<_>>().join(", "))) }
+    if let Some(w) = p.waiting.iter().find(|w| w.session == session) { out.push(format!("waiting for {} ({} in {})", w.on, w.func, w.file)) }
+    if let Some(sh) = p.sheets.get(session) {
+        if !sh.decided.is_empty() { out.push(format!("decided: {} ({})", sh.decided, ago(sh.ts))) }
+        if !sh.next.is_empty() { out.push(format!("next: {}", sh.next)) }
+    }
+    if !d.branch.is_empty() { out.push(format!("branch: {}", d.branch)) }
+    for f in d.files.iter().take(6) { out.push(format!("touched: {f}")) }
+    out.truncate(30);
+    out.join("\n")
+}
+
+/// Who should answer a question: (login, session, why), best first. In order: whoever is
+/// changing the code it names, then whoever's fresh code uses those names, then whoever last
+/// committed the files it names.
+fn route(s: &State, root: &Path, text: &str, to: &str) -> Vec<(String, String, String)> {
+    static WORD: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r"[A-Za-z_][\w./-]*[\w]").unwrap());
+    let words: Vec<String> = WORD.find_iter(text).map(|w| w.as_str().to_string()).filter(|w| w.len() > 2).collect();
+    let paths: Vec<&String> = words.iter().filter(|w| w.contains('.') || w.contains('/')).collect();
+    let names: Vec<String> = words.iter().flat_map(|w| w.split(['.', '/'])).filter(|w| w.len() > 2).map(String::from).collect();
+    let file_hit = |f: &str| paths.iter().any(|p| f == p.as_str() || f.ends_with(&format!("/{p}")) || p.ends_with(&format!("/{f}")));
+    let (want_login, want_sess) = to.split_once('/').map(|(a, b)| (a, b)).unwrap_or((to, ""));
+    let now = now();
+    let mut scored: Vec<(i64, String, String, String)> = vec![];
+    for p in s.peers.values().filter(|p| p.joined && p.login != s.me) {
+        if !want_login.is_empty() && p.login != want_login { continue }
+        for (sess, _, _) in &p.sessions {
+            if !want_sess.is_empty() && sess != want_sess { continue }
+            let (mut score, mut why) = (0i64, vec![]);
+            for (f, fns) in p.claims.get(sess).into_iter().flatten() {
+                let hot: Vec<&String> = fns.keys().filter(|n| !n.is_empty() && names.contains(n)).collect();
+                if !hot.is_empty() { score += 8; why.push(format!("changing {}", hot.iter().map(|x| x.as_str()).collect::<Vec<_>>().join(", "))) }
+                else if file_hit(f) { score += 5; why.push(format!("changing {f}")) }
+            }
+            let used: Vec<&String> = p.uses.get(sess).into_iter().flatten()
+                .filter(|(n, t)| names.contains(n) && now.saturating_sub(**t) < 3600).map(|(n, _)| n).collect();
+            if !used.is_empty() { score += 3; why.push(format!("using {}", used.iter().take(3).map(|x| x.as_str()).collect::<Vec<_>>().join(", "))) }
+            let topic = p.details.get(sess).map(|d| d.topic.to_lowercase()).unwrap_or_default();
+            if names.iter().any(|n| n.len() > 3 && topic.contains(&n.to_lowercase())) { score += 1; why.push("working on it".into()) }
+            if score > 0 || !want_login.is_empty() {
+                // asked by name: the session busy with the most code first
+                let busy = p.claims.get(sess).map(|c| c.len() as i64).unwrap_or(0);
+                scored.push((score * 10 + busy + if p.online { 5 } else { 0 }, p.login.clone(), sess.clone(),
+                             if why.is_empty() { "named".into() } else { why.join("; ") }));
+            }
+        }
+    }
+    if scored.is_empty() && want_login.is_empty() {
+        // nobody's on it now: whoever last committed a file the question names
+        for p in &paths {
+            let Some(who) = git(root, &["log", "-1", "--format=%an%x09%ae", "--", p]).filter(|x| !x.trim().is_empty()) else { continue };
+            let who = who.to_lowercase();
+            if let Some(peer) = s.peers.values().find(|x| x.joined && x.login != s.me && who.contains(&x.login.to_lowercase())) {
+                if let Some((sess, _, _)) = peer.sessions.first() {
+                    scored.push((0, peer.login.clone(), sess.clone(), format!("last committed {p}")));
+                    break;
+                }
+            }
+        }
+    }
+    scored.sort_by_key(|x| std::cmp::Reverse(x.0));
+    scored.into_iter().map(|(_, l, s, w)| (l, s, w)).collect()
+}
+
+/// The ask_team tool. Without `deep`: the fact sheet of whoever owns what the question is about
+/// (free for them, a few tokens for us). With `deep`: the question goes to their agent, which
+/// answers later from a read-only copy of its session; the answer arrives as a message.
+pub fn ask_team(session: &str, cwd: &Path, question: &str, to: &str, deep: bool) -> String {
+    let Some((root, repo)) = repo_of(cwd) else { return "error: this folder isn't a team project".into() };
+    if !running_for(&repo) { return "error: team mode is off for this project".into() }
+    let to = to.trim().trim_start_matches('@');
+    with(&repo, |s| {
+        if s.key.is_none() { return "error: you're not in the team yet: waiting to be let in".into() }
+        let found = route(s, &root, question, to);
+        if found.is_empty() {
+            let mut team: Vec<String> = s.peers.values().filter(|p| p.joined && p.login != s.me).flat_map(|p| p.sessions.iter().map(|(n, _, r)| {
+                let topic = p.details.get(n).map(|d| d.topic.clone()).filter(|t| !t.is_empty()).unwrap_or_else(|| r.clone());
+                format!("{}/{n}{}{}", p.login, if topic.is_empty() { String::new() } else { format!(": {topic}") }, if p.online { "" } else { " (offline)" })
+            }).collect::<Vec<_>>()).collect();
+            team.sort();
+            return if !to.is_empty() { format!("error: no teammate session {to}. Teammates: {}", team.join("; ")) }
+                else if team.is_empty() { "error: nobody else is in this team yet".into() }
+                else { format!("error: couldn't tell who owns that: nobody is changing or using what the question names. Name the file or function, or pass to=\"login/session\". Teammates: {}", team.join("; ")) };
+        }
+        if !deep {
+            let mut out = vec![];
+            for (login, sess, why) in found.iter().take(2) {
+                let Some(p) = s.peers.get(login) else { continue };
+                out.push(format!("fact sheet (picked: {why})\n{}", sheet_text(p, sess)));
+            }
+            log_to(&repo, &format!("your {session} read {}'s fact sheet", found.iter().take(2).map(|(l, s, _)| format!("{l}/{s}")).collect::<Vec<_>>().join(" and ")));
+            let (l, ss, _) = &found[0];
+            return format!("{}\n\nIf this answers your question, go on. If not, call ask_team again with deep=true and to=\"{l}/{ss}\": their agent answers from its live session (it takes a minute; the answer arrives as a message).",
+                           out.join("\n\n"));
+        }
+        let (login, sess, why) = found[0].clone();
+        let online = s.peers.get(&login).is_some_and(|p| p.online);
+        if s.peers.get(&login).is_some_and(|p| p.roles.get(&s.me).is_some_and(|r| r == "viewer")) {
+            return format!("error: {login} has you as view only: you can read their fact sheet but not ask their agent");
+        }
+        if s.asked.iter().filter(|a| a.session == session && now().saturating_sub(a.ts) < 600).count() >= 3 {
+            return "error: you already have 3 questions out to teammates; wait for those answers first".into();
+        }
+        s.next_id += 1;
+        let id = s.next_id;
+        s.outbox.push(json!({"id": id, "to": login, "session": sess, "kind": "q", "from_session": session, "text": question, "ts": now()}));
+        s.asked.push(Asked { id, session: session.into(), to: format!("{login}/{sess}"), q: question.chars().take(300).collect(), ts: now() });
+        if s.asked.len() > 30 { s.asked.remove(0); }
+        s.dirty = true;
+        log_to(&repo, &format!("your {session} → {login}/{sess} ({why}): {question}"));
+        format!("asked {login}/{sess} (picked: {why}){}. The answer arrives as a [team answer] message, usually within a minute. \
+Don't wait: carry on with your best guess, and if the answer says otherwise, fix what you built on it.",
+                if online { "" } else { "; they're offline, so it waits until they're back" })
+    }).unwrap_or_else(|| "error: team mode is off for this project".into())
+}
+
+/// The person (not an agent) asks a teammate's session a question from the map; the answer shows
+/// in the activity feed and as a notice.
+pub fn ask_person_agent(to: &str, session: &str, question: &str) -> Result<String, String> {
+    cur(|s| {
+        if s.key.is_none() { return Err("you're not in the team yet".to_string()) }
+        if !s.peers.get(to).is_some_and(|p| p.sessions.iter().any(|(n, _, _)| n == session)) { return Err(format!("{to} has no session {session}")) }
+        s.next_id += 1;
+        let id = s.next_id;
+        s.outbox.push(json!({"id": id, "to": to, "session": session, "kind": "q", "from_session": "", "text": question, "ts": now()}));
+        s.asked.push(Asked { id, session: String::new(), to: format!("{to}/{session}"), q: question.chars().take(300).collect(), ts: now() });
+        s.dirty = true;
+        log_to(&s.repo, &format!("you → {to}/{session}: {question}"));
+        Ok(format!("asked {to}'s {session}; the answer shows here when it comes"))
+    }).ok_or("team mode is off".to_string())?
+}
+
+static ANSWERS_IN: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new()); // session, text
+
+/// Hand an answer to a busy session: it gets it before its next model call.
+pub fn queue_answer(session: &str, text: &str) {
+    ANSWERS_IN.lock().unwrap().push((session.into(), text.into()));
+}
+
+pub fn answers_for(session: &str) -> Vec<String> {
+    let mut a = ANSWERS_IN.lock().unwrap();
+    let (mine, rest): (Vec<_>, Vec<_>) = a.drain(..).partition(|(s, _)| s == session);
+    *a = rest;
+    mine.into_iter().map(|(_, t)| t).collect()
+}
+
+/// Our questions still waiting for an answer, for the map: (session, to, question, age).
+pub fn open_questions() -> Vec<(String, String, String, String)> {
+    cur(|s| s.asked.iter().filter(|a| now().saturating_sub(a.ts) < 3600).map(|a| (a.session.clone(), a.to.clone(), a.q.clone(), ago(a.ts))).collect())
+        .unwrap_or_default()
+}
+
 pub fn pending() -> Vec<Incoming> {
-    STATE.lock().unwrap().as_ref().map(|s| s.pending.clone()).unwrap_or_default()
+    cur(|s| s.pending.clone()).unwrap_or_default()
+}
+
+/// Things waiting in connected projects other than the one on screen: (repo, count).
+pub fn waiting_elsewhere() -> Vec<(String, usize)> {
+    let c = CURRENT.lock().unwrap().clone();
+    STATES.lock().unwrap().get_or_insert_with(HashMap::new).values()
+        .filter(|s| s.repo != c && s.running.load(Relaxed))
+        .map(|s| (s.repo.clone(), s.pending.len() + s.asking.len() + s.unread))
+        .filter(|(_, n)| *n > 0).collect()
+}
+
+/// Teammates for the /team menu: (login, online, "online" or "2h ago", session names, our role for them).
+pub fn people() -> Vec<(String, bool, String, Vec<String>, String)> {
+    cur(|s| {
+        let mut peers: Vec<&Peer> = s.peers.values().filter(|p| p.joined).collect();
+        peers.sort_by_key(|p| (!p.online, p.login.clone()));
+        peers.iter().map(|p| (
+            p.login.clone(), p.online,
+            format!("{}{}", if p.online { "online".to_string() } else { ago(p.ts) },
+                if s.pins.get(&p.login).is_some_and(|k| k.2) { "" } else { ", key not confirmed by GitHub" }),
+            p.sessions.iter().map(|(n, _, _)| n.clone()).collect(),
+            s.roles.get(&p.login).cloned().unwrap_or_else(|| "member".into()),
+        )).collect()
+    }).unwrap_or_default()
+}
+
+/// One session in the overview.
+#[derive(Clone, Debug, Default)]
+pub struct SessionView {
+    pub name: String,
+    pub status: String,
+    pub topic: String,
+    pub now: String,
+    pub files: Vec<String>,
+    pub branch: String,
+    pub edits: Vec<(String, Vec<String>, u64)>, // file, functions, latest edit: what it's changing lately
+    pub waiting: Option<Wait>,                  // paused on a teammate
+    pub uses: Vec<String>,                      // names its fresh code uses (last hour)
+}
+
+/// Everything the room shows about one teammate.
+pub struct PersonView {
+    pub login: String,
+    pub online: bool,
+    pub seen: String,
+    pub sessions: Vec<SessionView>,
+    pub view_only: bool,
+}
+
+pub fn overview() -> Vec<PersonView> {
+    cur(|s| {
+        let mut peers: Vec<&Peer> = s.peers.values().filter(|p| p.joined).collect();
+        peers.sort_by_key(|p| (!p.online, p.login.clone()));
+        peers.iter().map(|p| PersonView {
+            login: p.login.clone(), online: p.online,
+            seen: if p.online { "online".into() } else { ago(p.ts) },
+            sessions: p.sessions.iter().map(|(n, st, role)| {
+                let mut v = p.details.get(n).cloned().unwrap_or_default();
+                v.name = n.clone();
+                v.status = st.clone();
+                if v.topic.is_empty() { v.topic = role.clone() }
+                v.edits = claims_view(p.claims.get(n));
+                v.waiting = p.waiting.iter().find(|w| w.session == *n).cloned();
+                v.uses = uses_view(p.uses.get(n));
+                v
+            }).collect(),
+            view_only: s.roles.get(&p.login).is_some_and(|r| r == "viewer"),
+        }).collect()
+    }).unwrap_or_default()
+}
+
+// ---- change notes: a short "fyi, I changed X" to teammates' agents ----
+// Agents working in parallel break each other mostly by changing something the other relies on;
+// a ~100-token note about the change prevents most of it (arXiv 2609.25396).
+
+type NoteIn = (u64, String, String, String, Vec<String>); // seq, repo, text, file, names it changed
+static NOTES_IN: Mutex<Vec<NoteIn>> = Mutex::new(Vec::new());
+static NOTES_READ: Mutex<Option<HashMap<String, u64>>> = Mutex::new(None);   // session -> last seq given
+static NOTE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+static MY_NOTE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static REPO_OF: Mutex<Option<HashMap<PathBuf, Option<(PathBuf, String)>>>> = Mutex::new(None);
+
+/// github_repo, remembered per folder (it runs git; agents ask on every model call).
+fn repo_of(cwd: &Path) -> Option<(PathBuf, String)> {
+    let mut c = REPO_OF.lock().unwrap();
+    c.get_or_insert_with(HashMap::new).entry(cwd.to_path_buf()).or_insert_with(|| github_repo(cwd)).clone()
+}
+
+fn push_note(repo: &str, text: &str, file: &str, names: &[String]) {
+    let mut n = NOTES_IN.lock().unwrap();
+    n.push((NOTE_SEQ.fetch_add(1, Relaxed), repo.to_string(), text.to_string(), file.to_string(), names.to_vec()));
+    let len = n.len();
+    if len > 200 { n.drain(..len - 200); }
+}
+
+/// Teammates' change notes a session hasn't seen yet, for its next model call. A session
+/// starts from now: it isn't handed notes from before it asked the first time. `files` = what
+/// the session has read or written (as its tools named them): a note about one of those, or
+/// about a name its code uses, comes in full; the rest as one line, so a big team's notes don't
+/// fill every context.
+pub fn notes_for(session: &str, cwd: &Path, files: &[String]) -> Vec<String> {
+    let Some((root, repo)) = repo_of(cwd) else { return vec![] };
+    if !running_for(&repo) { return vec![] }
+    let mine: Vec<String> = files.iter().map(|f| {
+        let p = if Path::new(f).is_absolute() { PathBuf::from(f) } else { cwd.join(f) };
+        p.strip_prefix(&root).map(|r| r.to_string_lossy().replace('\\', "/")).unwrap_or_else(|_| f.clone())
+    }).collect();
+    let uses: Vec<String> = with(&repo, |s| s.uses.get(session).map(|u| u.keys().cloned().collect()).unwrap_or_default()).unwrap_or_default();
+    let n = NOTES_IN.lock().unwrap();
+    let last = n.last().map(|x| x.0).unwrap_or(0);
+    let mut read = NOTES_READ.lock().unwrap();
+    let seen = read.get_or_insert_with(HashMap::new).entry(session.to_string()).or_insert(last);
+    // several edits to one file since the last call: only the latest note about it
+    let fresh: Vec<&NoteIn> = n.iter().filter(|x| x.0 > *seen && x.1 == repo).collect();
+    let out = shape_notes(&fresh, &mine, &uses);
+    *seen = last;
+    out
+}
+
+/// Which notes come in full: all of them when there are only a couple of files; otherwise the
+/// ones about files the session touched or names its code uses, and warnings. Only the latest
+/// note per file.
+fn shape_notes(fresh: &[&NoteIn], mine: &[String], uses: &[String]) -> Vec<String> {
+    let mut out: Vec<(String, String)> = vec![];
+    let few = fresh.iter().map(|x| &x.3).collect::<std::collections::HashSet<_>>().len() <= 2; // a couple cost little: all in full
+    for (_, _, t, file, names) in fresh.iter().copied() {
+        let full = few || mine.contains(file) || names.iter().any(|x| uses.contains(x)) || t.starts_with("BREAKING") || t.starts_with("CHECK");
+        let text = if full { t.clone() } else {
+            format!("{} (a file you haven't touched; read it if your work depends on it)", t.lines().find(|l| l.contains(" changed ")).unwrap_or(t))
+        };
+        out.retain(|(f, _)| f != file);
+        out.push((file.clone(), text));
+    }
+    out.into_iter().map(|(_, t)| t).collect()
+}
+
+// ---- claims: who is changing which function right now ----
+// Two agents editing the same function is the one case worth stopping for; anything broader
+// (same file, reads) only gets a note. Broad claims serialize most work (arXiv 2608.00947).
+
+/// The name a line defines, if it starts a function, method or type. Language-agnostic on
+/// purpose, no parser: fn/def/class/struct/impl/func/function, JS arrow consts, indented methods.
+fn def_name(l: &str) -> Option<String> {
+    static RES: std::sync::LazyLock<Vec<regex::Regex>> = std::sync::LazyLock::new(|| [
+        r"^func\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)",
+        r"^\s*(?:(?:pub(?:\([^)]*\))?|export|default|async|static|private|public|protected|override|final|abstract|unsafe|const|extern(?:\s+\x22[^\x22]*\x22)?)\s+)*(?:fn|def|class|struct|enum|union|trait|function\*?|interface|module|object|record)\s+([A-Za-z_$][\w$]*)",
+        r"^\s*(?:unsafe\s+)?impl(?:<[^>]*>)?\s+(?:[\w:<>, ]+?\s+for\s+)?([A-Za-z_]\w*)",
+        r"^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=]+)?=\s*(?:async\s+)?(?:function\b|\([^)]*\)\s*(?::[^=]+)?=>|[A-Za-z_$][\w$]*\s*=>)",
+        r"^\s+(?:(?:public|private|protected|static|async|override|virtual|get|set)\s+)*([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*(?::\s*[^{;]+)?\{\s*$",
+    ].iter().map(|r| regex::Regex::new(r).unwrap()).collect());
+    let n = RES.iter().find_map(|r| r.captures(l)).and_then(|c| c.get(1)).map(|m| m.as_str().to_string())?;
+    (!["if", "for", "while", "switch", "catch", "match", "return", "else", "do", "try", "with", "loop"].contains(&n.as_str())).then_some(n)
+}
+
+/// For every line of `text`, the function or type it belongs to: the nearest enclosing
+/// definition by indentation (None = top-level code).
+fn owners(text: &str) -> Vec<Option<String>> {
+    let mut stack: Vec<(usize, String)> = vec![];
+    text.lines().map(|l| {
+        if l.trim().is_empty() { return stack.last().map(|x| x.1.clone()) }
+        let k = l.len() - l.trim_start().len();
+        if let Some(n) = def_name(l) {
+            while stack.last().is_some_and(|x| x.0 >= k) { stack.pop(); }
+            stack.push((k, n.clone()));
+            return Some(n);
+        }
+        // deeper definitions are over; one at the same depth too, unless this line closes it
+        // (`}` / `end`): Python's top-level code after a def isn't part of the def
+        let t = l.trim_start();
+        let closes = t.starts_with(['}', ')', ']']) || t == "end" || t.starts_with("end ");
+        while stack.last().is_some_and(|x| x.0 > k || (x.0 == k && !closes)) { stack.pop(); }
+        stack.last().map(|x| x.1.clone())
+    }).collect()
+}
+
+/// The lines that differ between two versions: (removed lines of `a`, added lines of `b`).
+/// The common start and end are cut first, so a typical edit is exact and cheap; the middle
+/// gets a real LCS diff unless it's huge, then it all counts as changed.
+fn changed_lines(a: &[&str], b: &[&str]) -> (Vec<usize>, Vec<usize>) {
+    let pre = a.iter().zip(b).take_while(|(x, y)| x == y).count();
+    let suf = a[pre..].iter().rev().zip(b[pre..].iter().rev()).take_while(|(x, y)| x == y).count();
+    let (am, bm) = (&a[pre..a.len() - suf], &b[pre..b.len() - suf]);
+    let (n, m) = (am.len(), bm.len());
+    if n == 0 || m == 0 || n * m > 1_000_000 {
+        return ((pre..pre + n).collect(), (pre..pre + m).collect());
+    }
+    let w = m + 1;
+    let mut t = vec![0u32; (n + 1) * w];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            t[i * w + j] = if am[i] == bm[j] { t[(i + 1) * w + j + 1] + 1 } else { t[(i + 1) * w + j].max(t[i * w + j + 1]) };
+        }
+    }
+    let (mut i, mut j, mut del, mut add) = (0, 0, vec![], vec![]);
+    while i < n && j < m {
+        if am[i] == bm[j] { i += 1; j += 1 }
+        else if t[(i + 1) * w + j] >= t[i * w + j + 1] { del.push(pre + i); i += 1 }
+        else { add.push(pre + j); j += 1 }
+    }
+    del.extend((i..n).map(|x| pre + x));
+    add.extend((j..m).map(|x| pre + x));
+    (del, add)
+}
+
+/// What an edit is about to change, in a team project: the file (relative to the project) and
+/// the functions in it.
+#[derive(Clone, Debug)]
+pub struct Touched {
+    repo: String,
+    root: PathBuf,
+    pub file: String,
+    pub funcs: Vec<String>,
+    removed: Vec<String>, // names it defined that the edit takes away (deleted or renamed)
+    uses: Vec<String>,    // names the added lines use
+    pub bodies: Vec<(String, String, String)>, // changed function: (name, text before, text after)
+}
+
+/// A field declared on this line (`name: String`, `pub name: T`, `name?: string`, `self.name =`).
+fn field_name(l: &str) -> Option<String> {
+    static F: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(
+        r"^\s+(?:(?:pub(?:\([^)]*\))?|readonly|public|private|protected)\s+)*([A-Za-z_]\w*)\??\s*:\s*[A-Za-z_\[({<&'*]|^\s+self\.([A-Za-z_]\w*)\s*(?::[^=]+)?=[^=]").unwrap());
+    F.captures(l).and_then(|c| c.get(1).or(c.get(2))).map(|m| m.as_str().to_string())
+}
+
+/// Names other code can rely on that these lines define: functions, types, fields.
+fn defines(lines: &[&str], which: &[usize]) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    for &i in which {
+        let Some(l) = lines.get(i) else { continue };
+        if let Some(n) = def_name(l).or_else(|| field_name(l)) {
+            if n.len() >= 3 && !out.contains(&n) { out.push(n) }
+        }
+    }
+    out
+}
+
+/// The names a few lines of code use (identifiers outside strings and comments, minus keywords).
+fn used_names(lines: &[&str], which: &[usize]) -> Vec<String> {
+    static ID: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r"[A-Za-z_][A-Za-z0-9_]{2,}").unwrap());
+    static STR: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r#""(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`[^`]*`|//.*$|#.*$"#).unwrap());
+    const KW: &[&str] = &["def", "class", "return", "import", "from", "self", "None", "True", "False", "for", "while", "and", "not",
+        "pub", "let", "mut", "impl", "struct", "enum", "use", "mod", "crate", "Self", "match", "async", "await", "const", "static",
+        "function", "var", "new", "this", "null", "undefined", "true", "false", "export", "default", "interface", "type", "else",
+        "elif", "pass", "lambda", "yield", "with", "try", "except", "finally", "raise", "catch", "throw", "func", "package", "string",
+        "int", "bool", "str", "String", "Vec", "Option", "Some", "Ok", "Err", "Result", "print", "println", "len", "map"];
+    let mut out: Vec<String> = vec![];
+    for &i in which {
+        let Some(l) = lines.get(i) else { continue };
+        let code = STR.replace_all(l, " ");
+        for m in ID.find_iter(&code) {
+            let n = m.as_str().to_string();
+            if !KW.contains(&n.as_str()) && !out.contains(&n) { out.push(n) }
+        }
+        if out.len() >= 40 { break }
+    }
+    out
+}
+
+/// Work out what writing `after` to `full` changes. None outside a connected team project.
+pub fn touched(cwd: &Path, full: &Path, after: &str) -> Option<Touched> {
+    let (root, repo) = repo_of(cwd)?;
+    if !running_for(&repo) { return None }
+    let file = full.strip_prefix(&root).ok()?.to_string_lossy().replace('\\', "/");
+    let before = std::fs::read_to_string(full).unwrap_or_default();
+    let (a, b): (Vec<&str>, Vec<&str>) = (before.lines().collect(), after.lines().collect());
+    let (del, add) = changed_lines(&a, &b);
+    let (oa, ob) = (owners(&before), owners(after));
+    let mut funcs: Vec<String> = vec![];
+    // blank lines say nothing: one added between two functions isn't a change to the one above
+    let real = |lines: &[&str], i: usize| lines.get(i).is_some_and(|l| !l.trim().is_empty());
+    for n in del.iter().filter(|&&i| real(&a, i)).filter_map(|&i| oa.get(i).cloned().flatten())
+        .chain(add.iter().filter(|&&i| real(&b, i)).filter_map(|&i| ob.get(i).cloned().flatten())) {
+        if !funcs.contains(&n) { funcs.push(n) }
+    }
+    // what other code may rely on: names it defined that are gone afterwards
+    let kept = defines(&b, &(0..b.len()).collect::<Vec<_>>());
+    let removed = defines(&a, &del).into_iter().filter(|n| !kept.contains(n)).collect();
+    let mine = defines(&b, &add);
+    let uses = used_names(&b, &add).into_iter().filter(|n| !mine.contains(n)).collect();
+    // each changed function's whole text, before and after, for checking behaviour promises
+    let body = |lines: &[&str], own: &[Option<String>], f: &str| lines.iter().zip(own)
+        .filter(|(_, o)| o.as_deref() == Some(f)).take(120).map(|(l, _)| *l).collect::<Vec<_>>().join("\n");
+    let bodies = funcs.iter().map(|f| (f.clone(), body(&a, &oa, f), body(&b, &ob, f))).collect();
+    Some(Touched { repo, root, file, funcs, removed, uses, bodies })
+}
+
+static ANYWAY: Mutex<Option<HashMap<String, u64>>> = Mutex::new(None); // session -> allowed until
+
+/// The user said "go ahead anyway": this session's edits skip teammates' claims for 10 minutes.
+pub fn allow_anyway(session: &str) {
+    ANYWAY.lock().unwrap().get_or_insert_with(HashMap::new).insert(session.to_string(), now() + CLAIM_HOT);
+}
+
+/// Before an edit: is a teammate changing one of these functions right now? Then the edit
+/// doesn't happen, the session is told who has it and why, and it's woken when it's free.
+/// None = go ahead.
+pub fn check_edit(session: &str, t: &Touched) -> Option<(String, String)> {
+    let now = now();
+    if ANYWAY.lock().unwrap().as_ref().and_then(|m| m.get(session)).is_some_and(|until| *until > now) { return None }
+    if t.funcs.is_empty() { return check_contract(t) }
+    let hit = with(&t.repo, |s| {
+        for p in s.peers.values().filter(|p| p.joined && p.online) {
+            for (sess, files) in &p.claims {
+                let Some(fns) = files.get(&t.file) else { continue };
+                let Some((func, ts)) = t.funcs.iter().find_map(|f| fns.get(f).filter(|ts| now.saturating_sub(**ts) < CLAIM_HOT).map(|ts| (f.clone(), *ts))) else { continue };
+                let why = p.details.get(sess).map(|d| d.topic.clone()).filter(|x| !x.is_empty())
+                    .map(|x| format!(" (working on: {x})")).unwrap_or_default();
+                if !s.waiting.iter().any(|w| w.session == session && w.file == t.file && w.func == func) {
+                    s.waiting.push(Wait { session: session.into(), file: t.file.clone(), func: func.clone(), on: p.login.clone(), since: now });
+                    s.dirty = true;
+                }
+                return Some((p.login.clone(), sess.clone(), func, ts, why));
+            }
+        }
+        None
+    }).flatten();
+    let Some((who, sess, func, ts, why)) = hit else { return check_contract(t) };
+    log_to(&t.repo, &format!("your {session} waits for {who} · {func} in {}", t.file));
+    Some((format!("paused: {who}/{sess} is changing {func} in {}. You'll be told when it's free · /anyway goes ahead", t.file),
+          format!("error: paused, your edit was NOT made. {who}/{sess} is changing {func} in {} right now (last edit {}){why}. \
+Meanwhile work on something that doesn't touch {func}, or stop and tell the user you're waiting for {who}; you'll get a message the \
+moment {func} is free. Don't get around this by editing it another way. If the user wants you to go ahead anyway, they type /anyway.",
+        t.file, ago(ts))))
+}
+
+/// Teammates' fresh code that uses a name, within the last hour: (login, session) pairs.
+fn users_of(s: &State, name: &str) -> Vec<(String, String)> {
+    let now = now();
+    s.peers.values().filter(|p| p.joined).flat_map(|p| p.uses.iter()
+        .filter(|(_, u)| u.get(name).is_some_and(|ts| now.saturating_sub(*ts) < 3600))
+        .map(|(sess, _)| (p.login.clone(), sess.clone()))).collect()
+}
+
+/// Contracts: the edit takes away a name (function, type, field) a teammate's fresh code uses.
+/// Their copy doesn't have our change yet, so nothing on our side would catch the break.
+fn check_contract(t: &Touched) -> Option<(String, String)> {
+    let (name, users) = with(&t.repo, |s| t.removed.iter().find_map(|n| {
+        let u = users_of(s, n);
+        (!u.is_empty()).then(|| (n.clone(), u))
+    })).flatten()?;
+    let who: Vec<String> = users.iter().map(|(l, sess)| format!("{l}/{sess}")).collect();
+    let who = who.join(", ");
+    log_to(&t.repo, &format!("an edit would break {who}: it takes away {name} ({})", t.file));
+    Some((format!("held: this edit takes away {name}, which {who} uses. Keep {name} or tell them · /anyway goes ahead"),
+          format!("error: held, your edit was NOT made. It removes or renames {name} in {}, and {who} (a teammate) wrote code in the last hour that uses {name}; their copy doesn't have your change, so it would break when the work is merged. Either keep {name} working (for a rename: keep the old name too, delegating to the new one), or stop and tell the user so they can agree it with {who}. If the user wants it anyway, they type /anyway; the teammate's agent then gets told to update.", t.file)))
+}
+
+/// After a successful edit: these functions are now this session's for a while, and teammates'
+/// agents hear what changed.
+pub fn claim(session: &str, topic: &str, t: &Touched) {
+    with(&t.repo, |s| {
+        let now = now();
+        let e = s.claims.entry(session.to_string()).or_default().entry(t.file.clone()).or_default();
+        for f in &t.funcs { e.insert(f.clone(), now); }
+        if t.funcs.is_empty() { e.insert(String::new(), now); } // outside any function: the file, for the map
+        // it went ahead (allowed anyway): no longer waiting on that
+        s.waiting.retain(|w| !(w.session == session && w.file == t.file && t.funcs.contains(&w.func)));
+        let u = s.uses.entry(session.to_string()).or_default();
+        for n in &t.uses { u.insert(n.clone(), now); }
+        if u.len() > 200 {
+            let mut v: Vec<(String, u64)> = u.drain().collect();
+            v.sort_by_key(|x| std::cmp::Reverse(x.1));
+            u.extend(v.into_iter().take(150));
+        }
+        s.dirty = true;
+    });
+    // went ahead (/anyway) and took away something a teammate uses: say so loudly in the note
+    let broken: Vec<(String, Vec<(String, String)>)> = with(&t.repo, |s| t.removed.iter()
+        .map(|n| (n.clone(), users_of(s, n))).filter(|(_, u)| !u.is_empty()).collect()).unwrap_or_default();
+    let mut warn = broken.iter().map(|(n, u)| format!("BREAKING for {}: {n} was removed or renamed and your recent code uses it. Update it to match.",
+        u.iter().map(|(l, sess)| format!("{l}/{sess}")).collect::<Vec<_>>().join(", "))).collect::<Vec<_>>();
+    // went ahead on a function someone holds a promise on: tell them to re-check what they count on
+    for (who, name, text) in promises_on(t) {
+        warn.push(format!("CHECK for {who}: {name} changed and you count on: \"{text}\". Make sure your code still fits."));
+    }
+    let warn = warn.join("\n");
+    note_change(session, topic, t, &warn);
+}
+
+/// Tell teammates' agents what changed, with the changed lines (a few) so "name → fullName"
+/// comes through. One note per file, refreshed in place while the session keeps editing it.
+fn note_change(session: &str, topic: &str, t: &Touched, warn: &str) {
+    let diff = git(&t.root, &["diff", "-U0", "--", &t.file]).unwrap_or_default();
+    let lines: Vec<String> = diff.lines()
+        .filter(|l| (l.starts_with('+') || l.starts_with('-')) && !l.starts_with("+++") && !l.starts_with("---") && l.trim().len() > 1)
+        .take(8).map(|l| l.chars().take(100).collect()).collect();
+    let file = &t.file;
+    with(&t.repo, |s| {
+        let what = if t.funcs.is_empty() { file.clone() } else { format!("{file} ({})", t.funcs.join(", ")) };
+        let why = if topic.is_empty() { String::new() } else { format!(" — working on: {}", topic.chars().take(80).collect::<String>()) };
+        let body = if lines.is_empty() { "(new or untracked file)".to_string() } else { lines.join("\n") };
+        let text = format!("{}{}/{session} changed {what}{why}\n{body}", if warn.is_empty() { String::new() } else { format!("{warn}\n") }, s.me);
+        let ts = now();
+        s.my_notes.retain(|n| !(n["file"] == file.as_str() && n["session"] == session && ts.saturating_sub(n["ts"].as_u64().unwrap_or(0)) < 600));
+        let id = MY_NOTE_ID.fetch_add(1, Relaxed).max(ts * 1000);
+        MY_NOTE_ID.fetch_max(id + 1, Relaxed);
+        let names: Vec<&String> = t.funcs.iter().chain(&t.removed).collect();
+        s.my_notes.push(json!({"id": id, "ts": ts, "file": file, "session": session, "text": text, "names": names}));
+        let n = s.my_notes.len();
+        if n > 20 { s.my_notes.drain(..n - 20); }
+        s.dirty = true;
+    });
+}
+
+/// Every few seconds: let go of claims on what we pushed (or that went stale), and wake our
+/// sessions whose function is free again.
+fn wake_check(repo: &str, root: &Path, hooks: &Hooks) {
+    static LAST_RELEASE: Mutex<Option<Instant>> = Mutex::new(None);
+    let due = {
+        let mut l = LAST_RELEASE.lock().unwrap();
+        let due = l.is_none_or(|t| t.elapsed() >= Duration::from_secs(20));
+        if due { *l = Some(Instant::now()) }
+        due
+    };
+    let now = now();
+    if due {
+        // a file that matches what's upstream again was pushed (or put back): it's free
+        let files: Vec<String> = with(repo, |s| s.claims.values().flat_map(|c| c.keys().cloned()).collect()).unwrap_or_default();
+        let pushed: Vec<String> = files.into_iter().filter(|f| {
+            git(root, &["diff", "--quiet", "@{upstream}", "--", f]).is_some()
+                || git(root, &["rev-parse", "--abbrev-ref", "@{upstream}"]).is_none() && git(root, &["diff", "--quiet", "HEAD", "--", f]).is_some()
+        }).collect();
+        with(repo, |s| {
+            let before: usize = s.claims.values().map(|c| c.len()).sum();
+            for c in s.claims.values_mut() {
+                c.retain(|f, fns| { fns.retain(|_, ts| now.saturating_sub(*ts) < 3600); !pushed.contains(f) && !fns.is_empty() });
+            }
+            s.claims.retain(|_, c| !c.is_empty());
+            if s.claims.values().map(|c| c.len()).sum::<usize>() != before { s.dirty = true }
+        });
+    }
+    let woken: Vec<(Wait, &'static str)> = with(repo, |s| {
+        let mut out = vec![];
+        let peers = &s.peers;
+        s.waiting.retain(|w| {
+            let p = peers.get(&w.on);
+            let held = p.filter(|p| p.online).is_some_and(|p| p.claims.values()
+                .any(|c| c.get(&w.file).and_then(|f| f.get(&w.func)).is_some_and(|ts| now.saturating_sub(*ts) < CLAIM_HOT)));
+            if held && now.saturating_sub(w.since) < 3600 { return true }
+            let why = if !p.is_some_and(|p| p.online) { "went offline" }
+                else if p.is_some_and(|p| p.claims.values().all(|c| !c.contains_key(&w.file))) { "pushed it" }
+                else { "stopped editing it" };
+            out.push((w.clone(), why));
+            false
+        });
+        if !out.is_empty() { s.dirty = true }
+        out
+    }).unwrap_or_default();
+    for (w, why) in woken {
+        let pull = if why == "pushed it" { " They pushed it: run `git pull` first so you build on their version." }
+                   else { " It isn't pushed yet, so their change is only in the team notes you got: build on what they describe so both fit together." };
+        say(repo, hooks, format!("your {} can go on: {} {why}, {} is free", w.session, w.on, w.func));
+        (hooks.deliver)(&w.session, &format!("[team] {} in {} is free: {} {why}.{pull} Then carry on with the edit you were paused on.", w.func, w.file, w.on));
+    }
+}
+
+/// Our own sessions' claims and waits in the project on screen, for the map.
+pub fn mine(session: &str) -> (Vec<(String, Vec<String>, u64)>, Option<Wait>, Vec<String>) {
+    cur(|s| (claims_view(s.claims.get(session)), s.waiting.iter().find(|w| w.session == session).cloned(), uses_view(s.uses.get(session))))
+        .unwrap_or_default()
+}
+
+/// Names a session's code used in the last hour.
+fn uses_view(u: Option<&HashMap<String, u64>>) -> Vec<String> {
+    let now = now();
+    u.into_iter().flatten().filter(|(_, t)| now.saturating_sub(**t) < 3600).map(|(n, _)| n.clone()).collect()
+}
+
+/// A session's claims as (file, functions, latest edit), most recent first.
+fn claims_view(c: Option<&Claims>) -> Vec<(String, Vec<String>, u64)> {
+    let mut v: Vec<(String, Vec<String>, u64)> = c.into_iter().flatten().map(|(f, fns)| {
+        let mut names: Vec<(&String, &u64)> = fns.iter().filter(|(n, _)| !n.is_empty()).collect();
+        names.sort_by_key(|(_, t)| std::cmp::Reverse(**t));
+        (f.clone(), names.into_iter().map(|(n, _)| n.clone()).collect(), fns.values().copied().max().unwrap_or(0))
+    }).collect();
+    v.sort_by_key(|x| std::cmp::Reverse(x.2));
+    v
+}
+
+static ACTIVITY: Mutex<Vec<(u64, String, String)>> = Mutex::new(Vec::new());
+
+/// Something for a project's Activity tab (last 300 kept across projects).
+pub fn log_to(repo: &str, text: &str) {
+    let mut a = ACTIVITY.lock().unwrap();
+    a.push((now(), repo.to_string(), text.to_string()));
+    let n = a.len();
+    if n > 300 { a.drain(..n - 300); }
+}
+
+pub fn log(text: &str) {
+    let repo = CURRENT.lock().unwrap().clone();
+    log_to(&repo, text)
+}
+
+/// The current project's activity, newest first: (when, text).
+pub fn activity() -> Vec<(String, String)> {
+    let repo = CURRENT.lock().unwrap().clone();
+    ACTIVITY.lock().unwrap().iter().rev().filter(|(_, r, _)| *r == repo).map(|(t, _, x)| (ago(*t), x.clone())).collect()
+}
+
+fn say(repo: &str, hooks: &Hooks, text: String) {
+    log_to(repo, &text);
+    if *CURRENT.lock().unwrap() == repo { (hooks.say)(text) }
+}
+
+/// `say` for when the caller already holds the state lock (the current repo is a separate lock).
+fn say_locked(repo: &str, _s: &mut State, hooks: &Hooks, text: String) {
+    say(repo, hooks, text)
+}
+
+/// A teammate's session conversation, oldest first: (role, text).
+pub fn transcript_rows(login: &str, session: &str) -> Vec<(String, String)> {
+    cur(|s| s.peers.get(login).and_then(|p| p.transcripts.get(session)).cloned()).flatten().unwrap_or_default()
 }
 
 /// Teammates' sessions as (login, session, label), online people first.
 pub fn sessions() -> Vec<(String, String, String)> {
-    let g = STATE.lock().unwrap();
-    let Some(s) = g.as_ref() else { return vec![] };
-    let mut peers: Vec<&Peer> = s.peers.values().collect();
-    peers.sort_by_key(|p| (!p.online, p.login.clone()));
-    peers.iter().flat_map(|p| p.sessions.iter().map(|(n, st, role)| (
-        p.login.clone(), n.clone(),
-        format!("{n}  {st}{}{}", if role.is_empty() { String::new() } else { format!(" · {role}") }, if p.online { "" } else { "  (offline)" }),
-    ))).collect()
+    cur(|s| {
+        let mut peers: Vec<&Peer> = s.peers.values().filter(|p| p.joined).collect();
+        peers.sort_by_key(|p| (!p.online, p.login.clone()));
+        peers.iter().flat_map(|p| p.sessions.iter().map(|(n, st, role)| (
+            p.login.clone(), n.clone(),
+            format!("{n}  {st}{}{}", if role.is_empty() { String::new() } else { format!(" · {role}") }, if p.online { "" } else { "  (offline)" }),
+        ))).collect()
+    }).unwrap_or_default()
 }
 
 pub fn transcript(login: &str, session: &str) -> Result<String, String> {
-    let g = STATE.lock().unwrap();
-    let s = g.as_ref().ok_or("team mode is off")?;
-    let p = s.peers.get(login).ok_or_else(|| format!("no teammate {login}"))?;
-    let t = p.transcripts.get(session).filter(|t| !t.is_empty()).ok_or_else(|| format!("no messages in {login} / {session} yet"))?;
+    let t = transcript_rows(login, session);
+    if t.is_empty() { return Err(format!("no messages in {login} / {session} yet")) }
     let body: Vec<String> = t.iter().map(|(r, x)| format!("{} {x}", if r == "user" { "▸" } else { "◂" })).collect();
-    Ok(format!("{login} / {session} · last {} messages · read-only (/team send {login} {session} <text> to write into it)\n{}",
-               t.len(), body.join("\n")))
+    Ok(format!("{login} / {session} · last {} messages · read-only\n{}", t.len(), body.join("\n")))
 }
 
+/// Disconnect the project on screen.
 pub fn stop() {
-    RUNNING.store(false, Relaxed);
+    cur(|s| s.running.store(false, Relaxed));
 }
 
-/// Stop and wait (up to 5 s) for the "offline" write to land, at quit.
+/// Disconnect every project and wait (up to 5 s) for the "offline" writes, at quit.
 pub fn stop_and_flush() {
-    if RUNNING.swap(false, Relaxed) {
-        let t0 = Instant::now();
-        while !FINISHED.load(Relaxed) && t0.elapsed() < Duration::from_secs(5) {
-            std::thread::sleep(Duration::from_millis(50));
-        }
+    let flags: Vec<std::sync::Arc<AtomicBool>> = STATES.lock().unwrap().get_or_insert_with(HashMap::new).values()
+        .filter(|s| s.running.swap(false, Relaxed)).map(|s| s.finished.clone()).collect();
+    let t0 = Instant::now();
+    while flags.iter().any(|f| !f.load(Relaxed)) && t0.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(50));
     }
-}
-
-pub fn running() -> bool {
-    RUNNING.load(Relaxed)
+    if let Some(Some(l)) = LINK.get() {
+        l.stop(); // gives back the router port, if we asked for one
+    }
 }
 
 fn enabled_path() -> PathBuf {
@@ -531,7 +2260,20 @@ pub fn remember(repo: &str, on: bool) {
 }
 
 pub fn enabled_for(cwd: &Path) -> bool {
-    github_repo(cwd).is_some_and(|(_, r)| std::fs::read_to_string(enabled_path()).unwrap_or_default().lines().any(|l| l == r))
+    github_repo(cwd).is_some_and(|(_, r)| enabled(&r))
+}
+
+pub fn enabled(repo: &str) -> bool {
+    std::fs::read_to_string(enabled_path()).unwrap_or_default().lines().any(|l| l == repo)
+}
+
+/// (online teammates, waiting items) for a connected project, for the project switcher.
+pub fn glance(repo: &str) -> Option<(Vec<String>, usize)> {
+    with(repo, |s| {
+        if !s.running.load(Relaxed) { return None }
+        Some((s.peers.values().filter(|p| p.online && p.joined).map(|p| p.login.clone()).collect(),
+              s.pending.len() + s.asking.len() + s.unread))
+    }).flatten()
 }
 
 fn ago(ts: u64) -> String {
@@ -539,61 +2281,227 @@ fn ago(ts: u64) -> String {
     match d { 0..60 => "just now".into(), 60..3600 => format!("{}m ago", d / 60), 3600..86400 => format!("{}h ago", d / 3600), _ => format!("{}d ago", d / 86400) }
 }
 
-/// "👥 you · rahul ● · anu ○ 2h ago" for the status bar, while team mode is on.
+/// "team: you · rahul ● · anu ○ 2h ago · 2 new messages · 1 waiting (Ctrl+T)" for the status bar, while team mode is on.
 pub fn status_line() -> Option<String> {
-    let g = STATE.lock().unwrap();
-    let s = g.as_ref().filter(|_| running())?;
-    let mut peers: Vec<&Peer> = s.peers.values().collect();
-    peers.sort_by_key(|p| (!p.online, std::cmp::Reverse(p.ts)));
-    let mut out = format!("👥 {}", s.me);
-    for p in peers.iter().take(4) {
-        out += &if p.online { format!(" · {} ●", p.login) } else { format!(" · {} ○ {}", p.login, ago(p.ts)) };
+    let mut out = cur(|s| {
+        let mut peers: Vec<&Peer> = s.peers.values().filter(|p| p.joined).collect();
+        peers.sort_by_key(|p| (!p.online, std::cmp::Reverse(p.ts)));
+        let mut out = format!("team: {}", s.me);
+        for p in peers.iter().take(4) {
+            out += &if p.online { format!(" · {} ●", p.login) } else { format!(" · {} ○ {}", p.login, ago(p.ts)) };
+        }
+        if peers.len() > 4 { out += &format!(" · +{}", peers.len() - 4) }
+        if s.key.is_none() { out += " · waiting to be let in" }
+        if s.unread > 0 { out += &format!(" · {} new message{}", s.unread, if s.unread == 1 { "" } else { "s" }) }
+        let waiting = s.pending.len() + s.asking.len();
+        if waiting > 0 { out += &format!(" · {waiting} waiting (Ctrl+T)") }
+        if !s.error.is_empty() { out += " · sync problem" }
+        out
+    })?;
+    for (r, n) in waiting_elsewhere() {
+        out += &format!(" · {n} waiting in {}", r.rsplit('/').next().unwrap_or(&r));
     }
-    if peers.len() > 4 { out += &format!(" · +{}", peers.len() - 4) }
-    if s.key.is_none() { out += " · 🔒 waiting to be let in" }
-    if !s.pending.is_empty() { out += &format!(" · ✉ {} waiting (/team)", s.pending.len()) }
-    if !s.error.is_empty() { out += " · ⚠ sync" }
     Some(out)
 }
 
-/// The `/team` text panel.
+/// Something in a connected team project waits for you: messages, join requests, asks.
+pub fn needs_you() -> bool {
+    STATES.lock().unwrap().as_ref().is_some_and(|m| m.values().any(|s| s.running.load(Relaxed)
+        && (s.unread > 0 || !s.pending.is_empty() || !s.asking.is_empty())))
+}
+
+/// The `/team status` text.
 pub fn report() -> String {
-    let g = STATE.lock().unwrap();
-    let Some(s) = g.as_ref().filter(|_| running()) else {
-        return "team mode is off.\n\
-  /team on      in a project that's already on GitHub: see and message everyone who can push to it\n\
-  /team create  put this folder on GitHub (private) and invite friends by GitHub username\n\
-Friends join with:  qh join <owner>/<repo>\n\
-  /team private | /team public  change who can see the code".into();
+    let Some(r) = cur(|s| {
+        let mut out = format!("team {} · you are {}\n", s.repo, s.me);
+        if s.key.is_none() { out += "waiting to be let in\n" }
+        let mut peers: Vec<&Peer> = s.peers.values().collect();
+        peers.sort_by_key(|p| (!p.online, std::cmp::Reverse(p.ts)));
+        for p in peers {
+            out += &format!("{} {}  {}\n", if p.online { "●" } else { "○" }, p.login,
+                            if !p.joined { "waiting to be let in".into() } else if p.online { "online".into() } else { format!("last seen {}", ago(p.ts)) });
+            for (n, st, role) in &p.sessions {
+                out += &format!("    {n}: {st}{}\n", if role.is_empty() { String::new() } else { format!(" · {role}") });
+            }
+        }
+        if !s.error.is_empty() { out += &format!("last sync problem: {}\n", s.error) }
+        out + "Ctrl+T opens the team room"
+    }) else {
+        return "team mode is off: /team to start, join or connect".into();
     };
-    let mut out = format!("team {} · you are {}\n", s.repo, s.me);
-    if s.key.is_none() {
-        out += "🔒 waiting for a teammate who's already in to come online and let you in\n";
-    }
-    if s.peers.is_empty() {
-        out += "nobody else has turned team mode on in this repo yet\n";
-    }
-    let mut peers: Vec<&Peer> = s.peers.values().collect();
-    peers.sort_by_key(|p| (!p.online, std::cmp::Reverse(p.ts)));
-    for p in peers {
-        out += &format!("{} {}  {}\n", if p.online { "●" } else { "○" }, p.login, if p.online { "online".into() } else { format!("last seen {}", ago(p.ts)) });
-        if p.locked {
-            out += "    (encrypted: you don't have the team key yet)\n";
+    r
+}
+
+// ---- the direct line (qh-link): live copies of the same sealed data git carries ----
+
+use crate::link::{Event as LinkEvent, Link};
+use std::sync::Arc;
+
+static LINK: std::sync::OnceLock<Option<Arc<Link>>> = std::sync::OnceLock::new();
+static LIVE: Mutex<Option<HashMap<String, std::sync::mpsc::Sender<(String, Vec<u8>)>>>> = Mutex::new(None); // repo -> its team thread
+static LINES: Mutex<Option<HashMap<String, String>>> = Mutex::new(None); // their member key -> path ("lan …", "via <key>")
+
+fn now_ms() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
+/// This machine's line, shared by every connected project, started on first use. QH_LINK=off
+/// turns it off, =noupnp skips asking the router for a port, =local also skips STUN (one-machine demos).
+fn link() -> Option<Arc<Link>> {
+    LINK.get_or_init(|| {
+        let mode = std::env::var("QH_LINK").unwrap_or_default();
+        if mode == "off" {
+            return None;
         }
-        for (n, st, role) in &p.sessions {
-            out += &format!("    {n}: {st}{}\n", if role.is_empty() { String::new() } else { format!(" · {role}") });
+        let o = crate::link::Options {
+            stun: mode != "local", upnp: mode.is_empty(), beacon: mode != "local",
+            // teammates met before, and where: after a restart they're found with no git round trip
+            remember: Some(crate::config::state_dir().join("link-memory.json")),
+            // the user's choice: relay = "default" | "none" | "host:port#secret" (QH_RELAY overrides)
+            relays: crate::link::relay_specs(&std::env::var("QH_RELAY").unwrap_or_else(|_| crate::config::load().relay)),
+            ..Default::default()
+        };
+        let (l, rx) = Link::start(tc::identity().0, o).ok()?;
+        std::thread::Builder::new().name("qh-link-events".into()).spawn(move || {
+            for e in rx {
+                on_line(e)
+            }
+        }).ok()?;
+        Some(l)
+    }).clone()
+}
+
+/// The relay setting changed: the running line (if any) uses it at once.
+pub fn set_relays(setting: &str) {
+    if let Some(Some(l)) = LINK.get() {
+        l.set_relays(crate::link::relay_specs(setting));
+    }
+}
+
+fn on_line(e: LinkEvent) {
+    match e {
+        LinkEvent::Msg { from, data } => {
+            let repo = serde_json::from_slice::<Value>(&data).ok().and_then(|v| v["repo"].as_str().map(String::from));
+            let tx = repo.and_then(|r| LIVE.lock().unwrap().as_ref()?.get(&r).cloned());
+            if let Some(tx) = tx {
+                let _ = tx.send((from, data));
+            }
         }
-        if !p.files.is_empty() {
-            out += &format!("    editing {}\n", p.files.join(", "));
+        LinkEvent::Up { peer, path } => {
+            let was = LINES.lock().unwrap().get_or_insert_with(HashMap::new).insert(peer.clone(), path.clone());
+            let (now, before) = (describe_line(&path), was.map(|w| describe_line(&w)));
+            if before.as_deref() != Some(now.as_str()) {
+                for (repo, login) in who_is(&peer) {
+                    log_to(&repo, &format!("direct line to {login} ({now})"));
+                }
+            }
         }
+        LinkEvent::Down { peer } => {
+            LINES.lock().unwrap().get_or_insert_with(HashMap::new).remove(&peer);
+            for (repo, login) in who_is(&peer) {
+                log_to(&repo, &format!("line to {login} dropped: their updates come by git again"));
+            }
+        }
+        LinkEvent::Delivered { .. } | LinkEvent::Failed { .. } => {} // git carries everything anyway
     }
-    for i in &s.pending {
-        out += &format!("✉ {} → your {}: {}\n", i.from, i.session, i.text);
+}
+
+/// Which teammate (in which project) a member key belongs to.
+fn who_is(key: &str) -> Vec<(String, String)> {
+    STATES.lock().unwrap().get_or_insert_with(HashMap::new).values()
+        .flat_map(|s| s.peers.values().filter(|p| p.pub_key == key).map(|p| (s.repo.clone(), p.login.clone())).collect::<Vec<_>>())
+        .collect()
+}
+
+/// "lan 192.168.1.4:7001" -> "lan"; "via <key>" -> "via carol".
+fn describe_line(path: &str) -> String {
+    match path.strip_prefix("via ") {
+        Some(k) => format!("via {}", who_is(k).into_iter().next().map_or("a teammate".to_string(), |(_, l)| l)),
+        None => path.split(' ').next().unwrap_or("").to_string(),
     }
-    if !s.error.is_empty() {
-        out += &format!("⚠ last sync problem: {}\n", s.error);
+}
+
+/// How we reach `login` right now ("lan", "ipv6", "public", "via carol"); None = git only.
+pub fn line_to(login: &str) -> Option<String> {
+    let key = cur(|s| s.peers.get(login).map(|p| p.pub_key.clone())).flatten()?;
+    let path = LINES.lock().unwrap().as_ref()?.get(&key)?.clone();
+    Some(describe_line(&path))
+}
+
+/// What went over the line last, and to whom.
+struct Live {
+    last: Option<Value>,
+    at: Instant,
+    pulse: u64,
+    told: Vec<String>, // member keys that have our latest
+}
+
+/// Changes worth sending at once (messages, answers, acks, notes, claims); the rest (status
+/// words) waits up to a second so a busy session doesn't flood the line.
+fn pulse(repo: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    with(repo, |s| {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        s.outbox.len().hash(&mut h);
+        s.outbox.last().map(|m| m["id"].as_u64()).hash(&mut h);
+        let mut seen: Vec<_> = s.seen.iter().collect();
+        seen.sort();
+        seen.hash(&mut h);
+        (s.my_notes.len(), s.my_chat.len(), s.waiting.len(), s.promises.len()).hash(&mut h);
+        s.claims.values().map(|c| c.values().map(|f| f.len()).sum::<usize>()).sum::<usize>().hash(&mut h);
+        h.finish()
+    }).unwrap_or(0)
+}
+
+/// Send my data to every teammate on the line: everyone when it changed, and anyone newly on
+/// the line (or back on it) whatever happens.
+fn push_live(repo: &str, me: &str, l: &Link, d: Value, live: &mut Live) {
+    let Some((Some(key), members)) = with(repo, |s| (s.key, s.peers.values().filter(|p| p.joined).map(|p| p.pub_key.clone()).collect::<Vec<_>>())) else { return };
+    let lines = LINES.lock().unwrap().clone().unwrap_or_default();
+    let on: Vec<String> = members.into_iter().filter(|k| lines.contains_key(k)).collect();
+    live.told.retain(|k| on.contains(k));
+    let p = pulse(repo);
+    let all = live.last.as_ref() != Some(&d) && (p != live.pulse || live.at.elapsed() >= Duration::from_secs(1));
+    if all {
+        live.last = Some(d.clone());
+        live.at = Instant::now();
+        live.pulse = p;
+        live.told.clear();
     }
-    out + "/team open · /team send <who> <session> <text> · /team off"
+    let to: Vec<String> = on.into_iter().filter(|k| !live.told.contains(k)).collect();
+    if to.is_empty() {
+        return;
+    }
+    let msg = json!({"repo": repo, "login": me, "seq": now_ms(), "data": tc::seal(&key, &format!("data:{me}"), d.to_string().as_bytes())});
+    let bytes = msg.to_string().into_bytes();
+    for k in to {
+        l.send(&k, &bytes);
+        live.told.push(k);
+    }
+}
+
+/// A teammate's data straight off the line. Only from someone git already showed us as a member,
+/// only from their own member key, and only if it's newer than what we have.
+fn take_live(repo: &str, from: &str, bytes: &[u8], hooks: &Hooks) {
+    let Ok(v) = serde_json::from_slice::<Value>(bytes) else { return };
+    let login = v["login"].as_str().unwrap_or("").to_string();
+    let Some((me, key, old)) = with(repo, |s| (s.me.clone(), s.key, s.peers.get(&login).cloned())) else { return };
+    let (Some(k), Some(old)) = (key, old) else { return };
+    let seq = v["seq"].as_u64().unwrap_or(0);
+    if login == me || old.pub_key != from || !old.joined || seq <= old.seq {
+        return;
+    }
+    let Some(d) = tc::open(&k, &format!("data:{login}"), v["data"].as_str().unwrap_or(""))
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok()) else { return };
+    let mut p = Peer {
+        login: login.clone(), online: true, ts: now(), seq, pub_key: old.pub_key, wrapped: old.wrapped,
+        invites: old.invites, transcripts: old.transcripts, ..Default::default()
+    };
+    parse_data(&mut p, &d);
+    let mut new_chat = false;
+    take_in(repo, &me, key, p, hooks, &mut new_chat);
+    if new_chat { save_chat(repo) }
+    save_seen(repo);
 }
 
 #[cfg(test)]
@@ -603,5 +2511,209 @@ mod tests {
     #[test]
     fn auth_header_is_standard_base64() {
         assert_eq!(auth_env("abc")[2].1, "Authorization: Basic eC1hY2Nlc3MtdG9rZW46YWJj");
+    }
+
+    fn owned(text: &str) -> Vec<String> {
+        owners(text).into_iter().map(|o| o.unwrap_or_default()).collect()
+    }
+
+    #[test]
+    fn lines_belong_to_their_method_not_the_class() {
+        let py = "import os\n\nclass Shop:\n    def total(self):\n        return 1\n\n    def pay(self):\n        x = 2\n        return x\n\ndef main():\n    Shop()\n";
+        assert_eq!(owned(py), ["", "", "Shop", "total", "total", "total", "pay", "pay", "pay", "pay", "main", "main"]);
+        let rs = "impl Cart {\n    pub fn add(&mut self) {\n        self.n += 1;\n    }\n    fn clear(&mut self) {\n    }\n}\nfn main() {}\n";
+        assert_eq!(owned(rs), ["Cart", "add", "add", "add", "clear", "clear", "Cart", "main"]);
+        let js = "export const getUser = async (id) => {\n  return db(id)\n}\nclass Api {\n  async fetch(url) {\n    if (x) {\n      go()\n    }\n  }\n}\n";
+        assert_eq!(owned(js), ["getUser", "getUser", "getUser", "Api", "fetch", "fetch", "fetch", "fetch", "fetch", "Api"]);
+        let top = "def a():\n    x = 1\nprint(1)\n\n@app.get\ndef b():\n    pass\n";
+        assert_eq!(owned(top), ["a", "a", "", "", "", "b", "b"]);
+        let go = "func (s *Server) Handle(w http.ResponseWriter) {\n\treturn\n}\n";
+        assert_eq!(owned(go)[1], "Handle");
+    }
+
+    #[test]
+    fn a_new_function_next_to_another_touches_only_itself() {
+        let before = "def greet(name):\n    return 'hi ' + name\n\nprint('shop')\n";
+        let after = "def greet(name):\n    return 'hi ' + name\n\n\ndef bye(name):\n    return 'bye ' + name\n\nprint('shop')\n";
+        let (a, b): (Vec<&str>, Vec<&str>) = (before.lines().collect(), after.lines().collect());
+        let (del, add) = changed_lines(&a, &b);
+        let ob = owners(after);
+        let real: Vec<String> = del.iter().map(|&i| owners(before)[i].clone()).chain(add.iter().filter(|&&i| !b[i].trim().is_empty()).map(|&i| ob[i].clone())).flatten().collect();
+        assert_eq!(real, ["bye", "bye"]);
+    }
+
+    #[test]
+    fn a_rename_takes_the_old_name_away() {
+        let before = "struct UserDto {\n    pub name: String,\n    age: u32,\n}\nfn get_user() {}\n";
+        let after = "struct UserDto {\n    pub full_name: String,\n    age: u32,\n}\nfn fetch_user() {}\n";
+        let (a, b): (Vec<&str>, Vec<&str>) = (before.lines().collect(), after.lines().collect());
+        let (del, _) = changed_lines(&a, &b);
+        let kept = defines(&b, &(0..b.len()).collect::<Vec<_>>());
+        let removed: Vec<String> = defines(&a, &del).into_iter().filter(|n| !kept.contains(n)).collect();
+        assert_eq!(removed, ["name", "get_user"]);
+        // a moved function isn't taken away
+        let moved = "fn get_user() {}\nstruct UserDto {\n    pub name: String,\n    age: u32,\n}\n";
+        let m: Vec<&str> = moved.lines().collect();
+        let (del, _) = changed_lines(&a, &m);
+        let kept = defines(&m, &(0..m.len()).collect::<Vec<_>>());
+        assert!(defines(&a, &del).into_iter().all(|n| kept.contains(&n)));
+    }
+
+    #[test]
+    fn uses_skip_strings_comments_and_keywords() {
+        let l = ["    return render(user.fullName, \"getUser\") // avatarUrl", "    x = self.avatar  # old_name"];
+        assert_eq!(used_names(&l, &[0, 1]), ["render", "user", "fullName", "avatar"]);
+        assert_eq!(field_name("    pub full_name: String,"), Some("full_name".into()));
+        assert_eq!(field_name("        self.cache = {}"), Some("cache".into()));
+        assert_eq!(field_name("    let x: u32 = 5;"), None);
+    }
+
+    #[test]
+    fn diff_finds_only_the_changed_lines() {
+        let a: Vec<&str> = "a\nb\nc\nd\ne\nf".lines().collect();
+        let b: Vec<&str> = "a\nB\nc\nd\ne\nF\ng".lines().collect();
+        assert_eq!(changed_lines(&a, &b), (vec![1, 5], vec![1, 5, 6]));
+        let same: Vec<&str> = "x\ny".lines().collect();
+        assert_eq!(changed_lines(&same, &same), (vec![], vec![]));
+        let ins: Vec<&str> = "x\nnew\ny".lines().collect();
+        assert_eq!(changed_lines(&same, &ins), (vec![], vec![1]));
+    }
+    fn state(me: &str) -> State {
+        State {
+            repo: "o/r".into(), me: me.into(), peers: HashMap::new(), error: String::new(), key: None, outbox: vec![], next_id: 0,
+            seen: HashMap::new(), pending: vec![], roles: HashMap::new(), approved: vec![], asking: vec![], invites: HashMap::new(),
+            epoch: 0, removed: vec![], admins: HashMap::new(), pins: HashMap::new(), gh_login: me.into(), git_ms: HashMap::new(),
+            asked_github: HashMap::new(), warned: vec![], my_sha: String::new(),
+            chat: vec![], my_chat: vec![], chat_seen: HashMap::new(), my_notes: vec![], notes_seen: HashMap::new(), claims: HashMap::new(),
+            uses: HashMap::new(), waiting: vec![], sheets: HashMap::new(), asked: vec![], answered: vec![], answers: "auto".into(),
+            answerer: None, promises: vec![], last_answer: HashMap::new(), unread: 0, dirty: false, running: Default::default(), finished: Default::default(),
+        }
+    }
+
+    fn quiet() -> Hooks {
+        Hooks { say: Box::new(|_| {}), deliver: Box::new(|_, _| {}), ask: Box::new(|_| {}), refresh: Box::new(|| {}),
+                answer: std::sync::Arc::new(|_| {}), answered: Box::new(|_, _| {}) }
+    }
+
+    /// A folder as `who` would push it for `login` (signed with `who`'s keys), read back from git.
+    fn folder(root: &Path, repo: &str, login: &str, who: &x25519_dalek::StaticSecret, extra: &[(&str, &str)], ms: u64) -> (Folder, Peer) {
+        let mut files = vec![("pub".to_string(), crate::oauth::b64url(x25519_dalek::PublicKey::from(who).as_bytes())),
+                             ("sign".to_string(), tc::sign_pub(who))];
+        files.extend(extra.iter().map(|(n, c)| (n.to_string(), c.to_string())));
+        let msg = json!({"v": 2, "state": "online", "ts": ms / 1000, "ms": ms});
+        let sig = tc::sign_folder(who, repo, login, &msg.to_string(), &files);
+        files.push(("sig".into(), sig));
+        let parent = identity_commit(root, login, &files[0].1, &files[1].1).unwrap();
+        let sha = folder_commit(root, &files, &msg, &parent).unwrap();
+        let f = folder_files(root, &sha);
+        let p = read_folder(&f, repo, login, None);
+        (f, p)
+    }
+
+    #[test]
+    fn folders_written_under_someone_elses_name_are_ignored() {
+        let root = std::env::temp_dir().join(format!("qh-vet-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&root);
+        git(&root, &["init", "-q"]).unwrap();
+        let repo = "sec/vet";
+        let mut st = state("bob");
+        st.repo = repo.into();
+        let team = tc::new_team_key();
+        st.key = Some(team);
+        STATES.lock().unwrap().get_or_insert_with(HashMap::new).insert(repo.into(), st);
+        let (alice, mallory) = (x25519_dalek::StaticSecret::from(crate::oauth::random()), x25519_dalek::StaticSecret::from(crate::oauth::random()));
+        let t = now_ms();
+
+        let (_, p) = folder(&root, repo, "alice", &alice, &[("data", "x")], t);
+        assert!(p.signed && vet(repo, "", &p, &quiet()), "alice's own folder is taken (and her keys pinned)");
+        let (_, p) = folder(&root, repo, "alice", &mallory, &[("data", "x")], t + 1);
+        assert!(p.signed, "mallory's signature is valid for mallory's keys...");
+        assert!(!vet(repo, "", &p, &quiet()), "...but they aren't alice's, and GitHub doesn't vouch for them");
+
+        // mallory keeps alice's keys and signature but swaps the sealed data
+        let (f, _) = folder(&root, repo, "alice", &alice, &[("data", "x")], t + 2);
+        let mut files = f.files.clone();
+        for (n, c) in files.iter_mut() { if n == "data" { *c = tc::seal(&team, "data:alice", b"{}") } }
+        let sha = folder_commit(&root, &files, &serde_json::from_str(&f.msg).unwrap(), &identity_commit(&root, "alice", "a", "b").unwrap()).unwrap();
+        let p = read_folder(&folder_files(&root, &sha), repo, "alice", None);
+        assert!(!p.signed && !vet(repo, "", &p, &quiet()), "a changed file breaks alice's signature");
+
+        let (_, p) = folder(&root, repo, "alice", &alice, &[("data", "x")], t + 5);
+        assert!(vet(repo, "", &p, &quiet()), "alice's next folder");
+        let (_, p) = folder(&root, repo, "alice", &alice, &[("data", "x")], t + 3);
+        assert!(!vet(repo, "", &p, &quiet()), "an older folder of alice's, pushed back by someone: a replay");
+
+        // a team key change from a member whose keys GitHub hasn't vouched for is ignored
+        let bob = x25519_dalek::StaticSecret::from(crate::oauth::random());
+        let bob_pub = crate::oauth::b64url(x25519_dalek::PublicKey::from(&bob).as_bytes());
+        let new = tc::new_team_key();
+        let wrap = tc::wrap(&new, &alice, &bob_pub, repo).unwrap();
+        let (f, p) = folder(&root, repo, "alice", &alice, &[("epoch", "1"), ("keys/bob", &wrap)], t + 6);
+        assert!(vet(repo, "", &p, &quiet()));
+        newer_key(repo, &[(f, p)], &bob, "", &quiet());
+        assert_eq!(with(repo, |s| (s.key, s.epoch)).unwrap(), (Some(team), 0), "the key stays");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn peer(login: &str, sessions: &[&str], online: bool) -> Peer {
+        Peer { login: login.into(), online, joined: true, ts: now(),
+               sessions: sessions.iter().map(|s| (s.to_string(), "idle".into(), String::new())).collect(), ..Default::default() }
+    }
+
+    #[test]
+    fn questions_go_to_whoever_is_changing_or_using_the_code() {
+        let mut s = state("alice");
+        let mut bob = peer("bob", &["main", "ui"], true);
+        bob.claims.insert("main".into(), HashMap::from([("api/user.rs".into(), HashMap::from([("get_user".to_string(), now())]))]));
+        let mut carol = peer("carol", &["main"], true);
+        carol.uses.insert("main".into(), HashMap::from([("get_user".to_string(), now())]));
+        s.peers.insert("bob".into(), bob);
+        s.peers.insert("carol".into(), carol);
+        let root = std::env::temp_dir();
+        // the editor first, then the reader
+        let r = route(&s, &root, "does get_user still return name?", "");
+        assert_eq!((r[0].0.as_str(), r[0].1.as_str()), ("bob", "main"), "{r:?}");
+        assert_eq!(r[0].2, "changing get_user", "{r:?}");
+        assert_eq!(r[1].0, "carol");
+        // a file named in the question finds its editor too
+        let r = route(&s, &root, "what's happening in api/user.rs", "");
+        assert_eq!(r[0].0, "bob");
+        // asked by name: that person, even with nothing matching
+        let r = route(&s, &root, "anything new?", "carol");
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].0, "carol");
+        let r = route(&s, &root, "anything new?", "bob/ui");
+        assert_eq!((r[0].0.as_str(), r[0].1.as_str()), ("bob", "ui"));
+        // nothing names anyone's code: nobody
+        assert!(route(&s, &root, "how are you", "").is_empty());
+    }
+
+    #[test]
+    fn fact_sheet_says_what_a_session_is_doing() {
+        let mut p = peer("bob", &["main"], true);
+        p.claims.insert("main".into(), HashMap::from([("api/user.rs".into(), HashMap::from([("get_user".to_string(), now())]))]));
+        p.uses.insert("main".into(), HashMap::from([("render".to_string(), now())]));
+        p.details.insert("main".into(), SessionView { topic: "rename user fields".into(), ..Default::default() });
+        p.sheets.insert("main".into(), Sheet { decided: "name becomes full_name".into(), next: "add avatar".into(), ts: now() });
+        let t = sheet_text(&p, "main");
+        for want in ["bob/main · online", "doing: rename user fields", "changing: api/user.rs › get_user", "uses: render",
+                     "decided: name becomes full_name", "next: add avatar"] {
+            assert!(t.contains(want), "missing {want:?} in\n{t}");
+        }
+    }
+
+    #[test]
+    fn notes_come_in_full_only_where_they_matter() {
+        let note = |f: &str, n: &str| (1, "o/r".to_string(), format!("bob/main changed {f} ({n}) — working on: x\n+ new line"), f.to_string(), vec![n.to_string()]);
+        let all = [note("a.py", "fa"), note("b.py", "fb"), note("c.py", "fc"), note("a.py", "fa2")];
+        let refs: Vec<&NoteIn> = all.iter().collect();
+        let out = shape_notes(&refs, &["a.py".into()], &["fc".into()]);
+        assert_eq!(out.len(), 3, "one per file: {out:?}");
+        assert!(out.iter().any(|t| t.contains("(fa2)") && t.contains("+ new line")), "touched file in full: {out:?}");
+        assert!(out.iter().any(|t| t.contains("(fc)") && t.contains("+ new line")), "used name in full: {out:?}");
+        assert!(out.iter().any(|t| t.contains("(fb)") && !t.contains("+ new line") && t.contains("haven't touched")), "{out:?}");
+        // just a couple: everything in full
+        let two: Vec<&NoteIn> = all[..2].iter().collect();
+        assert!(shape_notes(&two, &[], &[]).iter().all(|t| t.contains("+ new line")));
     }
 }

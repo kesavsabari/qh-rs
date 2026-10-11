@@ -11,14 +11,17 @@ mod platform;
 mod mcp;
 mod hooks;
 mod hub;
+mod link;
 mod prompt;
 mod providers;
+mod relay;
 mod session;
 mod setup;
 mod skills;
 mod team;
 mod teamcrypto;
 mod teamsetup;
+mod teamview;
 mod textcall;
 mod tier;
 mod tools;
@@ -30,7 +33,7 @@ use std::path::PathBuf;
 
 const USAGE: &str = "qh [--resume [id|latest]] [--profile coding|general|all] [--model NAME|provider:MODEL] [--think] [--mode ask|auto-edit|auto|plan]
 qh setup                connect a model (local Ollama or a cloud API key)
-qh team create [user…]  share this project on GitHub and invite friends · qh join owner/repo
+qh team create [user…]  share this project on GitHub and invite friends · qh join owner/repo [code]
 qh docs                 open the guide in your browser
 qh login chatgpt        sign in with your ChatGPT Plus/Pro plan (qh logout chatgpt)
 qh login <provider>     save an API key (openrouter, ollama-cloud, openai, groq, anthropic…)
@@ -113,7 +116,9 @@ fn main() {
     let argv: Vec<String> = std::env::args().collect();
     match (argv.get(1).map(String::as_str), argv.get(2).map(String::as_str)) {
         (Some("team"), Some("create")) => std::process::exit(teamsetup::create(&argv[3..])),
-        (Some("join"), Some(repo)) => std::process::exit(teamsetup::join(repo)),
+        (Some("join"), Some(repo)) => std::process::exit(teamsetup::join(repo, argv.get(3).map(String::as_str))),
+        (Some("link"), _) => std::process::exit(link::cli(&argv[2..])),
+        (Some("relay"), _) => std::process::exit(relay::cli(&argv[2..])),
         (Some("docs"), _) => {
             platform::open_url(platform::DOCS);
             println!("{}", platform::DOCS);
@@ -217,7 +222,7 @@ fn headless(hub: &std::sync::Arc<Hub>, prompts: &[String], rx: std::sync::mpsc::
                 }
                 Event::ToolCall { name: t, args } => {
                     calls += 1;
-                    eprintln!("[{name}] ⚙ {t} {args}");
+                    eprintln!("[{name}] tool {t} {args}");
                 }
                 Event::Compact { .. } => compacts += 1,
                 Event::Done { tokens, .. } => peak = peak.max(tokens),

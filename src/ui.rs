@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthChar;
 
-const FRAME: Duration = Duration::from_millis(16);
+const FRAME: Duration = std::time::Duration::from_millis(16);
 
 pub enum Ui {
     Hub(String, Event),
@@ -38,6 +38,11 @@ const HELP: &str = "/new <name> [profile]  new session (Ctrl+N: instant, auto-na
 /provider              connect providers: sign in, add/test/remove keys
 /cwd [path]            this session's working folder
 /map (Ctrl+B)          live map of sessions, messages and shared folders
+/team (Ctrl+T)         start or join a team; in a team, the team map
+/project (Ctrl+P)      switch project: team and personal; the others keep running (Ctrl+Space flips team ⇄ personal)
+/anyway                this tab was paused because a teammate is changing the same function: go ahead anyway
+/answers [auto|ask|off] whether teammates' agents may ask yours (answered from a read-only copy, 20 an hour)
+/promise [fn what]     make a teammate's last answer (or your own words) a checked promise: edits that break it are held
 /tier                  how the context window was sized to your GPU
 /mode [ask|auto-edit|auto|plan] (Shift+Tab)  /role [text]  /think  /tokens  /compact  /clear  /profile [name]
 /docs (guide in your browser)  /undo  /diff  /allow [pattern]  /sessions  /commands (your own /name prompts)  /mcp (servers)
@@ -46,7 +51,7 @@ Alt+1..9 or Alt+←/→ switch · PgUp/PgDn scroll · Ctrl+O open last tool · C
 use crate::tools::DANGER;
 
 /// What the `/` autocomplete offers; custom commands are added from .qh/commands.
-const COMMANDS: [(&str, &str); 30] = [
+const COMMANDS: [(&str, &str); 35] = [
     ("/model", "pick this tab's model"), ("/provider", "connect providers: sign in, keys"),
     ("/new", "new session tab"), ("/close", "close this tab"), ("/mode", "ask · auto-edit · auto · plan"),
     ("/compact", "shrink the conversation"), ("/clear", "start this tab fresh"), ("/undo", "undo the agent's file changes"),
@@ -55,8 +60,47 @@ const COMMANDS: [(&str, &str); 30] = [
     ("/role", "give this tab a role"), ("/map", "map of sessions and messages"), ("/layout", "tabs or grid"),
     ("/msg", "message another tab"), ("/sessions", "saved sessions"), ("/allow", "auto-approve rules"),
     ("/release", "let held messages through"), ("/pause", "hold automatic messaging"), ("/resume", "resume messaging"),
-    ("/mcp", "MCP servers"), ("/team", "your team: who's online, read or write their sessions"), ("/commands", "your own /commands"), ("/help", "everything"), ("/docs", "open the docs in your browser"),
+    ("/mcp", "MCP servers"), ("/team", "your team: start or join; in a team, opens the team room (Ctrl+T)"), ("/relay", "relay server for teammates nothing else reaches"), ("/commands", "your own /commands"), ("/help", "everything"), ("/docs", "open the docs in your browser"), ("/project", "switch project (Ctrl+P)"),
+    ("/anyway", "let this tab edit what a teammate is changing"),
+    ("/answers", "may teammates' agents ask yours: auto · ask · off"),
+    ("/promise", "hold teammates to their last answer: edits that break it are held"),
     ("/cd", "same as /cwd"), ("/providers", "same as /provider"),
+];
+
+/// What each command can take, shown under it in the autocomplete. `<…>` marks something you
+/// type; picking such an entry fills the box instead of running it.
+const SUBCOMMANDS: &[(&str, &str)] = &[
+    ("/provider add <name>", "save an API key (hidden while you paste)"),
+    ("/provider connect <name>", "sign in, test, replace or remove"),
+    ("/provider signin chatgpt", "use your ChatGPT plan: sign in in the browser"),
+    ("/provider signout chatgpt", "forget the ChatGPT sign-in"),
+    ("/provider test <name>", "check the key works (lists its models)"),
+    ("/provider remove <name>", "delete a saved key"),
+    ("/model <search>", "search the model list, or type an exact name"),
+    ("/model local", "back to your local model"),
+    ("/model default", "which model new tabs start on"),
+    ("/model default <provider/model>", "set the model new tabs start on"),
+    ("/mode ask", "asks before anything that changes something"),
+    ("/mode auto-edit", "file edits run; bash and browser typing still ask"),
+    ("/mode auto", "everything runs except dangerous commands"),
+    ("/mode plan", "read-only: explores and writes a plan"),
+    ("/profile coding", "read, write and edit files, bash, search (starts the tab fresh)"),
+    ("/profile general", "read files, bash, web and browser; no editing"),
+    ("/profile browser", "just the browser plus reading and writing files"),
+    ("/profile all", "every tool"),
+    ("/promise <function> <what must stay true>", "your own promise, checked when a teammate edits it"),
+    ("/promise list", "the promises this tab holds"),
+    ("/promise drop <function>", "stop holding a teammate to it"),
+    ("/answers auto", "teammates' agents ask yours; up to 20 answers an hour"),
+    ("/answers ask", "you allow each question first"),
+    ("/answers off", "they only see your fact sheet"),
+    ("/layout tabs", "one session at a time"),
+    ("/layout grid", "all sessions side by side"),
+    ("/new <name> [profile]", "open a new session tab"),
+    ("/msg <tab> <text>", "send a message to another tab's agent"),
+    ("/cwd <folder>", "change this tab's working folder"),
+    ("/allow <pattern>", "auto-approve matching tool calls, e.g. bash:cargo *"),
+    ("/role <text>", "tell this tab what it's for"),
 ];
 
 /// Prompt templates as markdown files; a project's own override the user's global ones.
@@ -81,16 +125,18 @@ fn custom_commands(cwd: &std::path::Path) -> Vec<(String, std::path::PathBuf)> {
 fn icon(status: &str) -> &'static str {
     match status {
         "working" => " …",
-        "waiting-model" => " ⏳",
-        "confirm" => " ⚠",
+        "waiting-model" => " …",
+        "confirm" => " !",
         "asking" => " ↔",
-        "held" => " ⏸",
+        "held" => " ||",
         _ => "",
     }
 }
 
 const ACCENT: Color = Color::Cyan;
 const DIM: Color = Color::DarkGray;
+const TEAM: Color = Color::Magenta; // a team space's colour, so you always know where you are
+const MAP_TAB: &str = "\u{0}map"; // the team space's map, as a tab
 
 enum Item {
     User(String),
@@ -130,6 +176,7 @@ struct Confirm {
 }
 
 struct App {
+    project: std::path::PathBuf, // the project on screen; tabs of other projects keep running unseen
     hub: Arc<Hub>,
     views: HashMap<String, View>,
     active: String,
@@ -151,7 +198,12 @@ struct App {
     picker_rows: Option<(Rect, usize)>, // list area and the first visible row's index
     quit: bool,
     sugg_sel: usize, // highlighted row of the / autocomplete
-    outside: Option<Vec<String>>, // a terminal step to run with the UI suspended (team create)
+    team_view: Option<crate::teamview::TeamView>, // Ctrl+T overview
+    outside: Option<Vec<String>>, // a terminal step with the UI suspended: ["create", friends…] or ["join", repo]
+    // the two spaces Ctrl+Space flips between: the last personal project and the last team one
+    last_personal: std::path::PathBuf,
+    last_team: std::path::PathBuf,
+    map_was_open: bool, // the team space had its map up when you left it
 }
 
 /// Popup list (`/model`, `/provider`): type to filter, arrows to move, Enter runs `cmd value`.
@@ -163,6 +215,78 @@ struct Picker {
     filter: String,
     sel: usize,
     cur: String,
+}
+
+fn projects_file() -> std::path::PathBuf {
+    crate::config::state_dir().join("projects.txt")
+}
+
+/// Projects you've opened, newest first: (folder, unix time last shown).
+fn recent_projects() -> Vec<(std::path::PathBuf, u64)> {
+    let mut v: Vec<(std::path::PathBuf, u64)> = std::fs::read_to_string(projects_file()).unwrap_or_default().lines()
+        .filter_map(|l| l.split_once('\t')).map(|(t, p)| (std::path::PathBuf::from(p), t.parse().unwrap_or(0))).collect();
+    v.sort_by_key(|(_, t)| std::cmp::Reverse(*t));
+    v
+}
+
+fn remember_project(root: &std::path::Path) {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let mut v = recent_projects();
+    v.retain(|(p, _)| p != root);
+    v.insert(0, (root.to_path_buf(), now));
+    v.truncate(40);
+    let _ = std::fs::create_dir_all(crate::config::state_dir());
+    let _ = std::fs::write(projects_file(), v.iter().map(|(p, t)| format!("{t}\t{}", p.display())).collect::<Vec<_>>().join("\n"));
+}
+
+fn ago(t: u64) -> String {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    match now.saturating_sub(t) { d @ 0..60 => format!("{d}s ago"), d @ 60..3600 => format!("{} min ago", d / 60),
+                                  d @ 3600..86400 => format!("{}h ago", d / 3600), d => format!("{}d ago", d / 86400) }
+}
+
+/// One level of the "open another folder" browser for /project.
+fn project_browser(dir: &std::path::Path) -> Picker {
+    let d = dir.display().to_string();
+    let mut all: Vec<(String, String, String)> = vec![(format!("open {d}"), format!("✓ open {d}"), String::new())];
+    if let Some(up) = dir.parent() {
+        all.push((format!("browse {}", up.display()), "↑ up".into(), String::new()));
+    }
+    let mut subs: Vec<String> = std::fs::read_dir(dir).into_iter().flatten().flatten()
+        .filter(|e| e.path().is_dir()).map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| !n.starts_with('.')).collect();
+    subs.sort_by_key(|n| n.to_lowercase());
+    for n in subs {
+        all.push((format!("browse {}", dir.join(&n).display()), format!("{n}/"), d.clone()));
+    }
+    Picker { title: "open a folder", cmd: "/project".into(), all, filter: String::new(), sel: 0, cur: String::new() }
+}
+
+/// One level of the /team create folder browser.
+fn folder_picker(dir: &std::path::Path) -> Picker {
+    let d = dir.display().to_string();
+    let mut all: Vec<(String, String, String)> = vec![];
+    if crate::teamsetup::not_a_project(dir).is_ok() {
+        all.push((format!("create-at {d}"), format!("✓ start the team in {d}"), String::new()));
+    }
+    all.push((format!("new-in {d}"), "＋ new folder here".into(), String::new()));
+    if let Some(up) = dir.parent() {
+        all.push((format!("browse {}", up.display()), "↑ up".into(), String::new()));
+    }
+    let mut subs: Vec<String> = std::fs::read_dir(dir).into_iter().flatten().flatten()
+        .filter(|e| e.path().is_dir())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| !n.starts_with('.'))
+        .collect();
+    subs.sort_by_key(|n| n.to_lowercase());
+    for n in subs {
+        all.push((format!("browse {}", dir.join(&n).display()), format!("{n}/"), d.clone()));
+    }
+    Picker { title: "team: which folder?", cmd: "/team".into(), all, filter: String::new(), sel: 0, cur: String::new() }
+}
+
+fn picker_g(title: &'static str, all: Vec<(String, String, String)>) -> Picker {
+    Picker { title, cmd: "/team".into(), all, filter: String::new(), sel: 0, cur: String::new() }
 }
 
 fn picker(title: &'static str, cmd: &str, all: Vec<(String, String)>) -> Picker {
@@ -226,24 +350,36 @@ pub fn emitter(tx: Sender<Ui>) -> crate::hub::Emit {
     })
 }
 
+static KEYS_PAUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub fn run(hub: Arc<Hub>, tx: Sender<Ui>, rx: Receiver<Ui>) -> std::io::Result<()> {
     let mut term = ratatui::init();
     let _ = execute!(std::io::stdout(), event::EnableBracketedPaste);
     if hub.cfg.mouse {
         let _ = execute!(std::io::stdout(), event::EnableMouseCapture);
     }
-    std::thread::spawn(move || {
-        while let Ok(ev) = event::read() {
-            if tx.send(Ui::Term(ev)).is_err() {
-                break;
-            }
+    std::thread::spawn(move || loop {
+        // paused while a terminal step (team setup) owns stdin, or it would eat the user's keys
+        if KEYS_PAUSED.load(std::sync::atomic::Ordering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            continue;
+        }
+        match event::poll(std::time::Duration::from_millis(30)) {
+            Ok(false) => continue,
+            Ok(true) => match event::read() {
+                Ok(ev) => if tx.send(Ui::Term(ev)).is_err() { break },
+                Err(_) => break,
+            },
+            Err(_) => break,
         }
     });
     let mut app = App {
+        project: std::path::PathBuf::new(),
         hub: hub.clone(), views: HashMap::new(), active: String::new(), grid: false, recent: vec![],
         log: VecDeque::new(), show_log: false, input: vec![], cur: 0, hist: vec![], hist_i: 0,
         confirms: VecDeque::new(), picker: None, secret: None, map: None,
-        tab_hits: vec![], body: Rect::default(), picker_rows: None, quit: false, sugg_sel: 0, outside: None,
+        tab_hits: vec![], body: Rect::default(), picker_rows: None, quit: false, sugg_sel: 0, team_view: None, outside: None,
+        last_personal: std::path::PathBuf::new(), last_team: std::path::PathBuf::new(), map_was_open: false,
     };
     for n in hub.names() {
         app.load_view(&n);
@@ -251,14 +387,21 @@ pub fn run(hub: Arc<Hub>, tx: Sender<Ui>, rx: Receiver<Ui>) -> std::io::Result<(
     if let Some(n) = hub.names().first() {
         app.set_active(n);
     }
-    // presence comes back on in repos where it was turned on before
-    if hub.get(&app.active).is_some_and(|m| crate::team::enabled_for(&m.cwd())) {
-        let a = app.active.clone();
-        match app.start_team() {
-            Ok(s) => app.note(&a, s),
-            Err(e) => app.err(&a, format!("team presence: {e}")),
+    // presence comes back on in every team project you have tabs in; the one on screen last
+    let mut done: Vec<std::path::PathBuf> = vec![];
+    let active = app.active.clone();
+    for n in hub.names().into_iter().filter(|n| *n != active).chain(std::iter::once(active.clone())) {
+        let Some(cwd) = hub.get(&n).map(|m| m.cwd()) else { continue };
+        let root = crate::teamview::project_root(&cwd);
+        if done.contains(&root) || !crate::team::enabled_for(&cwd) { continue }
+        done.push(root);
+        match app.start_team_in(&n) {
+            Ok(s) => app.note(&n, s),
+            Err(e) => app.err(&n, format!("team presence: {e}")),
         }
     }
+    app.project = std::path::PathBuf::new(); // so the team on screen follows the active tab
+    app.set_active(&active);
     let res = loop {
         if let Err(e) = term.draw(|f| app.draw(f)) {
             break Err(e);
@@ -283,23 +426,36 @@ pub fn run(hub: Arc<Hub>, tx: Sender<Ui>, rx: Receiver<Ui>) -> std::io::Result<(
                 Err(()) => break,
             }
         }
-        if let Some(friends) = app.outside.take() {
+        if let Some(mut step) = app.outside.take() {
+            let kind = if step.is_empty() { String::new() } else { step.remove(0) };
             // hand the terminal to the guided team setup, then take it back
+            KEYS_PAUSED.store(true, std::sync::atomic::Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(80)); // let an in-flight poll finish
             let _ = execute!(std::io::stdout(), event::DisableBracketedPaste, event::DisableMouseCapture);
             ratatui::restore();
             let cwd = app.hub.get(&app.active).map(|m| m.cwd()).unwrap_or_default();
             let prev = std::env::current_dir().ok();
             let _ = std::env::set_current_dir(&cwd);
             println!("\n— qh team setup —\n");
-            let ok = crate::teamsetup::create(&friends) == 0;
+            // no "press Enter" here: qh's key reader can swallow it and leave you stuck
+            let res = if kind == "join" {
+                crate::teamsetup::join_inner(step.first().map(String::as_str).unwrap_or(""), step.get(1).map(String::as_str)).map(|dir| {
+                    // work in the downloaded project from now on
+                    if let Some(m) = app.hub.get(&app.active) { *lock(&m.cwd) = dir; }
+                    app.hub.save();
+                })
+            } else {
+                crate::teamsetup::create_inner(&step)
+            };
+            let ok = res.is_ok();
             if let Some(p) = prev { let _ = std::env::set_current_dir(p); }
-            println!("\nPress Enter to go back to qh.");
-            let _ = std::io::stdin().read_line(&mut String::new());
             term = ratatui::init();
+            KEYS_PAUSED.store(false, std::sync::atomic::Ordering::SeqCst);
             let _ = execute!(std::io::stdout(), event::EnableBracketedPaste);
             if app.hub.cfg.mouse { let _ = execute!(std::io::stdout(), event::EnableMouseCapture); }
             let _ = term.clear();
             let a = app.active.clone();
+            if let Err(e) = &res { app.err(&a, format!("team setup: {e}")) }
             if ok && !crate::team::running() {
                 match app.start_team() {
                     Ok(s) => app.note(&a, s),
@@ -412,7 +568,7 @@ fn tool_title(tool: &str, a: &Value) -> String {
         _ => {
             let kv: Vec<String> = a.as_object().into_iter().flatten()
                 .map(|(k, v)| format!("{k}={}", v.as_str().map(String::from).unwrap_or_else(|| v.to_string()))).collect();
-            format!("⚙ {tool} {}", one(kv.join(" "), 90))
+            format!("• {tool} {}", one(kv.join(" "), 90))
         }
     }
 }
@@ -467,9 +623,27 @@ impl App {
         self.view(name).push(Item::Err(s.into()));
     }
 
+    /// The tabs of the project on screen, in order.
+    fn tabs(&self) -> Vec<String> {
+        let all = self.hub.names();
+        let mine: Vec<String> = all.iter().filter(|n| self.hub.get(n)
+            .is_some_and(|m| crate::teamview::project_root(&m.cwd()) == self.project)).cloned().collect();
+        if mine.is_empty() { all } else { mine }
+    }
+
     fn set_active(&mut self, name: &str) {
-        if self.hub.get(name).is_none() {
-            return;
+        let Some(m) = self.hub.get(name) else { return };
+        let root = crate::teamview::project_root(&m.cwd());
+        if root != self.project {
+            // the team room and status bar follow the project on screen
+            if let Some((_, repo)) = crate::team::github_repo(&root) {
+                if crate::team::running_for(&repo) { crate::team::set_current(&repo) } else { crate::team::set_current("") }
+            } else {
+                crate::team::set_current("");
+            }
+            remember_project(&root);
+            if crate::team::enabled_for(&root) { self.last_team = root.clone() } else { self.last_personal = root.clone() }
+            self.project = root;
         }
         self.active = name.to_string();
         self.recent.retain(|n| n != name);
@@ -478,7 +652,7 @@ impl App {
     }
 
     fn shown(&self) -> Vec<String> {
-        let names = self.hub.names();
+        let names = self.tabs();
         if !self.grid {
             return vec![self.active.clone()];
         }
@@ -587,6 +761,43 @@ impl App {
             }
             return;
         }
+        if let Some(tv) = self.team_view.as_mut() {
+            let cwd = self.hub.get(&self.active).map(|m| m.cwd()).unwrap_or_default();
+            if k.code == KeyCode::Char('q') && k.modifiers.contains(Mods::CONTROL) {
+                self.quit = true;
+                return;
+            }
+            if k.code == KeyCode::Char(' ') && k.modifiers.contains(Mods::CONTROL) {
+                return self.flip_space();
+            }
+            // a session tab: Alt+←/→ leave the map for the sessions
+            if k.modifiers.contains(Mods::ALT) && matches!(k.code, KeyCode::Right | KeyCode::Left) {
+                self.team_view = None;
+                return;
+            }
+            let a = self.active.clone();
+            match tv.key(k, &self.hub, &cwd) {
+                crate::teamview::Act::None => {}
+                crate::teamview::Act::Close => self.team_view = None,
+                crate::teamview::Act::Open(s) => { self.team_view = None; self.set_active(&s) }
+                crate::teamview::Act::Work(role, text) => {
+                    self.team_view = None;
+                    if let Some(m) = self.hub.get(&a) { self.hub.set_role(&m, &role) }
+                    self.view(&a).push(Item::User(text.clone()));
+                    self.hub.send(&a, &text, "user", 0, None);
+                }
+                crate::teamview::Act::Task(n, title) => {
+                    self.team_view = None;
+                    match self.start_task(&cwd, n, &title) {
+                        Ok(name) => { self.load_view(&name); self.set_active(&name) }
+                        Err(e) => self.err(&a, e),
+                    }
+                }
+                crate::teamview::Act::Note(n) => self.note(&a, n),
+                crate::teamview::Act::Err(e) => self.err(&a, e),
+            }
+            return;
+        }
         if let Some(map) = self.map.as_mut() {
             let ids = map.ids(&self.hub);
             match k.code {
@@ -642,13 +853,23 @@ impl App {
                 KeyCode::Up => { self.sugg_sel = self.sugg_sel.checked_sub(1).unwrap_or(sugg.len() - 1); return }
                 KeyCode::Down => { self.sugg_sel = (self.sugg_sel + 1) % sugg.len(); return }
                 KeyCode::Tab => {
-                    self.input = format!("{} ", sugg[self.sugg_sel.min(sugg.len() - 1)].0).chars().collect();
+                    let c = &sugg[self.sugg_sel.min(sugg.len() - 1)].0;
+                    self.input = match c.split_once('<') { Some((head, _)) => head.to_string(), None => format!("{c} ") }.chars().collect();
                     self.cur = self.input.len();
+                    self.sugg_sel = 0;
                     return;
                 }
-                // Enter runs what's highlighted, so what you see is what runs
+                // Enter runs what's highlighted, so what you see is what runs; one that still
+                // needs something typed (`<who>`) is filled in instead
                 KeyCode::Enter => {
-                    self.input = sugg[self.sugg_sel.min(sugg.len() - 1)].0.chars().collect();
+                    let c = sugg[self.sugg_sel.min(sugg.len() - 1)].0.clone();
+                    if let Some((head, _)) = c.split_once('<') {
+                        self.input = head.chars().collect();
+                        self.cur = self.input.len();
+                        self.sugg_sel = 0;
+                        return;
+                    }
+                    self.input = c.chars().collect();
                     self.cur = self.input.len();
                 }
                 _ => {}
@@ -667,6 +888,9 @@ impl App {
             KeyCode::Char('w') if ctrl => self.command("/close"),
             KeyCode::Char('g') if ctrl => self.grid = !self.grid,
             KeyCode::Char('b') if ctrl => self.map = Some(crate::map::Map::default()),
+            KeyCode::Char('t') if ctrl => self.open_map(),
+            KeyCode::Char(' ') if ctrl => self.flip_space(),
+            KeyCode::Char('p') if ctrl => self.command("/project"),
             KeyCode::BackTab => {
                 let m = self.hub.cycle_mode();
                 let a = self.active.clone();
@@ -686,7 +910,7 @@ impl App {
             KeyCode::Char('a') if ctrl => self.cur = 0,
             KeyCode::Char('e') if ctrl => self.cur = self.input.len(),
             KeyCode::Char(d @ '1'..='9') if alt || ctrl => {
-                if let Some(n) = self.hub.names().get(d as usize - '1' as usize) {
+                if let Some(n) = self.tabs().get(d as usize - '1' as usize) {
                     let n = n.clone();
                     self.set_active(&n);
                 }
@@ -772,7 +996,7 @@ impl App {
     }
 
     fn cycle(&mut self, d: isize) {
-        let names = self.hub.names();
+        let names = self.tabs();
         if let Some(i) = names.iter().position(|n| *n == self.active) {
             let j = (i as isize + d).rem_euclid(names.len() as isize) as usize;
             let n = names[j].clone();
@@ -815,13 +1039,14 @@ impl App {
                 if self.hub.names().len() == 1 {
                     return self.err(&a, "can't close the last session; Ctrl+Q quits");
                 }
-                let names = self.hub.names();
+                let names = self.tabs();
                 let i = names.iter().position(|n| *n == a).unwrap_or(0);
                 self.hub.close(&a);
                 self.views.remove(&a);
                 self.recent.retain(|n| *n != a);
-                let names = self.hub.names();
-                let next = self.recent.first().cloned().unwrap_or_else(|| names[i.min(names.len() - 1)].clone());
+                let names = self.tabs();
+                let next = self.recent.iter().find(|n| names.contains(n)).cloned()
+                    .unwrap_or_else(|| names[i.min(names.len().saturating_sub(1))].clone());
                 self.set_active(&next);
             }
             "/msg" => {
@@ -1063,6 +1288,76 @@ impl App {
                 self.note(&a, if r.is_empty() { "no role yet: it is named from your first real request, or set one with /role <text>".into() } else { format!("role: {r}") });
             }
             "/mcp" => self.note(&a, crate::mcp::status()),
+            "/relay" => match arg {
+                "" => {
+                    let now = crate::config::load().relay;
+                    let dflt = match crate::link::DEFAULT_RELAY {
+                        Some(_) => "default  the qh project's relay: works with no setup".to_string(),
+                        None => "default  the qh project's relay (none running yet: same as none)".to_string(),
+                    };
+                    let all = vec![
+                        ("default".to_string(), dflt),
+                        ("none".to_string(), "none     direct lines and teammates only; strict networks fall back to git".to_string()),
+                        ("custom".to_string(), "your own the line `qh relay` printed on your server".to_string()),
+                    ];
+                    let mut p = picker("relay server", "/relay", all);
+                    p.cur = if ["default", "none"].contains(&now.as_str()) { now } else { "custom".into() };
+                    self.picker = Some(p);
+                }
+                "custom" => {
+                    self.input = "/relay ".chars().collect();
+                    self.cur = self.input.len();
+                    self.note(&a, "paste host:port#key from `qh relay` on your server (several: comma-separated), then Enter");
+                }
+                v => {
+                    let ok = matches!(v, "default" | "none") || v.split(',').all(|spec| {
+                        let (host, key) = spec.trim().split_once('#').map_or((spec.trim(), None), |(h, k)| (h, Some(k)));
+                        !host.is_empty() && !host.contains(' ') && key.map_or(true, |k| crate::oauth::b64url_decode(k).len() == 32)
+                    });
+                    if !ok {
+                        return self.err(&a, "that doesn't look like a relay: host:port#key (the key is the 43 characters `qh relay` printed)");
+                    }
+                    match crate::config::set("relay", v) {
+                        Ok(path) => {
+                            crate::team::set_relays(v);
+                            self.note(&a, format!("relay: {v} (saved in {}; teammates learn it with your addresses)", path.display()))
+                        }
+                        Err(e) => self.err(&a, format!("couldn't save the setting: {e}")),
+                    }
+                }
+            },
+            "/project" | "/projects" => {
+                if let Some(p) = arg.strip_prefix("browse ") {
+                    self.picker = Some(project_browser(std::path::Path::new(p)));
+                } else if let Some(p) = arg.strip_prefix("open ") {
+                    let p = tools::resolve(&m.cwd(), p.trim());
+                    if !p.is_dir() { return self.err(&a, format!("no such folder: {}", p.display())) }
+                    self.open_project(&p);
+                } else {
+                    self.picker = Some(self.project_picker());
+                }
+            }
+            "/anyway" => {
+                crate::team::allow_anyway(&a);
+                self.note(&a, "going ahead: this tab may edit what teammates are changing for the next 10 minutes (they'll see a note)");
+                if m.status() == "idle" {
+                    let text = "The user says go ahead anyway: retry the edit you were paused on.";
+                    self.view(&a).push(Item::User(text.into()));
+                    self.hub.send(&a, text, "user", 0, None);
+                }
+            }
+            "/promise" => match crate::team::promise(&a, arg) {
+                Ok(t) => self.note(&a, t),
+                Err(e) => self.err(&a, e),
+            },
+            "/answers" if arg.is_empty() => match crate::team::answers_mode() {
+                Some(mode) => self.note(&a, format!("teammates' agents asking yours: {mode} · /answers auto|ask|off")),
+                None => self.err(&a, "team mode is off"),
+            },
+            "/answers" => match crate::team::set_answers(arg) {
+                Ok(t) => self.note(&a, t),
+                Err(e) => self.err(&a, e),
+            },
             "/docs" => {
                 crate::platform::open_url(crate::platform::DOCS);
                 self.note(&a, format!("opening the docs: {}", crate::platform::DOCS));
@@ -1089,8 +1384,109 @@ Type /team create to put it on GitHub (private) and invite friends by their GitH
                     Ok(s) => self.note(&a, s),
                     Err(e) => self.err(&a, e),
                 },
-                _ if arg == "create" || arg.starts_with("create ") => {
-                    self.outside = Some(arg.split_whitespace().skip(1).map(String::from).collect());
+                "remove" => self.err(&a, "usage: /team remove <github-username>"),
+                _ if arg.starts_with("remove confirm ") => {
+                    let who = arg[15..].trim().trim_start_matches('@').to_string();
+                    let Some((_, repo)) = crate::team::github_repo(&m.cwd()) else {
+                        return self.err(&a, "this folder isn't on GitHub, so it has no team");
+                    };
+                    let (hub, a2) = (self.hub.clone(), a.clone());
+                    self.note(&a, format!("removing {who}…"));
+                    std::thread::spawn(move || {
+                        let r = crate::team::remove(&repo, &who).unwrap_or_else(|e| format!("✗ {e}"));
+                        hub.emit(&a2, Event::Notice(r));
+                    });
+                }
+                _ if arg.starts_with("remove ") => {
+                    // "no" first: a stray Enter must never throw someone out
+                    let who = arg[7..].trim().trim_start_matches('@').to_string();
+                    let all = vec![("status".to_string(), "no, keep them".to_string()),
+                                   (format!("remove confirm {who}"), format!("yes: new team key without {who}, and remove their access to the repo"))];
+                    self.picker = Some(picker("remove them from the team?", "/team", all));
+                }
+                "invite" => self.err(&a, "usage: /team invite <github-username> [more…] [viewer|member|trusted]"),
+                _ if arg.starts_with("invite ") => {
+                    let mut users: Vec<String> = arg[7..].split_whitespace().map(|u| u.trim_start_matches('@').to_string()).collect();
+                    let role = match users.last() {
+                        Some(r) if crate::team::ROLES.contains(&r.as_str()) => users.pop().unwrap(),
+                        _ => "member".to_string(),
+                    };
+                    if users.is_empty() {
+                        return self.err(&a, "usage: /team invite <github-username> [more…] [viewer|member|trusted]");
+                    }
+                    let (hub, a2, cwd) = (self.hub.clone(), a.clone(), m.cwd());
+                    self.note(&a, format!("inviting {} as {role}…", users.join(", ")));
+                    std::thread::spawn(move || {
+                        let mut r = crate::teamsetup::invite(&cwd, &users).unwrap_or_else(|e| format!("✗ {e}"));
+                        if let Some((_, repo)) = crate::team::github_repo(&cwd) {
+                            for u in &users {
+                                if let Ok(m) = crate::team::set_role(&repo, u, &role) { r = format!("{r}\n{m}") }
+                            }
+                        }
+                        hub.emit(&a2, Event::Notice(r));
+                    });
+                }
+                "role" => {
+                    // pick a person, then a role
+                    let all: Vec<(String, String)> = crate::team::sessions().into_iter().map(|(who, _, _)| who)
+                        .collect::<std::collections::BTreeSet<_>>().into_iter()
+                        .map(|w| (format!("role {w}"), w)).collect();
+                    if all.is_empty() {
+                        return self.err(&a, "usage: /team role <github-username> viewer|member|trusted");
+                    }
+                    self.picker = Some(picker("whose role?", "/team", all));
+                }
+                _ if arg.starts_with("role ") => {
+                    let w: Vec<&str> = arg[5..].split_whitespace().collect();
+                    let Some((_, repo)) = crate::team::github_repo(&m.cwd()) else {
+                        return self.err(&a, "this folder isn't on GitHub, so it has no team");
+                    };
+                    match w.as_slice() {
+                        [who] => {
+                            let all = crate::team::ROLES.iter().map(|r| (format!("role {who} {r}"), format!("{r:<8} {}", crate::team::role_help(r)))).collect();
+                            self.picker = Some(picker("role", "/team", all));
+                        }
+                        [who, role] => match crate::team::set_role(&repo, who.trim_start_matches('@'), role) {
+                            Ok(msg) => self.note(&a, msg),
+                            Err(e) => self.err(&a, e),
+                        },
+                        _ => self.err(&a, "usage: /team role <github-username> viewer|member|trusted"),
+                    }
+                }
+                // folder browser: start the team in an existing folder or a new one
+                "create" => {
+                    let start = m.cwd();
+                    let start = if crate::teamsetup::not_a_project(&start).is_ok() { start } else { crate::platform::home() };
+                    self.picker = Some(folder_picker(&start));
+                }
+                _ if arg.starts_with("browse ") => self.picker = Some(folder_picker(std::path::Path::new(&arg[7..]))),
+                _ if arg.starts_with("new-in ") => {
+                    // picked "new folder": the user types the name after the path
+                    self.input = format!("/team create-new {}{}", arg[7..].trim_end_matches(['/', '\\']), std::path::MAIN_SEPARATOR).chars().collect();
+                    self.cur = self.input.len();
+                    self.note(&a, "type the new folder's name, then Enter");
+                }
+                _ if arg.starts_with("create-new ") || arg.starts_with("create-at ") => {
+                    let (new, path) = if let Some(p) = arg.strip_prefix("create-new ") { (true, p) } else { (false, &arg[10..]) };
+                    let p = tools::resolve(&m.cwd(), path.trim());
+                    if new {
+                        if p.exists() {
+                            return self.err(&a, format!("{} already exists: pick it from /team create instead", p.display()));
+                        }
+                        if let Err(e) = std::fs::create_dir_all(&p) {
+                            return self.err(&a, format!("couldn't make {}: {e}", p.display()));
+                        }
+                    }
+                    if let Err(e) = crate::teamsetup::not_a_project(&p) {
+                        return self.err(&a, e);
+                    }
+                    *lock(&m.cwd) = p.clone();
+                    self.hub.save();
+                    self.note(&a, format!("{a} now works in {}", p.display()));
+                    self.outside = Some(vec!["create".into()]);
+                }
+                _ if arg.starts_with("create ") => {
+                    self.outside = Some(std::iter::once("create".to_string()).chain(arg.split_whitespace().skip(1).map(String::from)).collect());
                 }
                 "off" => {
                     if let Some((_, repo)) = crate::team::github_repo(&m.cwd()) { crate::team::remember(&repo, false) }
@@ -1129,6 +1525,7 @@ Type /team create to put it on GitHub (private) and invite friends by their GitH
                         return self.err(&a, "usage: /team answer <who> <id> once|always|deny");
                     };
                     match crate::team::decide(from, id, ans) {
+                        Some((session, note)) if session.is_empty() => self.note(&a, note),
                         Some((session, text)) => {
                             let to = if self.hub.get(&session).is_some() { session } else { a.clone() };
                             self.hub.send(&to, &text, "user", 0, None);
@@ -1138,24 +1535,88 @@ Type /team create to put it on GitHub (private) and invite friends by their GitH
                         None => self.err(&a, "that message isn't waiting any more"),
                     }
                 }
-                _ => {
-                    if !crate::team::running() {
-                        return self.note(&a, crate::team::report());
-                    }
-                    // waiting messages first, then everyone's sessions
+                "join" => {
+                    self.input = "/team join ".chars().collect();
+                    self.cur = self.input.len();
+                    self.note(&a, "paste the line your friend sent (owner/repo and the code), then Enter");
+                }
+                _ if arg.starts_with("join ") => self.outside = Some(std::iter::once("join".to_string()).chain(arg[5..].split_whitespace().map(String::from)).collect()),
+                "invite-ask" => {
+                    self.input = "/team invite ".chars().collect();
+                    self.cur = self.input.len();
+                    self.note(&a, "type your friend's GitHub username, then Enter");
+                }
+                "overview" => self.team_view = Some(crate::teamview::TeamView::open(&m.cwd())),
+                "settings" => {
+                    let all = vec![
+                        ("private".to_string(), "Only the team can see the code".to_string()),
+                        ("public".to_string(), "Everyone can see the code (asks first)".to_string()),
+                        ("off".to_string(), "Go offline".to_string()),
+                    ];
+                    self.picker = Some(picker("team settings", "/team", all));
+                }
+                _ if arg.starts_with("person ") => {
+                    let who = arg[7..].trim();
+                    let Some((_, _, _, sessions, role)) = crate::team::people().into_iter().find(|p| p.0 == who) else {
+                        return self.err(&a, format!("no teammate {who}"));
+                    };
                     let mut all: Vec<(String, String, String)> = vec![];
+                    for s in &sessions {
+                        all.push((format!("open {who} {s}"), format!("Read {s}"), String::new()));
+                    }
+                    for s in &sessions {
+                        all.push((format!("send {who} {s}"), format!("Send a message to {s}"), String::new()));
+                    }
+                    if sessions.is_empty() {
+                        all.push(("status".into(), format!("{who} has no sessions open"), String::new()));
+                    }
+                    all.push(if role == "viewer" {
+                        (format!("role {who} member"), format!("Let {who} send me messages"), String::new())
+                    } else {
+                        (format!("role {who} viewer"), format!("View only: {who} can't send me messages"), String::new())
+                    });
+                    self.picker = Some(Picker { title: "teammate", cmd: "/team".into(), all, filter: String::new(), sel: 0, cur: String::new() });
+                }
+                _ => {
+                    // one menu for everything; what's in it depends on where you are
+                    let mut all: Vec<(String, String, String)> = vec![];
+                    if !crate::team::running() {
+                        let cwd = m.cwd();
+                        if crate::team::github_repo(&cwd).is_some() {
+                            all.push(("on".into(), "Connect to this project's team".into(), String::new()));
+                        } else if crate::teamsetup::not_a_project(&cwd).is_ok() {
+                            all.push((format!("create-at {}", cwd.display()), "Start a team in this folder".into(), String::new()));
+                        }
+                        all.push(("create".into(), "Start a team in another folder…".into(), String::new()));
+                        all.push(("join".into(), "Join a friend's team…".into(), String::new()));
+                        self.picker = Some(picker_g("team", all));
+                        return;
+                    }
+                    // in a team: everything happens in the room
+                    if arg.is_empty() {
+                        self.team_view = Some(crate::teamview::TeamView::open(&m.cwd()));
+                        return;
+                    }
                     for i in crate::team::pending() {
-                        let g = format!("✉ {} → your {}: {}", i.from, i.session, clip(&i.text, 50));
-                        all.push((format!("answer {} {} once", i.from, i.id), "allow once".into(), g.clone()));
-                        all.push((format!("answer {} {} always", i.from, i.id), format!("always allow {}", i.from), g.clone()));
-                        all.push((format!("answer {} {} deny", i.from, i.id), "deny".into(), g));
+                        let g = if i.question.is_some() { format!("{}'s agent asks your {}: \"{}\"", i.from, i.session, clip(&i.text, 50)) }
+                                else { format!("{} wants to send: \"{}\"", i.from, clip(&i.text, 50)) };
+                        all.push((format!("answer {} {} once", i.from, i.id), "Allow".into(), g.clone()));
+                        all.push((format!("answer {} {} always", i.from, i.id), format!("Always allow {}", i.from), g.clone()));
+                        all.push((format!("answer {} {} deny", i.from, i.id), "Deny".into(), g));
                     }
-                    for (who, s, label) in crate::team::sessions() {
-                        all.push((format!("open {who} {s}"), format!("read  {label}"), who.clone()));
-                        all.push((format!("send {who} {s}"), format!("write {s}"), who));
+                    let team = format!("team · {}", crate::team::repo().unwrap_or_default());
+                    for (who, online, seen, sessions, role) in crate::team::people() {
+                        let n = sessions.len();
+                        all.push((format!("person {who}"), format!("{} {who}   {seen} · {n} session{}{}", if online { "●" } else { "○" },
+                            if n == 1 { "" } else { "s" }, if role == "viewer" { " · view only" } else { "" }), team.clone()));
                     }
-                    all.push(("status".into(), "who's online, sessions, files".into(), "team".into()));
-                    self.picker = Some(Picker { title: "team", cmd: "/team".into(), all, filter: String::new(), sel: 0, cur: String::new() });
+                    if crate::team::people().is_empty() {
+                        all.push(("status".into(), "Nobody else is here yet: invite a friend".into(), team.clone()));
+                    }
+                    all.push(("overview".into(), "Overview: who's working on what (Ctrl+T)".into(), team.clone()));
+                    all.push(("invite-ask".into(), "+ Invite a friend".into(), team.clone()));
+                    all.push(("settings".into(), "Settings (who sees the code, go offline)".into(), team));
+                    self.picker = Some(picker_g("team", all));
                 }
             },
             "/commands" => {
@@ -1184,8 +1645,22 @@ $ARGUMENTS is replaced by what you type after the command".into()
     /// Commands matching what's typed, while a bare `/word` is being typed.
     fn suggestions(&self) -> Vec<(String, String)> {
         let typed: String = self.input.iter().collect();
-        if self.secret.is_some() || !typed.starts_with('/') || typed.contains(' ') {
+        if self.secret.is_some() || !typed.starts_with('/') {
             return vec![];
+        }
+        // after a command (or on an exact one): its subcommands, until you type past the word
+        let cmd = typed.split(' ').next().unwrap_or("");
+        let cmd = if cmd == "/providers" { "/provider" } else if cmd == "/cd" { "/cwd" } else { cmd };
+        let rest = typed.split_once(' ').map(|(_, r)| r).unwrap_or("");
+        let subs: Vec<(String, String)> = SUBCOMMANDS.iter()
+            .filter(|(c, _)| {
+                let (head, tail) = c.split_once(' ').unwrap_or((c, ""));
+                let fixed = tail.split('<').next().unwrap_or("");
+                head == cmd && fixed.starts_with(rest) && !(rest == fixed && tail.len() > fixed.len())
+            })
+            .map(|(c, d)| (c.to_string(), d.to_string())).collect();
+        if typed.contains(' ') {
+            return subs;
         }
         let cwd = self.hub.get(&self.active).map(|m| m.cwd()).unwrap_or_default();
         let mut out: Vec<(String, String)> = COMMANDS.iter().filter(|(c, _)| c.starts_with(&typed))
@@ -1197,6 +1672,9 @@ $ARGUMENTS is replaced by what you type after the command".into()
             }
         }
         out.sort_by_key(|(c, _)| *c != typed); // an exact match first, so it's the highlighted one
+        if out.first().is_some_and(|(c, _)| *c == typed) {
+            out.extend(subs);
+        }
         out
     }
 
@@ -1219,7 +1697,11 @@ $ARGUMENTS is replaced by what you type after the command".into()
             body
         };
         let shown = self.shown();
-        if let Some(mut map) = self.map.take() {
+        if let Some(mut tv) = self.team_view.take() {
+            let cwd = self.hub.get(&self.active).map(|m| m.cwd()).unwrap_or_default();
+            tv.draw(f, panes, &self.hub, &cwd);
+            self.team_view = Some(tv);
+        } else if let Some(mut map) = self.map.take() {
             map.draw(f, panes, &self.hub);
             self.map = Some(map);
         } else if self.grid && shown.len() > 1 {
@@ -1249,6 +1731,7 @@ $ARGUMENTS is replaced by what you type after the command".into()
         }
         f.render_widget(Paragraph::new(self.status_line()).style(Style::new().fg(DIM)), status);
         let prompt = "› ";
+        let pc = if self.in_team_space() { TEAM } else { ACCENT };
         // an API key being typed is never drawn
         let text: String = if self.secret.is_some() { "•".repeat(self.input.len()) } else { self.input.iter().collect() };
         let before: usize = self.input[..self.cur].iter().map(|c| c.width().unwrap_or(0)).sum();
@@ -1262,25 +1745,27 @@ $ARGUMENTS is replaced by what you type after the command".into()
             (text, before)
         };
         let line = if self.input.is_empty() {
-            Line::from(vec![Span::styled(prompt, Style::new().fg(ACCENT)), Span::styled(match &self.secret {
+            Line::from(vec![Span::styled(prompt, Style::new().fg(pc)), Span::styled(match &self.secret {
                 Some(p) => format!("API key for {p} (hidden, Esc cancels)"),
                 None => "message, /help, @file to attach".into(),
             }, Style::new().fg(DIM))])
         } else {
-            Line::from(vec![Span::styled(prompt, Style::new().fg(ACCENT)), Span::raw(shown_text)])
+            Line::from(vec![Span::styled(prompt, Style::new().fg(pc)), Span::raw(shown_text)])
         };
         f.render_widget(Paragraph::new(line), input);
         f.set_cursor_position((input.x + 2 + cx as u16, input.y));
-        let hints = "⇧Tab mode  ^N new  ^W close  ^G grid  ^B map  ^L log  Alt+←/→ tabs  PgUp/Dn scroll  ^O tool  Esc stop  ^Q quit";
+        let hints = "⇧Tab mode  ^N new  ^W close  ^G grid  ^Space team⇄personal  ^T team map  ^B sessions map  ^P projects  ^L log  Alt+←/→ tabs  PgUp/Dn scroll  ^O tool  Esc stop  ^Q quit";
         f.render_widget(Paragraph::new(hints).style(Style::new().fg(DIM)), foot);
         let sugg = self.suggestions();
         if !sugg.is_empty() && self.picker.is_none() {
-            let rows = sugg.len().min(10) as u16;
-            let r = Rect { x: input.x, y: input.y.saturating_sub(rows + 2), width: input.width.min(70), height: rows + 2 };
+            let rows = sugg.len().min(12) as u16;
+            let pad = sugg.iter().map(|(c, _)| c.chars().count()).max().unwrap_or(14).max(14);
+            let wide = sugg.iter().map(|(_, d)| pad + d.chars().count() + 4).max().unwrap_or(70) as u16;
+            let r = Rect { x: input.x, y: input.y.saturating_sub(rows + 2), width: input.width.min(wide.max(40)), height: rows + 2 };
             let top = self.sugg_sel.saturating_sub(rows as usize - 1);
             let lines: Vec<Line> = sugg.iter().enumerate().skip(top).take(rows as usize).map(|(i, (c, d))| {
                 let st = if i == self.sugg_sel { Style::new().add_modifier(Modifier::REVERSED) } else { Style::new() };
-                Line::from(vec![Span::styled(format!("{c:<14}"), st.fg(ACCENT)), Span::styled(format!(" {d}"), st.fg(DIM))])
+                Line::from(vec![Span::styled(format!("{c:<pad$}"), st.fg(ACCENT)), Span::styled(format!(" {d}"), st.fg(DIM))])
             }).collect();
             f.render_widget(Clear, r);
             f.render_widget(Paragraph::new(lines).block(Block::bordered().border_style(Style::new().fg(DIM))
@@ -1293,11 +1778,27 @@ $ARGUMENTS is replaced by what you type after the command".into()
     }
 
     fn draw_tabs(&self, f: &mut Frame, area: Rect) -> Vec<(u16, u16, String)> {
-        let names = self.hub.names();
+        let team = self.in_team_space();
+        let accent = if team { TEAM } else { ACCENT };
+        // which space you're in, always in the corner
+        let chip = if team {
+            format!(" ◆ {} ", crate::team::repo().unwrap_or_default().rsplit('/').next().unwrap_or("team"))
+        } else {
+            let waiting = crate::team::needs_you().then_some(());
+            format!(" ◇ personal{} ", if waiting.is_some() { " · team needs you ^Space" } else { "" })
+        };
+        let chip_w = chip.chars().map(|c| c.width().unwrap_or(0)).sum::<usize>() as u16 + 1;
+        f.render_widget(Paragraph::new(Line::styled(chip.as_str(), if team {
+            Style::new().fg(Color::Black).bg(TEAM).add_modifier(Modifier::BOLD)
+        } else { Style::new().fg(DIM) })), Rect { width: chip_w.min(area.width), ..area });
+        let area = Rect { x: area.x + chip_w, width: area.width.saturating_sub(chip_w), ..area };
+        let mut names = self.tabs();
+        if team { names.insert(0, MAP_TAB.to_string()) }
         let labels: Vec<(String, bool, bool)> = names.iter().map(|n| {
+            if n == MAP_TAB { return (" map ".to_string(), self.team_view.is_some(), false) }
             let st = self.hub.get(n).map(|m| m.status()).unwrap_or("idle");
             let unread = self.views.get(n).is_some_and(|v| v.unread) && *n != self.active;
-            (format!(" {n}{}{} ", icon(st), if unread { " ●" } else { "" }), *n == self.active, unread)
+            (format!(" {n}{}{} ", icon(st), if unread { " ●" } else { "" }), *n == self.active && !(team && self.team_view.is_some()), unread)
         }).collect();
         let widths: Vec<usize> = labels.iter().map(|l| l.0.chars().map(|c| c.width().unwrap_or(0)).sum::<usize>() + 1).collect();
         // scroll the strip so the active tab is always visible
@@ -1318,9 +1819,9 @@ $ARGUMENTS is replaced by what you type after the command".into()
             hits.push((x, x + w, names[start + i].clone()));
             x += w;
             let st = if *active {
-                Style::new().fg(Color::Black).bg(ACCENT).add_modifier(Modifier::BOLD)
+                Style::new().fg(Color::Black).bg(accent).add_modifier(Modifier::BOLD)
             } else if *unread {
-                Style::new().fg(ACCENT)
+                Style::new().fg(accent)
             } else {
                 Style::new().fg(DIM)
             };
@@ -1375,7 +1876,7 @@ $ARGUMENTS is replaced by what you type after the command".into()
                 }
                 if row == 0 {
                     if let Some((_, _, n)) = self.tab_hits.iter().find(|(a, b, _)| col >= *a && col < *b).cloned() {
-                        self.set_active(&n);
+                        if n == MAP_TAB { self.open_map() } else { self.team_view = None; self.set_active(&n) }
                     }
                 }
             }
@@ -1383,14 +1884,175 @@ $ARGUMENTS is replaced by what you type after the command".into()
         }
     }
 
+    /// Every project you've used: the ones with open tabs, then recent ones.
+    fn project_picker(&self) -> Picker {
+        let mut roots: Vec<std::path::PathBuf> = vec![];
+        for n in self.hub.names() {
+            if let Some(m) = self.hub.get(&n) {
+                let r = crate::teamview::project_root(&m.cwd());
+                if !roots.contains(&r) { roots.push(r) }
+            }
+        }
+        let recent = recent_projects();
+        for (p, _) in &recent {
+            if !roots.contains(p) && p.is_dir() { roots.push(p.clone()) }
+        }
+        let used = |p: &std::path::Path| recent.iter().find(|(r, _)| r == p).map(|(_, t)| *t).unwrap_or(0);
+        roots.sort_by_key(|p| (*p != self.project, std::cmp::Reverse(used(p))));
+        let mut team = vec![];
+        let mut personal = vec![];
+        for r in roots {
+            let name = r.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| r.display().to_string());
+            let tabs = self.hub.names().into_iter().filter(|n| self.hub.get(n).is_some_and(|m| crate::teamview::project_root(&m.cwd()) == r)).count();
+            let here = if r == self.project { "  ◂ here" } else { "" };
+            let repo = crate::team::github_repo(&r).map(|(_, x)| x).filter(|x| crate::team::enabled(x));
+            match repo {
+                Some(repo) => {
+                    let what = match crate::team::glance(&repo) {
+                        Some((on, waiting)) => format!("{}{}",
+                            if on.is_empty() { "nobody else online".to_string() } else { format!("● {}", on.join(", ")) },
+                            if waiting > 0 { format!(" · {waiting} waiting") } else { String::new() }),
+                        None => "○ not connected".into(),
+                    };
+                    team.push((format!("open {}", r.display()), format!("{name:<20} {what}{here}"), "Team".to_string()));
+                }
+                None => {
+                    let when = match used(&r) { 0 => String::new(), t => format!(" · {}", ago(t)) };
+                    let n = if tabs == 0 { "closed".to_string() } else { format!("{tabs} session{}", if tabs == 1 { "" } else { "s" }) };
+                    personal.push((format!("open {}", r.display()), format!("{name:<20} {n}{when}{here}"), "Personal".to_string()));
+                }
+            }
+        }
+        let mut all = team;
+        all.extend(personal);
+        all.push((format!("browse {}", crate::config::home().display()), "+ Open another folder…".into(), String::new()));
+        Picker { title: "projects (Ctrl+P)", cmd: "/project".into(), all, filter: String::new(), sel: 0, cur: String::new() }
+    }
+
+    fn in_team_space(&self) -> bool {
+        crate::team::running() && crate::team::enabled_for(&self.project)
+    }
+
+    fn open_map(&mut self) {
+        let cwd = self.hub.get(&self.active).map(|m| m.cwd()).unwrap_or_default();
+        self.team_view = Some(crate::teamview::TeamView::open(&cwd));
+    }
+
+    /// Ctrl+Space: from your own work to the team's and back, instantly. Both keep running.
+    fn flip_space(&mut self) {
+        let a = self.active.clone();
+        if self.in_team_space() || crate::team::enabled_for(&self.project) {
+            self.map_was_open = self.team_view.is_some();
+            self.team_view = None;
+            // a project can turn into a team one after it was noted as personal
+            let ok = |p: &std::path::Path| !p.as_os_str().is_empty() && !crate::team::enabled_for(p);
+            if !ok(&self.last_personal) {
+                match recent_projects().into_iter().map(|(p, _)| p).find(|p| ok(p) && *p != self.project) {
+                    Some(p) => self.last_personal = p,
+                    None => return self.note(&a, "no personal project yet: Ctrl+P opens one, then Ctrl+Space flips between them"),
+                }
+            }
+            let p = self.last_personal.clone();
+            self.open_project(&p);
+        } else {
+            if self.last_team.as_os_str().is_empty() || !crate::team::enabled_for(&self.last_team) {
+                // a team project used before, if any
+                match recent_projects().into_iter().map(|(p, _)| p).find(|p| crate::team::enabled_for(p)) {
+                    Some(p) => self.last_team = p,
+                    None => return self.note(&a, "no team project yet: /team starts one or joins a friend's"),
+                }
+            }
+            let p = self.last_team.clone();
+            self.open_project(&p);
+            if self.map_was_open || self.team_view.is_none() && crate::team::running() { self.open_map() }
+        }
+    }
+
+    /// Show a project: its last-used tab, or a new session there. Its team connects if it's a
+    /// team project; everything else keeps running in the background.
+    fn open_project(&mut self, dir: &std::path::Path) {
+        let root = crate::teamview::project_root(dir);
+        let mine: Vec<String> = self.hub.names().into_iter()
+            .filter(|n| self.hub.get(n).is_some_and(|m| crate::teamview::project_root(&m.cwd()) == root)).collect();
+        let pick = self.recent.iter().find(|n| mine.contains(n)).cloned().or_else(|| mine.first().cloned());
+        let name = match pick {
+            Some(n) => n,
+            None => {
+                let base: String = root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or("project".into())
+                    .chars().map(|c| if c.is_whitespace() { '-' } else { c }).collect();
+                let names = self.hub.names();
+                let name = std::iter::once(base.clone()).chain((2..).map(|i| format!("{base}-{i}"))).find(|n| !names.contains(n)).unwrap();
+                if let Err(e) = self.hub.add(&name, None, "", "", None, false, Some(root.clone())) {
+                    let a = self.active.clone();
+                    return self.err(&a, e);
+                }
+                self.load_view(&name);
+                name
+            }
+        };
+        self.set_active(&name);
+        if crate::team::enabled_for(&root) && !crate::team::github_repo(&root).is_some_and(|(_, r)| crate::team::running_for(&r)) {
+            match self.start_team_in(&name) {
+                Ok(s) => self.note(&name, s),
+                Err(e) => self.err(&name, format!("team: {e}")),
+            }
+        }
+        self.hub.save();
+    }
+
+    /// Issue #n in its own branch and folder (a git worktree next to the project) with its own
+    /// session, so it never collides with anyone's work on main. Returns the new tab's name.
+    fn start_task(&mut self, cwd: &std::path::Path, n: u64, title: &str) -> Result<String, String> {
+        let (root, _) = crate::team::github_repo(cwd).ok_or("this folder isn't a GitHub project")?;
+        let slug: String = title.to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect::<String>()
+            .split('-').filter(|w| !w.is_empty()).take(5).collect::<Vec<_>>().join("-");
+        let branch = format!("qh/{n}-{slug}");
+        let dir = crate::teamview::tasks_dir(&root).join(n.to_string());
+        let git = |args: &[&str]| std::process::Command::new("git").current_dir(&root).args(args)
+            .stdin(std::process::Stdio::null()).output().map_err(|e| e.to_string())
+            .and_then(|o| if o.status.success() { Ok(()) } else { Err(String::from_utf8_lossy(&o.stderr).trim().to_string()) });
+        if !dir.exists() {
+            let _ = std::fs::create_dir_all(dir.parent().unwrap_or(&dir));
+            let d = dir.to_string_lossy().to_string();
+            git(&["worktree", "add", "-q", "-b", &branch, &d]).or_else(|_| git(&["worktree", "add", "-q", &d, &branch]))
+                .map_err(|e| format!("couldn't make a folder for #{n}: {e}"))?;
+        }
+        let name = format!("issue{n}");
+        if self.hub.get(&name).is_none() {
+            self.hub.add(&name, None, "", "", None, false, Some(dir.clone()))?;
+        }
+        let m = self.hub.get(&name).ok_or("couldn't open the session")?;
+        self.hub.set_role(&m, &format!("#{n} {title}"));
+        let text = format!(
+            "You're working on GitHub issue #{n}: {title}\n\
+You're in your own folder on branch {branch}, so other sessions and teammates aren't affected.\n\
+Read the issue with `gh issue view {n}`, fix it, run the tests and commit.\n\
+When it's done, tell me what you changed. Don't push or open a pull request until I say so; \
+then it's `git push -u origin {branch}` and `gh pr create --fill`.");
+        self.view(&name).push(Item::User(text.clone()));
+        self.hub.send(&name, &text, "user", 0, None);
+        crate::team::log(&format!("you started #{n} in {name} (branch {branch})"));
+        Ok(name)
+    }
+
     /// Share this hub's sessions as presence on the active tab's repo.
     fn start_team(&self) -> Result<String, String> {
-        let cwd = self.hub.get(&self.active).map(|m| m.cwd()).unwrap_or_default();
-        let (hub, a) = (self.hub.clone(), self.active.clone());
+        self.start_team_in(&self.active.clone())
+    }
+
+    /// Connect the team of the project `tab` is in (its notes go to that tab).
+    fn start_team_in(&self, tab: &str) -> Result<String, String> {
+        let cwd = self.hub.get(tab).map(|m| m.cwd()).unwrap_or_default();
+        let (hub, a) = (self.hub.clone(), tab.to_string());
+        let root = crate::team::github_repo(&cwd).map(|(r, _)| r).unwrap_or_else(|| cwd.clone());
         let summary = Box::new(move || {
-            let members = lock(&hub.members).clone();
-            let sessions: Vec<Value> = members.iter().map(|m| serde_json::json!({
-                "name": m.name, "status": m.status(), "role": lock(&m.purpose).clone()})).collect();
+            // only this project's sessions: other projects are none of this team's business
+            let members: Vec<_> = lock(&hub.members).iter().filter(|m| crate::teamview::in_project(&m.cwd(), &root)).cloned().collect();
+            let sessions: Vec<Value> = members.iter().map(|m| {
+                let (topic, now, files) = crate::teamview::session_info(&hub, m, &root);
+                serde_json::json!({"name": m.name, "status": m.status(), "role": lock(&m.purpose).clone(),
+                                   "topic": topic, "now": now, "files": files, "branch": crate::teamview::branch(&m.cwd())})
+            }).collect();
             // the recent conversation of each session, text only, so teammates can follow along
             let mut transcripts = serde_json::Map::new();
             for m in &members {
@@ -1401,17 +2063,43 @@ $ARGUMENTS is replaced by what you type after the command".into()
                     .map(|x| serde_json::json!([context::role(x), context::content(x).chars().take(1500).collect::<String>()])).collect();
                 transcripts.insert(m.name.clone(), rows.into());
             }
-            serde_json::json!({"sessions": sessions, "files": hub.claimed_files(), "transcripts": transcripts})
+            // paths relative to the project, so the same file matches on everyone's machine
+            let files: Vec<String> = hub.claimed_files().into_iter().filter(|f| std::path::Path::new(f).starts_with(&root))
+                .map(|f| crate::teamview::rel(&root, &f)).collect();
+            serde_json::json!({"sessions": sessions, "files": files, "transcripts": transcripts})
         });
         let (h1, h2, h3, h4, a1, a2) = (self.hub.clone(), self.hub.clone(), self.hub.clone(), self.hub.clone(), a.clone(), a.clone());
+        let (h5, h6) = (self.hub.clone(), self.hub.clone());
         let hooks = crate::team::Hooks {
+            answer: std::sync::Arc::new(move |q: crate::team::Question| {
+                // a read-only copy of the asked session answers; the session itself carries on
+                let hub = h5.clone();
+                std::thread::spawn(move || {
+                    let who = if q.from_session.is_empty() { q.from.clone() } else { format!("{}/{}", q.from, q.from_session) };
+                    let Some(m) = hub.get(&q.session).or_else(|| hub.names().first().and_then(|n| hub.get(n))) else {
+                        crate::team::reply(&q, "(not answered: that session is closed)", &[]);
+                        return;
+                    };
+                    let (text, relied) = crate::engine::answer_question(&hub, &m, &who, &q.text);
+                    hub.emit(&m.name, Event::Notice(format!("answered {who}: {}", text.lines().next().unwrap_or("").chars().take(100).collect::<String>())));
+                    crate::team::reply(&q, &text, &relied);
+                });
+            }),
+            answered: Box::new(move |session: &str, text: &str| {
+                // busy: it reads the answer before its next model call; idle: it's woken with it
+                match h6.get(session) {
+                    Some(m) if lock(&m.ctl).running => crate::team::queue_answer(session, text),
+                    Some(_) => { h6.send(session, text, "user", 0, None); }
+                    None => {}
+                }
+            }),
             say: Box::new(move |s: String| h1.emit(&a1, Event::Notice(s))),
             deliver: Box::new(move |session: &str, text: &str| {
                 let to = if h2.get(session).is_some() { session.to_string() } else { h2.names().first().cloned().unwrap_or_default() };
                 h2.send(&to, text, "user", 0, None);
             }),
             ask: Box::new(move |i: &crate::team::Incoming| h3.emit(&a2, Event::Notice(format!(
-                "✉ {} wants to send to your {}: \"{}\" · /team to allow or deny", i.from, i.session, i.text)))),
+                "{} asks your {}: \"{}\" · Ctrl+T to allow or deny", i.from, i.session, i.text)))),
             refresh: Box::new(move || h4.emit("", Event::Changed)),
         };
         crate::team::start(&cwd, summary, hooks)
@@ -1439,7 +2127,7 @@ $ARGUMENTS is replaced by what you type after the command".into()
             let parts: Vec<&str> = dir.rsplit(['/', '\\']).take(2).collect();
             format!("…/{}/{}", parts.get(1).unwrap_or(&""), parts[0])
         } else { dir };
-        let mut out = format!("▶ {}{role} · {dir} · [{mode}] · {model} · {profile} · think {} · [{}{}] {live}/{ctx}", self.active,
+        let mut out = format!("▸ {}{role} · {dir} · [{mode}] · {model} · {profile} · think {} · [{}{}] {live}/{ctx}", self.active,
                               if think { "on" } else { "off" }, "█".repeat(bar), "░".repeat(20 - bar));
         let cost = lock(&m.turn).cost;
         if cost > 0.0 { out += &if cost < 0.01 { format!(" · ${cost:.4}") } else { format!(" · ${cost:.2}") } }
@@ -1637,13 +2325,13 @@ fn draw_confirm(f: &mut Frame, c: &Confirm, queued: usize) {
     let color = if danger || !c.warn.is_empty() { Color::Red } else { Color::Yellow };
     let more = if queued > 1 { format!(" (+{} waiting) ", queued - 1) } else { String::new() };
     let block = Block::bordered().border_style(Style::new().fg(color))
-        .title(Line::from(vec![Span::styled(format!(" ⚙ {} ", c.tool), Style::new().add_modifier(Modifier::REVERSED | Modifier::BOLD)),
+        .title(Line::from(vec![Span::styled(format!(" {} ", c.tool), Style::new().add_modifier(Modifier::REVERSED | Modifier::BOLD)),
                                Span::raw(format!("  {}  wants to run{more}", c.session))]));
     let inner = block.inner(r);
     f.render_widget(block, r);
     let mut lines = vec![Line::styled(summary, Style::new().fg(DIM))];
     if !c.warn.is_empty() {
-        lines.push(Line::styled(format!("⚠ {}", c.warn), Style::new().fg(Color::Red).add_modifier(Modifier::BOLD)));
+        lines.push(Line::styled(format!("! {}", c.warn), Style::new().fg(Color::Red).add_modifier(Modifier::BOLD)));
     }
     lines.push(Line::raw(""));
     lines.extend(detail.into_iter().take(body_h as usize));

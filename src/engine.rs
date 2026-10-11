@@ -67,6 +67,23 @@ fn turn(hub: &Arc<Hub>, m: &Arc<Member>, user: &str) -> Result<String, Error> {
     let mut stops = 0; // stop-hook refusals this turn, capped so a broken hook can't loop forever
     loop {
         compact(hub, m, false)?;
+        // what teammates' agents just changed, before this session builds on stale ideas
+        // the files this session has looked at or changed get full notes, others a headline
+        let seen: Vec<String> = lock(&m.msgs).iter().filter_map(|x| x["key"].as_str())
+            .filter_map(|k| k.split_once(':')).filter(|(t, _)| matches!(*t, "read_file" | "edit_file" | "write_file"))
+            .map(|(_, p)| p.to_string()).collect();
+        let notes = crate::team::notes_for(&m.name, &m.cwd(), &seen);
+        if !notes.is_empty() {
+            hub.emit(&m.name, Event::Notice(format!("{} teammate change{} noted", notes.len(), if notes.len() == 1 { "" } else { "s" })));
+            m.push(json!({"role": "user", "content": format!(
+                "[team] Teammates changed code in this project. If your work relies on it, adapt. This is background, not a request: don't mention it unless it matters to what you're asked.\n\n{}",
+                notes.join("\n\n"))}));
+        }
+        // answers to questions this session sent teammates' agents while it kept working
+        for a in crate::team::answers_for(&m.name) {
+            hub.emit(&m.name, Event::Notice("teammate's answer arrived".into()));
+            m.push(json!({"role": "user", "content": a}));
+        }
         let (snapshot, schemas) = (lock(&m.msgs).clone(), hub.visible_tools(m));
         let msg = call(hub, m, &snapshot, &schemas, false)?;
         m.push(msg.clone());
@@ -272,6 +289,114 @@ Reply with the words only.\n\nRequest: {req}");
     (!role.is_empty()).then_some(role)
 }
 
+/// After a quiet call outside a turn: call() marked the session working.
+fn settle(hub: &Arc<Hub>, m: &Arc<Member>) {
+    if !lock(&m.ctl).running {
+        *lock(&m.status) = "idle";
+        hub.changed();
+    }
+}
+
+/// Answer a teammate agent's question from a read-only copy of this session: everything it
+/// knows, plus a few read-only lookups. Nothing is added to the session itself; the owner pays.
+/// Returns (answer, names the answer promises).
+pub fn answer_question(hub: &Arc<Hub>, m: &Arc<Member>, who: &str, question: &str) -> (String, Vec<String>) {
+    const LOOKS: usize = 8;
+    let mut msgs = lock(&m.msgs).clone();
+    repair(&mut msgs); // it may be mid-turn: close any open tool calls in the copy
+    msgs.push(json!({"role": "user", "content": format!("[team question from {who}, a teammate's agent] {question}\n\n\
+Answer from what you know about your own work in this session. If you need to, look at the code with the read-only tools \
+(at most {LOOKS} calls); you can't change anything now and nothing you do here enters your own session. Be short and concrete: names, \
+signatures, what's changing and when. If you don't know, or someone else owns it, say so and name them if you can. \
+End with one line 'RELIED ON: <comma-separated function, type or field names your answer promises>' or 'RELIED ON: none'.")}));
+    let schemas: Vec<Value> = lock(&m.set).tools.iter()
+        .filter(|t| matches!(t["function"]["name"].as_str(), Some("read_file" | "grep" | "find_references"))).cloned().collect();
+    let mut cwd = m.cwd();
+    let mut text = String::new();
+    for round in 0..=LOOKS {
+        if round == LOOKS {
+            msgs.push(json!({"role": "user", "content": "[harness] No more lookups: answer now with what you have."}));
+        }
+        let msg = match call(hub, m, &msgs, &schemas, true) {
+            Ok(x) => x,
+            Err(e) => { text = format!("(couldn't answer: {e})"); break }
+        };
+        msgs.push(msg.clone());
+        let calls = msg["tool_calls"].as_array().cloned().unwrap_or_default();
+        if calls.is_empty() || round == LOOKS {
+            text = content(&msg).to_string();
+            break;
+        }
+        for c in calls {
+            let name = c["function"]["name"].as_str().unwrap_or("").to_string();
+            let args = parse_args(&c["function"]["arguments"]);
+            let out = if schemas.iter().any(|s| s["function"]["name"] == name.as_str()) && read_only(hub, &name, &args) {
+                tools::call(&name, &args, &hub.cfg, &mut cwd, &hub.limits(m))
+            } else {
+                format!("error: {name} isn't available here: read_file, grep and find_references only")
+            };
+            msgs.push(json!({"role": "tool", "tool_name": name, "content": out}));
+        }
+    }
+    settle(hub, m);
+    let (text, relied) = split_relied(&text);
+    (if text.is_empty() { "(no answer)".into() } else { text }, relied)
+}
+
+/// "… RELIED ON: get_user, `UserDto.name`, the schema" -> the answer without it, and the code
+/// names it lists (prose like "the schema" dropped). Models put the line anywhere.
+fn split_relied(text: &str) -> (String, Vec<String>) {
+    let Some(i) = text.rfind("RELIED ON:") else { return (text.trim().to_string(), vec![]) };
+    let names = text[i + "RELIED ON:".len()..].lines().next().unwrap_or("").split(',')
+        .map(|x| x.trim().trim_matches(|c| c == '`' || c == '.' || c == '*').trim_end_matches("()"))
+        .map(|x| x.rsplit('.').next().unwrap_or(x).to_string())
+        .filter(|x| x.len() > 1 && x != "none" && x.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+                && x.chars().all(|c| c.is_alphanumeric() || c == '_'))
+        .collect();
+    let rest = text[i..].split_once('\n').map(|(_, r)| r).unwrap_or("");
+    (format!("{}\n{rest}", &text[..i]).trim().to_string(), names)
+}
+
+#[cfg(test)]
+mod relied_tests {
+    #[test]
+    fn relied_on_anywhere() {
+        let (t, n) = super::split_relied("It won't change. RELIED ON: price_with_tax, function signatures");
+        assert_eq!((t.as_str(), n), ("It won't change.", vec!["price_with_tax".to_string()]));
+        let (t, n) = super::split_relied("Yes.\nRELIED ON: `get_user()`, UserDto.full_name\n");
+        assert_eq!((t.as_str(), n), ("Yes.", vec!["get_user".to_string(), "full_name".to_string()]));
+        assert_eq!(super::split_relied("No idea.\nRELIED ON: none").1, Vec::<String>::new());
+        assert_eq!(super::split_relied("plain").0, "plain");
+    }
+}
+
+/// Does this change to `func` break what a teammate counts on? Some(reason) if it does. When the
+/// check itself fails, the edit goes ahead: a promise mustn't block work on a flaky call.
+fn breaks(hub: &Arc<Hub>, m: &Arc<Member>, func: &str, promise: &str, before: &str, after: &str) -> Option<String> {
+    let prompt = format!("A teammate's code counts on this staying true about `{func}`:\n\"{promise}\"\n\n\
+Before the change:\n```\n{before}\n```\n\nAfter the change:\n```\n{after}\n```\n\n\
+Does the change break that? Only count real differences in behaviour or signature that the teammate's statement depends on; \
+refactors, renamed locals, comments and added optional behaviour don't break it. Reply with exactly one line: KEEPS, or BREAKS: <why, in one sentence>.");
+    let r = call(hub, m, &[json!({"role": "user", "content": prompt})], &[], true);
+    let text = content(&r.ok()?).to_string();
+    let line = text.lines().map(str::trim).find(|l| l.starts_with("BREAKS") || l.starts_with("KEEPS"))?;
+    line.strip_prefix("BREAKS").map(|w| w.trim_start_matches([':', ' ']).trim().to_string()).map(|w| if w.is_empty() { "it changes what they rely on".into() } else { w })
+}
+
+/// The fact sheet's "decided" and "next" lines after a finished task, from one quiet call.
+pub fn sheet(hub: &Arc<Hub>, m: &Arc<Member>, request: &str, result: &str) -> Option<(String, String)> {
+    let clip = |s: &str| s.chars().take(2000).collect::<String>();
+    let prompt = format!("Teammates working on the same project read a short fact sheet about this session. From the task and \
+its result below, write exactly two lines and nothing else:\nDECIDED: <the one decision teammates should know (a name, an API shape, \
+an approach), or none>\nNEXT: <what this session is likely to do next, or none>\n\nTask: {}\n\nResult: {}", clip(request), clip(result));
+    let r = call(hub, m, &[json!({"role": "user", "content": prompt})], &[], true);
+    settle(hub, m);
+    let text = content(&r.ok()?).to_string();
+    let get = |k: &str| text.lines().find_map(|l| l.trim().strip_prefix(k)).map(|x| x.trim().to_string())
+        .filter(|x| !x.is_empty() && x.to_lowercase() != "none").unwrap_or_default();
+    Some((get("DECIDED:"), get("NEXT:")))
+}
+
 /// One model call under the shared model lock, streaming tokens as events.
 /// `quiet` calls (summaries) stream nothing and leave the token counts alone.
 /// One model call. Local models take turns on the GPU, in arrival order; cloud models
@@ -418,6 +543,10 @@ fn dispatch(hub: &Arc<Hub>, m: &Arc<Member>, name: &str, args: &Value) -> String
     if name == "todo" {
         return todo(&m.name, &args);
     }
+    if name == "ask_team" {
+        return crate::team::ask_team(&m.name, &m.cwd(), args["question"].as_str().unwrap_or(""),
+                                     args["to"].as_str().unwrap_or(""), args["deep"].as_bool().unwrap_or(false));
+    }
     if hub.mode_name() == "plan" && (tools::risky(name, &args, &hub.cfg) || matches!(name, "remember" | "send_message" | "spawn")) {
         return "error: plan mode is read-only. Finish exploring, then reply with a numbered plan; the user switches mode (Shift+Tab) to let you carry it out.".into();
     }
@@ -429,12 +558,35 @@ fn dispatch(hub: &Arc<Hub>, m: &Arc<Member>, name: &str, args: &Value) -> String
     if let Some(err) = hub.claim_file(&m.name, name, &args, &cwd) {
         return err;
     }
+    // a teammate is changing the same function right now: wait, before even asking the user
+    let touched: Vec<crate::team::Touched> = tools::preview(&cwd, name, &args).into_iter()
+        .filter_map(|(full, after)| crate::team::touched(&cwd, &full, &after)).collect();
+    if let Some((notice, msg)) = touched.iter().find_map(|t| crate::team::check_edit(&m.name, t)) {
+        hub.emit(&m.name, Event::Notice(notice));
+        return msg;
+    }
+    // behaviour promises teammates hold on these functions: a quick model check, paid by the editor
+    for t in &touched {
+        for (who, func, promise, before, after) in crate::team::promises_at_risk(&m.name, t) {
+            hub.emit(&m.name, Event::Notice(format!("checking the edit against what {who} counts on in {func}")));
+            if let Some(why) = breaks(hub, m, &func, &promise, &before, &after) {
+                let (notice, msg) = crate::team::promise_held(t, &who, &func, &promise, &why);
+                hub.emit(&m.name, Event::Notice(notice));
+                return msg;
+            }
+        }
+    }
     if tools::risky(name, &args, &hub.cfg) && !allowed(&lock(&m.set).allow, name, &args)
         && !hub.confirm(m, name, &args) {
         return "denied by user".into();
     }
     lock(&m.turn).ckpt.snapshot(name, &args, &cwd);
     let mut out = tools::call(name, &args, &hub.cfg, &mut cwd, &hub.limits(m));
+    if !out.starts_with("error") {
+        for t in &touched {
+            crate::team::claim(&m.name, &lock(&m.purpose).clone(), t);
+        }
+    }
     let input = json!({"event": "post_tool", "tool": name, "args": args, "result": out, "session": m.name, "cwd": cwd});
     match hooks::fire(&hub.cfg.hooks, "post_tool", name, &input, &cwd) {
         hooks::Outcome::Pass(s) | hooks::Outcome::Block(s) if !s.is_empty() => out += &format!("\n[hook] {s}"),

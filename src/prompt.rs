@@ -174,6 +174,14 @@ fn commands(cwd: &Path) -> Vec<String> {
             v.push("ruff check .".into());
         }
     }
+    // plain Python tests with no manifest: test_*.py / *_test.py here or in tests/
+    if !v.iter().any(|c| c.starts_with("pytest")) && (has("tests") || std::fs::read_dir(cwd).into_iter().flatten().flatten().any(|e| {
+        let n = e.file_name().to_string_lossy().to_string();
+        n.ends_with(".py") && (n.starts_with("test_") || n.ends_with("_test.py"))
+    })) {
+        let pytest = has("pytest.ini") || has("conftest.py") || read("pyproject.toml").contains("pytest");
+        v.push(if pytest { "pytest" } else if cfg!(windows) { "python -m unittest" } else { "python3 -m unittest" }.into());
+    }
     if has("Makefile") {
         for line in read("Makefile").lines() {
             if let Some(t) = line.split(':').next().filter(|t| matches!(*t, "build" | "test" | "lint" | "check")) {
@@ -245,5 +253,12 @@ mod tests {
         assert!(f.contains("Build and test with: pnpm run build, pnpm test, make test, make lint."), "{f}");
         let _ = std::fs::remove_dir_all(&d);
         assert_eq!(facts(&std::env::temp_dir().join("qh-no-such-dir")), "");
+        // a bare folder of Python files with unittest tests
+        let d = std::env::temp_dir().join(format!("qh-facts-py-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("math_utils.py"), "").unwrap();
+        std::fs::write(d.join("test_math_utils.py"), "").unwrap();
+        assert!(commands(&d)[0].ends_with(" -m unittest"));
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

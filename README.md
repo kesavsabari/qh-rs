@@ -78,7 +78,7 @@ Useful keys and commands:
 | `/model` | switch model |
 | `/undo` · `/diff` | undo the agent's file changes, or see them |
 | `/new name` · `Ctrl+N` | open another agent in a new tab |
-| `Alt+1..9` | switch tabs |
+| `Shift+←/→` · `Alt+1..9` | switch tabs |
 | `/compact` | shrink a long conversation |
 | `/help` | everything else |
 | `Ctrl+Q` | quit |

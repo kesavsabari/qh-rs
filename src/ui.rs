@@ -48,7 +48,7 @@ const HELP: &str = "/new <name> [profile]  new session (Ctrl+N: instant, auto-na
 /tier                  how the context window was sized to your GPU
 /mode [ask|auto-edit|auto|plan] (Shift+Tab)  /role [text]  /think  /tokens  /compact  /clear  /profile [name]
 /docs (guide in your browser)  /update (newest qh)  /undo  /diff  /allow [pattern]  /sessions  /commands (your own /name prompts)  /mcp (servers)
-Alt+1..9 or Alt+←/→ switch · PgUp/PgDn scroll · Ctrl+O open last tool · Ctrl+L log · Esc interrupt · Ctrl+Q quit";
+Shift+←/→ (or Alt+←/→, Alt+1..9) switch tabs · Shift+↑/↓ or PgUp/PgDn scroll · Option+←/→ a word · Ctrl+O open last tool · Ctrl+L log · Esc interrupt · Ctrl+Q quit";
 
 use crate::tools::DANGER;
 
@@ -772,8 +772,8 @@ impl App {
             if k.code == KeyCode::Char(' ') && k.modifiers.contains(Mods::CONTROL) {
                 return self.flip_space();
             }
-            // a session tab: Alt+←/→ leave the map for the sessions
-            if k.modifiers.contains(Mods::ALT) && matches!(k.code, KeyCode::Right | KeyCode::Left) {
+            // a session tab: Shift/Alt+←/→ leave the map for the sessions
+            if k.modifiers.intersects(Mods::ALT | Mods::SHIFT) && matches!(k.code, KeyCode::Right | KeyCode::Left) {
                 self.team_view = None;
                 return;
             }
@@ -847,7 +847,7 @@ impl App {
             }
             return;
         }
-        let (ctrl, alt) = (k.modifiers.contains(Mods::CONTROL), k.modifiers.contains(Mods::ALT));
+        let (ctrl, alt, shift) = (k.modifiers.contains(Mods::CONTROL), k.modifiers.contains(Mods::ALT), k.modifiers.contains(Mods::SHIFT));
         // `/` autocomplete: ↑↓ choose, Tab fills in, Enter runs the highlighted command
         let sugg = self.suggestions();
         if !sugg.is_empty() {
@@ -917,7 +917,16 @@ impl App {
                     self.set_active(&n);
                 }
             }
-            KeyCode::Left | KeyCode::Right if alt || ctrl => self.cycle(if k.code == KeyCode::Left { -1 } else { 1 }),
+            // Shift works everywhere; macOS takes Ctrl+←/→ for desktops and Terminal turns Option+←/→ into Alt+b/f
+            KeyCode::Left | KeyCode::Right if alt || ctrl || shift => self.cycle(if k.code == KeyCode::Left { -1 } else { 1 }),
+            KeyCode::Char('b') if alt => self.cur = word_left(&self.input, self.cur),
+            KeyCode::Char('f') if alt => self.cur = word_right(&self.input, self.cur),
+            // no PgUp/PgDn on a Mac keyboard, and Terminal keeps Fn+↑/↓ for itself
+            KeyCode::Up | KeyCode::Down if shift => {
+                let a = self.active.clone();
+                let v = self.view(&a);
+                v.scroll = if k.code == KeyCode::Up { v.scroll + 3 } else { v.scroll.saturating_sub(3) };
+            }
             KeyCode::PageUp | KeyCode::PageDown if ctrl => self.cycle(if k.code == KeyCode::PageUp { -1 } else { 1 }),
             KeyCode::Esc if self.secret.is_some() => {
                 self.secret = None;
@@ -989,7 +998,8 @@ impl App {
             KeyCode::Right => self.cur = (self.cur + 1).min(self.input.len()),
             KeyCode::Home => self.cur = 0,
             KeyCode::End => self.cur = self.input.len(),
-            KeyCode::Char(c) if !ctrl => {
+            // AltGr arrives as Ctrl+Alt; Alt alone is a shortcut, not text
+            KeyCode::Char(c) if ctrl == alt => {
                 self.input.insert(self.cur, c);
                 self.cur += 1;
             }
@@ -1785,7 +1795,7 @@ $ARGUMENTS is replaced by what you type after the command".into()
         };
         f.render_widget(Paragraph::new(line), input);
         f.set_cursor_position((input.x + 2 + cx as u16, input.y));
-        let hints = "⇧Tab mode  ^N new tab  ^P projects  ^T team  ^O last tool  Esc stop  ^Q quit  ·  /help for all keys";
+        let hints = "⇧Tab mode  ⇧←/→ tabs  ^N new tab  ^G grid  ^P projects  ^T team  Esc stop  ^Q quit  ·  /help for all keys";
         // a newer qh: a standing notice at the right end of the bottom line, over the hints
         let foot = match crate::update::available() {
             Some(v) => {
@@ -2268,6 +2278,22 @@ fn item_lines(it: &Item, w: usize, need: usize) -> Vec<Line<'static>> {
             v
         }
     }
+}
+
+/// The start of the word before `cur`, for Alt+b (Option+← in macOS Terminal).
+fn word_left(input: &[char], cur: usize) -> usize {
+    let mut i = cur.min(input.len());
+    while i > 0 && !input[i - 1].is_alphanumeric() { i -= 1 }
+    while i > 0 && input[i - 1].is_alphanumeric() { i -= 1 }
+    i
+}
+
+/// The end of the word after `cur`, for Alt+f (Option+→).
+fn word_right(input: &[char], cur: usize) -> usize {
+    let mut i = cur.min(input.len());
+    while i < input.len() && !input[i].is_alphanumeric() { i += 1 }
+    while i < input.len() && input[i].is_alphanumeric() { i += 1 }
+    i
 }
 
 /// Word wrap by display width; overlong words are broken hard.

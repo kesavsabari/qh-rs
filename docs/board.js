@@ -91,3 +91,43 @@ document.querySelectorAll(".copy").forEach(btn => {
   }), { threshold: 0.35 });
   document.querySelectorAll(".band").forEach(b => io.observe(b));
 }
+
+// Team reel: play when on screen, light the step that's happening, click a step to jump to it.
+(() => {
+  const v = document.getElementById("team-reel");
+  if (!v) return;
+  // phones get the stacked recording (Alice above Bob), which stays readable when narrow
+  const narrow = matchMedia("(max-width: 760px)").matches;
+  if (narrow) {
+    v.poster = v.dataset.narrowPoster;
+    v.width = 712; v.height = 1322;
+  }
+  v.src = narrow ? v.dataset.narrow : v.dataset.wide;
+  const items = [...document.querySelectorAll(".reel-steps li")];
+  const ts = items.map((li) => parseFloat(li.dataset.t));
+  const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (still) v.controls = true;
+  const tick = () => {
+    const t = v.currentTime, end = v.duration || ts[ts.length - 1] + 10;
+    items.forEach((li, i) => {
+      const a = ts[i], b = i + 1 < ts.length ? ts[i + 1] : end;
+      li.classList.toggle("on", t >= a && t < b);
+      li.classList.toggle("done", t >= b);
+      li.style.setProperty("--p", Math.min(1, Math.max(0, (t - a) / (b - a))).toFixed(3));
+    });
+  };
+  v.addEventListener("timeupdate", tick);
+  let raf;
+  const loop = () => { tick(); raf = requestAnimationFrame(loop); };
+  v.addEventListener("play", () => { cancelAnimationFrame(raf); loop(); });
+  v.addEventListener("pause", () => cancelAnimationFrame(raf));
+  items.forEach((li, i) => li.querySelector("button").addEventListener("click", () => {
+    v.currentTime = ts[i];
+    v.play().catch(() => {});
+  }));
+  if (!still && "IntersectionObserver" in window) {
+    new IntersectionObserver((es) => es.forEach((e) => {
+      if (e.isIntersecting) v.play().catch(() => {}); else v.pause();
+    }), { threshold: 0.4 }).observe(v);
+  }
+})();

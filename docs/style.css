@@ -425,3 +425,29 @@ main > section.faq { max-width: none; }
 html, body { overflow-x: hidden; }
 @supports (overflow-x: clip) { html, body { overflow-x: clip; } }
 img, svg, .dial, .field, figure, pre, table { max-width: 100%; }
+
+/* team reel: the recorded demo, with lamps that follow it */
+.reel { margin: calc(var(--gap) * 1.8) 0 0; }
+.reel-screen { background: #1a1714; border: 1px solid var(--panel-edge); box-shadow: 0 0 0 4px var(--panel-deep), 0 18px 40px -18px rgba(0, 0, 0, .7); }
+.reel-bar { display: flex; align-items: center; gap: 10px; padding: 8px 12px; font: 0.8rem/1.2 var(--type); color: var(--text-soft); border-bottom: 1px solid var(--panel-edge); background: var(--panel-deep); }
+.reel-lamp { width: 9px; height: 9px; border-radius: 50%; background: var(--lamp); box-shadow: 0 0 8px var(--lamp); flex: none; }
+.reel video { display: block; width: 100%; height: auto; }
+.reel figcaption { margin-top: 1.2rem; }
+.reel-steps { list-style: none; margin: .8rem 0 0; padding: 0; counter-reset: step; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 6px; }
+.reel-steps li { counter-increment: step; position: relative; }
+.reel-steps button { all: unset; box-sizing: border-box; cursor: pointer; display: block; width: 100%; padding: 10px 12px 12px 46px; position: relative; color: var(--text-soft); line-height: 1.45; transition: color .3s, background-color .3s; }
+.reel-steps button::before { content: counter(step); position: absolute; left: 10px; top: 9px; width: 24px; height: 24px; display: grid; place-items: center; font: 600 0.8rem/1 var(--type); color: var(--text-soft); background: var(--panel-deep); border: 1px solid var(--panel-edge); border-radius: 50%; transition: background-color .3s, color .3s, box-shadow .3s; }
+.reel-steps button::after { content: ""; position: absolute; left: 46px; right: 12px; bottom: 4px; height: 2px; background: var(--brass); transform-origin: left; transform: scaleX(var(--p, 0)); opacity: 0; transition: opacity .3s; }
+.reel-steps b { color: var(--text); font-weight: 600; }
+.reel-steps li.done button::before { color: var(--ink); background: var(--brass-lo); }
+.reel-steps li.on button { color: var(--text); background: color-mix(in srgb, var(--panel-deep) 70%, transparent); }
+.reel-steps li.on button::before { color: var(--ink); background: var(--lamp); box-shadow: 0 0 10px var(--lamp); }
+.reel-steps li.on button::after { opacity: 1; }
+.reel-steps button:focus-visible { outline: 2px solid var(--brass-hi); outline-offset: 2px; }
+@media (max-width: 1200px) { .reel-steps { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 760px) { .reel-steps { grid-template-columns: 1fr; gap: 2px; } }
+@media (max-width: 640px) {
+  .reel-bar span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .reel-steps button { padding: 8px 8px 10px 42px; font-size: 0.95rem; }
+}
+@media (prefers-reduced-motion: reduce) { .reel-steps button, .reel-steps button::before, .reel-steps button::after { transition: none; } }

@@ -10,7 +10,7 @@
 <meta property="og:image" content="img/qh-grid.webp">
 <link rel="icon" href="img/favicon.svg" type="image/svg+xml">
 <link rel="preload" href="fonts/big-shoulders-display-latin-800-normal.woff2" as="font" type="font/woff2" crossorigin>
-<link rel="stylesheet" href="style.css?v=18">
+<link rel="stylesheet" href="style.css?v=19">
 </head>
 <body>
 <a class="skip" href="#charges">Skip to content</a>
@@ -317,6 +317,7 @@
     <li><strong>Start in one line.</strong> <code>/team create</code> puts the folder on GitHub (private by default, secrets like <code>.env</code> left out) and invites friends by username. They run <code>qh join you/project</code>.</li>
     <li><strong>See the board.</strong> The status bar shows <code>👥 you · alex ● · sam ○ 2h ago</code>; notes appear when someone joins or leaves; <code>/team</code> lists everyone's sessions.</li>
     <li><strong>Read and write.</strong> Open a teammate's session to follow along, or send a message into it. It runs on their machine only after they allow it, and they approve every edit it leads to.</li>
+    <li><strong>Roles per person.</strong> A viewer only watches, a member's messages wait for your yes, a trusted teammate's go straight in. Your own qh enforces it, on your machine.</li>
     <li><strong>Encrypted.</strong> Sessions, messages and file names are sealed with a key only the team holds, so even a public repo shows outsiders nothing but noise.</li>
     <li><strong>Picks up where you left off.</strong> Next day, <code>qh</code> in the project reconnects by itself.</li>
   </ul>
@@ -327,11 +328,32 @@
     <div><dt><code>/team create</code></dt><dd>share this project, invite friends</dd></div>
     <div><dt><code>qh join</code></dt><dd>join a friend's project</dd></div>
     <div><dt><code>/team</code></dt><dd>who's online, read or write sessions</dd></div>
+    <div><dt><code>/team invite</code></dt><dd>add a friend by GitHub username</dd></div>
+    <div><dt><code>/team role</code></dt><dd>viewer, member or trusted, per person</dd></div>
     <div><dt><code>/team private</code></dt><dd>or <code>public</code>: who sees the code</dd></div>
     <div><dt><code>/team off</code></dt><dd>stop sharing</dd></div>
   </dl>
   </aside>
   </div>
+  <figure class="reel" aria-labelledby="reel-title">
+    <div class="reel-screen">
+      <div class="reel-bar"><span class="reel-lamp" aria-hidden="true"></span><span>two people, one project · recorded live, waits sped up</span></div>
+      <video id="team-reel" muted loop playsinline preload="none" poster="img/team-demo.webp" width="1464" height="830"
+             data-wide="img/team-demo.mp4" data-narrow="img/team-demo-phone.mp4" data-narrow-poster="img/team-demo-phone.webp"
+             aria-label="Recording: Alice and Bob each run qh on one project; Bob reads Alice's session, sends a message she allows, then she makes him a viewer and his next message is refused."></video>
+    </div>
+    <figcaption>
+      <h3 id="reel-title" class="sub">Alice and Bob, on the line</h3>
+      <ol class="reel-steps">
+        <li data-t="2"><button type="button"><b>Both go online.</b> <code>/team on</code>: Bob is let in and gets the team key.</button></li>
+        <li data-t="8.9"><button type="button"><b>Alice works.</b> She asks her agent what the repo is.</button></li>
+        <li data-t="16.5"><button type="button"><b>Bob reads along.</b> <code>/team open alice main</code> shows her session.</button></li>
+        <li data-t="22.1"><button type="button"><b>Bob sends work in.</b> His message waits for Alice.</button></li>
+        <li data-t="27.6"><button type="button"><b>Alice allows it.</b> It runs on her machine, with her model.</button></li>
+        <li data-t="36.4"><button type="button"><b>Alice makes Bob a viewer.</b> His next message is refused.</button></li>
+      </ol>
+    </figcaption>
+  </figure>
 </section>
 
 <div class="band band-brass"><p class="band-line">Your team, on one board. No server.</p><div class="band-side"><span class="band-keys"><code>/team</code></span><span>who's online, and what they're doing</span></div></div>
@@ -377,6 +399,6 @@
   <p>MIT licensed. <a href="docs/">Docs</a> · <a href="https://github.com/kesavsabari/qh-rs">Source on GitHub</a>.</p>
 </footer>
 
-<script src="board.js?v=16" defer></script>
+<script src="board.js?v=17" defer></script>
 </body>
 </html>

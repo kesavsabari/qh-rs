@@ -1,6 +1,10 @@
 # Changelog
 
+Each version starts with a one-line summary; the website shows it once the version is no longer recent.
+
 ## 0.1.6 — 2026-10-11
+
+The browser no longer gets stuck, a quieter screen, and keys that work on a Mac.
 
 - **The browser no longer gets stuck.** If qh lost track of its Chrome, every later start opened
   a blank tab in it and failed with "browser did not start". qh now reconnects to its own
@@ -17,6 +21,8 @@
   a Mac keyboard). Alt+←/→ and Alt+1..9 still work where the terminal sends them.
 
 ## 0.1.5 — 2026-10-11
+
+Failed edits point at the right lines, no going in circles, rate limits handled, and a browser that reports what's broken.
 
 - **Failed edits point at the right lines.** When an edit's text isn't in the file, the error
   shows the closest lines with their numbers, so the model can copy them on its next try. When
@@ -40,6 +46,8 @@
 - Tool descriptions state their limits: the 120 s command timeout and cut-off output.
 
 ## 0.1.4 — 2026-10-11
+
+Self-updates from signed releases, ChatGPT Go plans, and direct encrypted lines between teammates.
 
 - `qh update` and `/update`, with signed releases and a daily update check. Run `qh --version`
   to see which version you have.

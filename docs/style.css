@@ -451,3 +451,21 @@ img, svg, .dial, .field, figure, pre, table { max-width: 100%; }
   .reel-steps button { padding: 8px 8px 10px 42px; font-size: 0.95rem; }
 }
 @media (prefers-reduced-motion: reduce) { .reel-steps button, .reel-steps button::before, .reel-steps button::after { transition: none; } }
+
+/* update history, filled from CHANGELOG.md by updates.js: newest in full, older ones shorter */
+.upd { border-left: 4px solid var(--brass); padding: 2px 0 2px 18px; margin: 0 0 24px; max-width: 76ch; }
+.upd .upd-v { display: flex; align-items: baseline; gap: 12px; margin: 0 0 10px; font: 800 1.7rem/1 var(--display); letter-spacing: .02em; text-transform: none; }
+.upd .upd-v span { background: var(--strip); color: var(--ink); padding: 3px 10px 4px; border-radius: 3px; }
+.upd .upd-v time { font: 400 .95rem/1 var(--type); color: var(--text-soft); }
+.upd ul { margin: 0; padding-left: 1.1em; }
+.upd li { margin: 0 0 8px; color: var(--text); }
+.upd p { margin: 0; color: var(--text); }
+.upd-full .upd-v span { box-shadow: 0 0 0 2px var(--lamp); }
+.upd-brief { border-left-color: var(--brass-lo); }
+.upd-brief .upd-v { font-size: 1.35rem; }
+.upd-brief .upd-v span { background: var(--panel-edge); color: var(--strip); }
+.upd-line { border-left-color: var(--panel-edge); margin-bottom: 14px; }
+.upd-line .upd-v { font-size: 1.1rem; margin-bottom: 6px; }
+.upd-line .upd-v span { background: transparent; color: var(--strip); padding: 0; }
+.upd-line p { color: var(--text-soft); }
+.news .upd-box { margin-top: 1.6rem; }

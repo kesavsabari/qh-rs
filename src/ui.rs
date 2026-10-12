@@ -2422,7 +2422,7 @@ then it's `git push -u origin {branch}` and `gh pr create --fill`.");
                 transcripts.insert(m.name.clone(), rows.into());
             }
             // paths relative to the project, so the same file matches on everyone's machine
-            let files: Vec<String> = hub.claimed_files().into_iter().filter(|f| std::path::Path::new(f).starts_with(&root))
+            let files: Vec<String> = hub.claimed_files().into_iter().filter(|f| crate::teamview::in_project(std::path::Path::new(f), &root))
                 .map(|f| crate::teamview::rel(&root, &f)).collect();
             serde_json::json!({"sessions": sessions, "files": files, "transcripts": transcripts})
         });

@@ -17,7 +17,34 @@ use std::time::{Duration, Instant};
 /// `f` relative to the project root, with forward slashes.
 pub fn rel(root: &Path, f: &str) -> String {
     let p = Path::new(f);
-    p.strip_prefix(root).unwrap_or(p).to_string_lossy().replace('\\', "/")
+    match p.strip_prefix(root) {
+        Ok(r) => r.to_path_buf(),
+        Err(_) => strip_same(&canon(p), &canon(root)).unwrap_or_else(|| p.to_path_buf()),
+    }.to_string_lossy().replace('\\', "/")
+}
+
+/// The real path, so `~/downloads/x` typed on a Mac and git's `~/Downloads/x` compare equal.
+fn canon(p: &Path) -> std::path::PathBuf {
+    // a file not written yet: its nearest existing folder, then the rest as given
+    let c = p.ancestors().find_map(|a| std::fs::canonicalize(a).ok().map(|c| match p.strip_prefix(a) {
+            Ok(rest) if !rest.as_os_str().is_empty() => c.join(rest),
+            _ => c,
+        }))
+        .unwrap_or_else(|| p.to_path_buf());
+    // Windows hands back \\?\C:\…, git says C:/…
+    match c.to_str().and_then(|s| s.strip_prefix(r"\\?\")) { Some(s) => s.into(), None => c }
+}
+
+/// `p` below `root`, the rest of it; letter case is ignored where the disk ignores it (macOS, Windows).
+fn strip_same(p: &Path, root: &Path) -> Option<std::path::PathBuf> {
+    let same = |a: &std::ffi::OsStr, b: &std::ffi::OsStr| if cfg!(any(target_os = "macos", windows)) {
+        a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
+    } else { a == b };
+    let mut pc = p.components();
+    for rc in root.components() {
+        if !same(pc.next()?.as_os_str(), rc.as_os_str()) { return None }
+    }
+    Some(pc.as_path().to_path_buf())
 }
 
 /// The project a folder belongs to: its git root, with a task folder (`<name>-tasks/<n>`)
@@ -45,6 +72,7 @@ pub fn tasks_dir(root: &Path) -> std::path::PathBuf {
 /// Whether `dir` belongs to the project at `root` (the project itself or one of its task folders).
 pub fn in_project(dir: &Path, root: &Path) -> bool {
     dir.starts_with(root) || dir.starts_with(tasks_dir(root))
+        || [root.to_path_buf(), tasks_dir(root)].iter().any(|r| strip_same(&canon(dir), &canon(r)).is_some())
 }
 
 /// The git branch checked out at `dir` (or a short commit id), read from .git without running git.
@@ -1012,5 +1040,26 @@ mod group_tests {
         let order: Vec<(&str, String)> = v.iter().map(|p| (p.who.as_str(), code_area(p))).collect();
         assert_eq!(order, [("", "ui/".into()), ("cal", "api/".into()), ("zed", "api/".into()), ("dee", "no code yet".into()),
                            ("bea", "ui/".into()), ("amy", "away".into())]);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod path_tests {
+    use super::*;
+
+    #[test]
+    fn a_session_opened_by_another_spelling_of_the_folder_is_in_the_project() {
+        let d = std::env::temp_dir().join(format!("qh-tv-{}", std::process::id()));
+        let root = d.join("Downloads/team");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::os::unix::fs::symlink(d.join("Downloads"), d.join("downloads-link")).unwrap();
+        let typed = d.join("downloads-link/team/src");
+        assert!(in_project(&typed, &root));
+        assert_eq!(rel(&root, &typed.join("a.rs").to_string_lossy()), "src/a.rs");
+        assert!(!in_project(&d.join("Downloads"), &root));
+        if cfg!(target_os = "macos") {
+            assert!(in_project(&d.join("downloads/team"), &root), "the Mac disk ignores case");
+        }
+        std::fs::remove_dir_all(&d).ok();
     }
 }

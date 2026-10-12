@@ -593,7 +593,13 @@ session tests). Messages from other sessions start with [from <name>]. qh saves 
                 }
             }
             *lock(&m.status) = "idle";
-            lock(&m.ctl).running = false;
+            // a teammate's answer queued during this turn's last model call would otherwise wait
+            // for the user's next message: take it now (under ctl, so none slips in between)
+            let late = { let mut c = lock(&m.ctl); c.running = false; crate::team::answers_for(&m.name) };
+            for a in late {
+                hub.emit(&m.name, Event::Notice("teammate's answer arrived".into()));
+                hub.send(&m.name, &a, "user", 0, None);
+            }
             hub.changed();
             hub.next(&m);
         }).expect("spawn turn thread");

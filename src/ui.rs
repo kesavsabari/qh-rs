@@ -2405,10 +2405,14 @@ then it's `git push -u origin {branch}` and `gh pr create --fill`.");
             }),
             answered: Box::new(move |session: &str, text: &str| {
                 // busy: it reads the answer before its next model call; idle: it's woken with it
-                match h6.get(session) {
-                    Some(m) if lock(&m.ctl).running => crate::team::queue_answer(session, text),
-                    Some(_) => { h6.send(session, text, "user", 0, None); }
-                    None => {}
+                // (ctl held while queueing: the turn's end takes the queue under the same lock)
+                let Some(m) = h6.get(session) else { return };
+                let c = lock(&m.ctl);
+                if c.running {
+                    crate::team::queue_answer(session, text);
+                } else {
+                    drop(c);
+                    h6.send(session, text, "user", 0, None);
                 }
             }),
             say: Box::new(move |s: String| h1.emit(&a1, Event::Notice(s))),

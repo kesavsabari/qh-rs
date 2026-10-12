@@ -12,6 +12,7 @@ mod mcp;
 mod notify;
 mod hooks;
 mod hub;
+mod image;
 mod link;
 mod prompt;
 mod providers;

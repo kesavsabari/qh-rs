@@ -190,7 +190,7 @@ fn to_openai(messages: &[Value]) -> Vec<Value> {
 fn image_parts(text: &str, imgs: &[Value]) -> Value {
     let mut parts = vec![json!({"type": "text", "text": text})];
     for i in imgs.iter().filter_map(|i| i.as_str()) {
-        parts.push(json!({"type": "image_url", "image_url": {"url": format!("data:image/png;base64,{i}")}}));
+        parts.push(json!({"type": "image_url", "image_url": {"url": format!("data:{};base64,{i}", crate::image::mime(i))}}));
     }
     Value::from(parts)
 }
@@ -276,7 +276,7 @@ fn to_anthropic(messages: &[Value]) -> (String, Vec<Value>) {
     };
     let images = |m: &Value| -> Vec<Value> {
         m["images"].as_array().into_iter().flatten().filter_map(|i| i.as_str()).map(|i| json!({
-            "type": "image", "source": {"type": "base64", "media_type": "image/png", "data": i}})).collect()
+            "type": "image", "source": {"type": "base64", "media_type": crate::image::mime(i), "data": i}})).collect()
     };
     for (n, m) in messages.iter().enumerate() {
         match s(m, "role") {
@@ -525,4 +525,34 @@ pub fn cloud_ctx(host: &str, model: &str, fetch: bool) -> Option<usize> {
         .map(|n| n as usize);
     cache.lock().unwrap().insert(model.to_string(), v);
     v
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+
+    fn user_with(img: &str) -> Vec<Value> {
+        vec![json!({"role": "system", "content": "sys"}),
+             json!({"role": "user", "content": "what is this?", "images": [img]})]
+    }
+
+    #[test]
+    fn openai_sends_images_as_data_urls() {
+        let jpg = crate::image::b64(b"\xff\xd8\xff\xe0abc");
+        let out = to_openai(&user_with(&jpg));
+        let c = &out[1]["content"];
+        assert_eq!(c[0], json!({"type": "text", "text": "what is this?"}));
+        assert_eq!(c[1]["type"], "image_url");
+        assert_eq!(c[1]["image_url"]["url"], format!("data:image/jpeg;base64,{jpg}"));
+    }
+
+    #[test]
+    fn anthropic_sends_image_blocks() {
+        let png = crate::image::b64(b"\x89PNG\r\n\x1a\n");
+        let (system, out) = to_anthropic(&user_with(&png));
+        assert_eq!(system, "sys");
+        let b = &out[0]["content"];
+        assert_eq!(b[0]["type"], "text");
+        assert_eq!(b[1], json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": png}}));
+    }
 }

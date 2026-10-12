@@ -15,7 +15,12 @@ const MAX_ERRORS: usize = 5;
 
 /// Runs a turn and returns the final assistant text.
 pub fn run(hub: &Arc<Hub>, m: &Arc<Member>, user: String) -> String {
-    m.push(json!({"role": "user", "content": user.clone()}));
+    let mut msg = json!({"role": "user", "content": user.clone()});
+    let imgs = crate::image::take(&m.name);
+    if !imgs.is_empty() {
+        msg["images"] = imgs.into();
+    }
+    m.push(msg);
     let fin = turn(hub, m, &user).unwrap_or_else(|e| {
         let e = if matches!(e, Error::Cancelled) { "interrupted".to_string() } else { format!("error: {e}") };
         hub.emit(&m.name, Event::Notice(e.clone()));

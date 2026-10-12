@@ -1519,10 +1519,18 @@ mod tests {
     }
 
     /// A data packet from `from` to its first teammate, as it would send it (but handed to us).
+    /// Waits for `from`'s own half of the line: callers only wait for the other side's Up, and on a
+    /// slow machine `from` may not have its session yet (nothing to seal with).
     fn sealed(from: &Link, frame: &[u8]) -> Vec<u8> {
-        let mut sends = vec![];
-        seal_on(&mut lock(&from.inner), 0, Some(Path::Direct("127.0.0.1:9".parse().unwrap())), frame, &mut sends);
-        sends.remove(0).1
+        let t0 = Instant::now();
+        loop {
+            let mut sends = vec![];
+            seal_on(&mut lock(&from.inner), 0, Some(Path::Direct("127.0.0.1:9".parse().unwrap())), frame, &mut sends);
+            if !sends.is_empty() || t0.elapsed() > Duration::from_secs(5) {
+                return sends.remove(0).1;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]

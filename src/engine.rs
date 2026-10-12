@@ -548,9 +548,15 @@ fn call_locked(hub: &Arc<Hub>, m: &Arc<Member>, msgs: &[Value], schemas: &[Value
         }
     }
     // every call costs, quiet ones (summaries, role names) included
-    if let Some(info) = crate::providers::info(&provider, &model) {
-        let out = r.total.saturating_sub(r.prompt);
-        lock(&m.turn).cost += (r.prompt as f64 * info.price_in + out as f64 * info.price_out) / 1e6;
+    let (price, paid) = (crate::usage::price(&provider, &model), crate::usage::paid(&provider, &model));
+    {
+        let mut t = lock(&m.turn);
+        t.usage.add(r.usage, price, paid);
+        if r.plan_pct.is_some() { t.plan_pct = r.plan_pct }
+    }
+    let spent = { let mut s = lock(&hub.spent); s.add(r.usage, price, paid); s.cost };
+    if let Some(w) = hub.cost_warn.check(spent, cfg.cost_warn) {
+        hub.emit(&m.name, Event::Notice(w));
     }
     Ok(r.msg)
 }

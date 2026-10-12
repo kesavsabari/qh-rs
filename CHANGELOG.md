@@ -2,6 +2,14 @@
 
 Each version starts with a one-line summary; the website shows it once the version is no longer recent.
 
+## 0.1.9 — unreleased
+
+- **See what a session costs.** qh reads each provider's real token counts (cached ones
+  included) and prices them from OpenRouter's model list or a short built-in table for OpenAI and
+  Anthropic; unknown models show tokens only. The status bar shows `· $0.42` on API keys and
+  `· plan 37%` on the ChatGPT plan when it says; `/tokens` breaks it down per tab and session.
+  `cost_warn` (default $2, 0 = off) warns once when a session passes it.
+
 ## 0.1.8 — 2026-10-12
 
 Teammates connect from any network, cloud models get their full window, and edits show as diffs.

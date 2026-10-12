@@ -567,6 +567,9 @@ pub fn chat(model: &str, messages: &[Value], tools: &[Value], think: &str,
             }
             ureq::Error::Transport(t) => Error::Connect(t.to_string()),
         })?;
+    // the Codex backend reports the plan's 5-hour window use in headers (as the Codex CLI reads them)
+    let plan_pct = r.header("x-codex-primary-used-percent").and_then(|s| s.trim().parse::<f64>().ok());
+    let mut usage = crate::usage::Calls::default();
     let (mut content, mut calls, mut prompt, mut total, mut done) = (String::new(), vec![], 0, 0, false);
     for line in BufReader::new(r.into_reader()).lines() {
         let line = line.map_err(|e| Error::Other(e.to_string()))?;
@@ -595,6 +598,7 @@ pub fn chat(model: &str, messages: &[Value], tools: &[Value], think: &str,
                 let u = &ev["response"]["usage"];
                 prompt = u["input_tokens"].as_u64().unwrap_or(0);
                 total = u["total_tokens"].as_u64().unwrap_or(prompt + u["output_tokens"].as_u64().unwrap_or(0));
+                usage = crate::usage::responses(u);
                 done = true;
             }
             "response.failed" | "response.incomplete" | "error" => {
@@ -619,7 +623,7 @@ pub fn chat(model: &str, messages: &[Value], tools: &[Value], think: &str,
     if !calls.is_empty() {
         msg["tool_calls"] = calls.into();
     }
-    Ok(Reply { msg, prompt, total })
+    Ok(Reply { msg, prompt, total, usage, plan_pct })
 }
 
 #[cfg(test)]

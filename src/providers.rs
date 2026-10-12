@@ -32,6 +32,7 @@ pub struct ModelInfo {
     pub ctx: Option<usize>,
     pub price_in: f64, // $ per million tokens; 0 = free or unknown
     pub price_out: f64,
+    pub price_cached: f64, // $ per million cache-read tokens; 0 = same as input
 }
 
 // name, kind, base url, key env var, local
@@ -271,6 +272,7 @@ fn fetch_models(p: &Provider) -> Result<Vec<ModelInfo>, String> {
                 Some(ModelInfo {
                     id: m["id"].as_str()?.into(), ctx,
                     price_in: num(&m["pricing"]["prompt"]) * 1e6, price_out: num(&m["pricing"]["completion"]) * 1e6,
+                    price_cached: num(&m["pricing"]["input_cache_read"]) * 1e6,
                 })
             }).collect())
         }
@@ -286,6 +288,11 @@ fn known_models(provider: &str) -> Option<&'static [&'static str]> {
         "minimax" => Some(&["MiniMax-M3"]),
         _ => None,
     }
+}
+
+/// A coding-plan subscription: billed monthly, not per token.
+pub fn is_plan(provider: &str) -> bool {
+    known_models(provider).is_some()
 }
 
 /// A provider's models, fetched once per process.

@@ -33,6 +33,7 @@ mod tier;
 mod tools;
 mod ui;
 mod update;
+mod usage;
 
 use hub::{lock, Event, Hub};
 use std::io::Write;

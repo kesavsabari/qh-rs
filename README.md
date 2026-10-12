@@ -100,6 +100,7 @@ All of these are optional.
 
 ```toml
 mode = "auto-edit"
+cost_warn = 2.00  # warn once when API-key spend passes $2 this session (0 = off); /tokens shows it
 
 # run a command after every edit; exit code 2 from a pre_tool hook blocks the action
 [[hooks]]

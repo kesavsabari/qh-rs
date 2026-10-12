@@ -2,6 +2,12 @@
 
 Each version starts with a one-line summary; the website shows it once the version is no longer recent.
 
+## 0.1.9 — unreleased
+
+- **Answers render as markdown.** Headings, bold, italic, `inline code`, lists that wrap under
+  their text, quotes, tables with aligned columns, and code blocks in a frame with keywords,
+  strings and comments coloured. A reply still streaming renders as it arrives.
+
 ## 0.1.8 — 2026-10-12
 
 Teammates connect from any network, cloud models get their full window, and edits show as diffs.

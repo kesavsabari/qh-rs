@@ -2299,33 +2299,17 @@ fn item_lines(it: &Item, w: usize, need: usize) -> Vec<Line<'static>> {
             v
         }
         Item::Reply(s) => {
-            let fence = |l: &str| l.trim_start().starts_with("```");
-            // walking backwards, the state after the last line is the parity of all fences
-            let mut code = s.lines().filter(|l| fence(l)).count() % 2 == 1;
-            let (mut rows, mut n) = (vec![], 0);
-            for l in s.lines().rev() {
-                if n >= need {
+            // whole blocks from the end until the screen is full: wrapping is the costly part
+            let mut rows = vec![];
+            for b in md_blocks(s).into_iter().rev() {
+                if rows.len() >= need {
                     break;
                 }
-                if fence(l) {
-                    code = !code;
-                    rows.push(vec![Line::from(Span::styled(l.to_string(), Style::new().fg(DIM)))]);
-                    n += 1;
-                    continue;
-                }
-                let st = if code {
-                    Style::new().fg(Color::Yellow)
-                } else if l.starts_with('#') {
-                    Style::new().add_modifier(Modifier::BOLD)
-                } else {
-                    Style::new()
-                };
-                let l = if code { l.to_string() } else { l.replace("**", "") };
-                let ls = styled(&l, st, 0);
-                n += ls.len();
-                rows.push(ls);
+                let mut ls = md_block(&b, w);
+                ls.append(&mut rows);
+                rows = ls;
             }
-            rows.into_iter().rev().flatten().collect()
+            rows
         }
         Item::Note(s) => styled(s, Style::new().fg(Color::Blue), 0),
         Item::Cmd(s) => styled(&format!("› {s}"), Style::new().fg(ACCENT), 0),
@@ -2349,6 +2333,240 @@ fn item_lines(it: &Item, w: usize, need: usize) -> Vec<Line<'static>> {
             v
         }
     }
+}
+
+/// A reply cut into what renders as a unit: a fenced code block, a table, or one line.
+enum Md<'a> {
+    Code(&'a str, Vec<&'a str>),
+    Table(Vec<&'a str>),
+    Line(&'a str),
+}
+
+/// Only slices, no wrapping: cheap enough to redo for every streamed token.
+fn md_blocks(s: &str) -> Vec<Md<'_>> {
+    let ls: Vec<&str> = s.lines().collect();
+    let fence = |l: &str| l.trim_start().starts_with("```");
+    let row = |l: &str| l.trim_start().starts_with('|');
+    let rule = |l: &str| row(l) && l.contains('-') && l.chars().all(|c| matches!(c, '|' | '-' | ':' | ' '));
+    let (mut v, mut i) = (vec![], 0);
+    while i < ls.len() {
+        let l = ls[i];
+        if fence(l) {
+            // an unclosed fence is code to the end: the reply is still streaming
+            let end = ls[i + 1..].iter().position(|l| fence(l)).map_or(ls.len(), |p| i + 1 + p);
+            v.push(Md::Code(l.trim_start()[3..].trim(), ls[i + 1..end].to_vec()));
+            i = end + 1;
+        } else if row(l) && ls.get(i + 1).is_some_and(|n| rule(n)) {
+            let end = ls[i..].iter().position(|l| !row(l)).map_or(ls.len(), |p| i + p);
+            v.push(Md::Table(ls[i..end].to_vec()));
+            i = end;
+        } else {
+            v.push(Md::Line(l));
+            i += 1;
+        }
+    }
+    v
+}
+
+fn tw(s: &str) -> usize {
+    s.chars().map(|c| c.width().unwrap_or(0)).sum()
+}
+
+fn md_block(b: &Md, w: usize) -> Vec<Line<'static>> {
+    let dim = Style::new().fg(DIM);
+    let pad = |n: usize| Span::raw(" ".repeat(n));
+    match b {
+        Md::Code(lang, ls) => {
+            let mut v = vec![Line::styled(format!("╭─ {lang}").trim_end().to_string(), dim)];
+            for l in ls {
+                v.extend(fill(code_spans(&clean(l)), w, Span::styled("│ ", dim), Span::styled("│ ", dim), false));
+            }
+            v.push(Line::styled("╰─", dim));
+            v
+        }
+        Md::Table(ls) => {
+            let rows: Vec<Vec<Vec<(String, Style)>>> = ls.iter().enumerate().filter(|(i, _)| *i != 1).map(|(i, l)| {
+                let t = clean(l);
+                let t = t.trim().trim_start_matches('|');
+                let t = t.strip_suffix('|').unwrap_or(t);
+                let st = if i == 0 { Style::new().add_modifier(Modifier::BOLD) } else { Style::new() };
+                t.split('|').map(|c| inline(c.trim(), st)).collect()
+            }).collect();
+            let cw_of = |c: &Vec<(String, Style)>| c.iter().map(|(s, _)| tw(s)).sum::<usize>();
+            let mut cw: Vec<usize> = vec![];
+            for r in &rows {
+                for (i, c) in r.iter().enumerate() {
+                    if i >= cw.len() { cw.push(0) }
+                    cw[i] = cw[i].max(cw_of(c));
+                }
+            }
+            if cw.iter().sum::<usize>() + 3 * cw.len().saturating_sub(1) > w {
+                return ls.iter().flat_map(|l| fill(vec![(clean(l), Style::new())], w, pad(0), pad(0), true)).collect();
+            }
+            let mut v = vec![];
+            for (ri, r) in rows.iter().enumerate() {
+                let mut spans = vec![];
+                for (i, &width) in cw.iter().enumerate() {
+                    if i > 0 { spans.push(Span::styled(" │ ", dim)) }
+                    let c = r.get(i).cloned().unwrap_or_default();
+                    let n = cw_of(&c);
+                    spans.extend(c.into_iter().map(|(s, st)| Span::styled(s, st)));
+                    if i + 1 < cw.len() { spans.push(pad(width - n)) }
+                }
+                v.push(Line::from(spans));
+                if ri == 0 {
+                    let rule: Vec<String> = cw.iter().map(|&n| "─".repeat(n)).collect();
+                    v.push(Line::styled(rule.join("─┼─"), dim));
+                }
+            }
+            v
+        }
+        Md::Line(l) => {
+            let l = clean(l);
+            let t = l.trim_start();
+            let ind = l.len() - t.len();
+            let h = t.chars().take_while(|&c| c == '#').count();
+            let digits = t.chars().take_while(|c| c.is_ascii_digit()).count();
+            if t.is_empty() {
+                vec![Line::raw("")]
+            } else if (1..=6).contains(&h) && t[h..].starts_with(' ') {
+                fill(inline(t[h..].trim(), Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)), w, pad(0), pad(0), true)
+            } else if let Some(q) = t.strip_prefix('>') {
+                fill(inline(q.trim_start(), Style::new().add_modifier(Modifier::ITALIC)), w, Span::styled("│ ", dim), Span::styled("│ ", dim), true)
+            } else if ["- ", "* ", "+ "].iter().any(|m| t.starts_with(m)) {
+                // wrapped rows hang under the text, not the bullet
+                fill(inline(&t[2..], Style::new()), w, Span::raw(" ".repeat(ind) + "• "), pad(ind + 2), true)
+            } else if digits > 0 && (t[digits..].starts_with(". ") || t[digits..].starts_with(") ")) {
+                let m = &t[..digits + 2];
+                fill(inline(&t[digits + 2..], Style::new()), w, Span::raw(" ".repeat(ind) + m), pad(ind + m.len()), true)
+            } else if t.len() >= 3 && (t.chars().all(|c| c == '-') || t.chars().all(|c| c == '*')) {
+                vec![Line::styled("─".repeat(w.min(40)), dim)]
+            } else {
+                fill(inline(&l, Style::new()), w, pad(0), pad(0), true)
+            }
+        }
+    }
+}
+
+/// `code`, **bold** and *italic* within a line; a bold or italic not yet closed runs to the end.
+fn inline(s: &str, base: Style) -> Vec<(String, Style)> {
+    let cs: Vec<char> = s.chars().collect();
+    let (mut v, mut cur, mut b, mut it, mut i) = (vec![], String::new(), false, false, 0);
+    let st = |b: bool, it: bool| {
+        let s = if b { base.add_modifier(Modifier::BOLD) } else { base };
+        if it { s.add_modifier(Modifier::ITALIC) } else { s }
+    };
+    while i < cs.len() {
+        let c = cs[i];
+        let mark = if c == '`' {
+            cs[i + 1..].iter().position(|&c| c == '`').map(|p| {
+                v.push((std::mem::take(&mut cur), st(b, it)));
+                v.push((cs[i + 1..i + 1 + p].iter().collect(), Style::new().fg(Color::Yellow)));
+                p + 2
+            })
+        } else if c == '*' && cs.get(i + 1) == Some(&'*') {
+            v.push((std::mem::take(&mut cur), st(b, it)));
+            b = !b;
+            Some(2)
+        } else if c == '*' && (it || cs.get(i + 1).is_some_and(|n| !n.is_whitespace())) {
+            v.push((std::mem::take(&mut cur), st(b, it)));
+            it = !it;
+            Some(1)
+        } else {
+            None
+        };
+        match mark {
+            Some(n) => i += n,
+            None => {
+                cur.push(c);
+                i += 1;
+            }
+        }
+    }
+    v.push((cur, st(b, it)));
+    v.retain(|(s, _)| !s.is_empty());
+    v
+}
+
+const KEYWORDS: &[&str] = &[
+    "fn", "let", "mut", "pub", "use", "impl", "struct", "enum", "match", "if", "else", "for", "while", "loop",
+    "return", "in", "def", "class", "import", "from", "const", "var", "function", "async", "await", "self",
+    "true", "false", "None", "null", "static", "type", "mod", "trait", "where", "as", "func", "package",
+];
+
+/// Just enough colour to read code: keywords, strings, comments.
+fn code_spans(l: &str) -> Vec<(String, Style)> {
+    let cs: Vec<char> = l.chars().collect();
+    let mut v: Vec<(String, Style)> = vec![];
+    let mut put = |s: String, st: Style| match v.last_mut() {
+        Some((p, ps)) if *ps == st => p.push_str(&s),
+        _ => v.push((s, st)),
+    };
+    let mut i = 0;
+    while i < cs.len() {
+        let c = cs[i];
+        if (c == '/' && cs.get(i + 1) == Some(&'/')) || (c == '#' && cs[..i].iter().all(|c| c.is_whitespace())) {
+            put(cs[i..].iter().collect(), Style::new().fg(DIM));
+            break;
+        } else if c == '"' {
+            let mut j = i + 1;
+            while j < cs.len() && cs[j] != c {
+                j += if cs[j] == '\\' { 2 } else { 1 };
+            }
+            let j = (j + 1).min(cs.len());
+            put(cs[i..j].iter().collect(), Style::new().fg(Color::Green));
+            i = j;
+        } else if c.is_alphanumeric() || c == '_' {
+            let j = cs[i..].iter().position(|c| !(c.is_alphanumeric() || *c == '_')).map_or(cs.len(), |p| i + p);
+            let word: String = cs[i..j].iter().collect();
+            let st = if KEYWORDS.contains(&word.as_str()) { Style::new().fg(Color::Magenta) } else { Style::new().fg(Color::Yellow) };
+            put(word, st);
+            i = j;
+        } else {
+            put(c.to_string(), Style::new().fg(Color::Yellow));
+            i += 1;
+        }
+    }
+    v
+}
+
+/// Wraps styled text into rows `w` wide; `lead` starts the first row, `hang` the rest.
+/// `words` breaks between words, else hard at the edge (code).
+fn fill(spans: Vec<(String, Style)>, w: usize, lead: Span<'static>, hang: Span<'static>, words: bool) -> Vec<Line<'static>> {
+    let room = w.saturating_sub(lead.width()).max(1);
+    let (mut out, mut row, mut rw): (Vec<Vec<Span<'static>>>, Vec<Span<'static>>, usize) = (vec![], vec![], 0);
+    for (t, st) in &spans {
+        let parts: Vec<&str> = if words { t.split_inclusive(' ').collect() } else { vec![t] };
+        for p in parts {
+            if words && rw > 0 && rw + tw(p.trim_end()) > room {
+                out.push(std::mem::take(&mut row));
+                rw = 0;
+            }
+            let mut cur = String::new();
+            for c in p.chars() {
+                let cw = c.width().unwrap_or(0);
+                if words && c == ' ' && (rw + cw > room || rw == 0 && !out.is_empty()) {
+                    continue; // spaces at a break vanish
+                }
+                if rw + cw > room {
+                    if !cur.is_empty() { row.push(Span::styled(std::mem::take(&mut cur), *st)) }
+                    out.push(std::mem::take(&mut row));
+                    rw = 0;
+                }
+                cur.push(c);
+                rw += cw;
+            }
+            if !cur.is_empty() { row.push(Span::styled(cur, *st)) }
+        }
+    }
+    out.push(row);
+    out.into_iter().enumerate().map(|(i, mut r)| {
+        if let Some(last) = r.last_mut() {
+            last.content = last.content.trim_end().to_string().into();
+        }
+        r.insert(0, if i == 0 { lead.clone() } else { hang.clone() });
+        Line::from(r)
+    }).collect()
 }
 
 const DIFF_ROWS: usize = 40; // an edit longer than this shows its start, then "… N more"
@@ -2536,5 +2754,46 @@ mod diff_tests {
         assert!(v[0].starts_with("  + 0"));
         assert_eq!(v.len(), super::DIFF_ROWS + 1);
         assert!(v.last().unwrap().contains("60 more lines"));
+    }
+}
+
+#[cfg(test)]
+mod md_tests {
+    use ratatui::style::{Modifier, Style};
+
+    fn text(s: &str, w: usize) -> Vec<String> {
+        super::md_blocks(s).iter().flat_map(|b| super::md_block(b, w)).map(|l| l.to_string()).collect()
+    }
+
+    #[test]
+    fn headings_lose_their_hashes() {
+        assert_eq!(text("## Plan\n#include", 40), ["Plan", "#include"]);
+    }
+
+    #[test]
+    fn list_items_hang_under_their_text() {
+        assert_eq!(text("- one two three four\n  2. alpha beta gamma", 12), ["• one two", "  three four", "  2. alpha", "     beta", "     gamma"]);
+    }
+
+    #[test]
+    fn fences_keep_indentation_and_an_unclosed_one_runs_to_the_end() {
+        assert_eq!(text("```rs\n    let x = \"a\"; // c\n```\nafter", 40), ["╭─ rs", "│     let x = \"a\"; // c", "╰─", "after"]);
+        assert_eq!(text("```\nfn a()\n**not bold**", 40), ["╭─", "│ fn a()", "│ **not bold**", "╰─"]);
+    }
+
+    #[test]
+    fn inline_marks_are_styled_and_dropped() {
+        let v = super::inline("use `a*b` **now** or *later", Style::new());
+        let t: Vec<&str> = v.iter().map(|(s, _)| s.as_str()).collect();
+        assert_eq!(t, ["use ", "a*b", " ", "now", " or ", "later"]);
+        assert!(v[3].1.add_modifier.contains(Modifier::BOLD));
+        assert!(v[5].1.add_modifier.contains(Modifier::ITALIC));
+        assert_eq!(text("a * b", 40), ["a * b"]);
+    }
+
+    #[test]
+    fn tables_align_and_fall_back_when_too_wide() {
+        assert_eq!(text("| a | bb |\n|---|---|\n| ccc | d |", 40), ["a   │ bb", "────┼───", "ccc │ d"]);
+        assert_eq!(text("| a | bb |\n|---|---|", 5), ["| a |", "bb |", "|---|", "---|"]);
     }
 }

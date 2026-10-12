@@ -5,6 +5,7 @@ mod checkpoints;
 mod config;
 mod context;
 mod engine;
+mod lsp;
 mod map;
 mod oauth;
 mod platform;
@@ -255,11 +256,13 @@ fn main() {
         let opts = Headless { stats: args.stats.as_deref(), json: args.json, max_turns: args.max_turns };
         let code = headless(&hub, &args.print, rx, &opts);
         browser::shutdown();
+    lsp::shutdown();
         std::process::exit(code);
     }
     update::check_in_background(update_check);
     let r = ui::run(hub, tx, rx);
     browser::shutdown();
+    lsp::shutdown();
     if let Err(e) = r {
         eprintln!("{e}");
     }

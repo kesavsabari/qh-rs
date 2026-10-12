@@ -157,6 +157,11 @@ cost_warn = 2.00  # warn once when API-key spend passes $2 this session (0 = off
 # notification ("auto"), also notify-send / osascript ("desktop"), or "off"
 notify = "auto"
 
+# language servers on PATH (rust-analyzer, typescript-language-server, pyright/pylsp, gopls)
+# start on first use: edits report new errors, plus goto_definition / hover tools; or "off"
+lsp = "auto"
+lsp_wait_ms = 3000  # how long an edit waits for diagnostics
+
 # run a command after every edit; exit code 2 from a pre_tool hook blocks the action
 [[hooks]]
 event = "post_tool"

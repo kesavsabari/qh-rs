@@ -58,6 +58,10 @@ pub struct Config {
     pub sandbox_network: String,
     /// `notify`: "auto" (bell + terminal notification), "desktop" (also notify-send / osascript) or "off"
     pub notify: String,
+    /// `lsp`: "auto" (use language servers found on PATH) or "off"
+    pub lsp: String,
+    /// `lsp_wait_ms`: how long an edit waits for the language server's diagnostics
+    pub lsp_wait_ms: u64,
 }
 
 pub fn config_dir() -> PathBuf {
@@ -160,6 +164,8 @@ pub fn load_defaults() -> Config {
         relay: "default".into(),
         update_check: true,
         notify: "auto".into(),
+        lsp: "auto".into(),
+        lsp_wait_ms: 3000,
         sandbox: true,
         sandbox_write: vec![],
         sandbox_hosts: vec![],
@@ -231,6 +237,12 @@ pub fn load() -> Config {
             Some(toml::Value::Boolean(b)) => c.notify = if *b { "auto" } else { "off" }.into(),
             _ => {}
         }
+        match t.get("lsp") {
+            Some(toml::Value::String(v)) => c.lsp = if v == "off" { "off" } else { "auto" }.into(),
+            Some(toml::Value::Boolean(b)) => c.lsp = if *b { "auto" } else { "off" }.into(),
+            _ => {}
+        }
+        if let Some(v) = t.get("lsp_wait_ms").and_then(|v| v.as_integer()) { c.lsp_wait_ms = v.clamp(0, 30_000) as u64 }
         if let Some(v) = t.get("mouse").and_then(|v| v.as_bool()) { c.mouse = v }
         if let Some(v) = t.get("browser_headless").and_then(|v| v.as_bool()) { c.browser_headless = v }
         if let Some(a) = t.get("browser_allow_hosts").and_then(|v| v.as_array()) {

@@ -31,6 +31,9 @@ const MAX_ITEMS: usize = 400;
 /// Transcript text wraps at this many columns, however wide the terminal.
 const MAX_LINE: u16 = 100;
 const HELP: &str = "/new <name> [profile]  new session (Ctrl+N: instant, auto-named)
+/new --worktree [name]  new tab in its own git worktree (branch qh/<name>)
+/worktree [name]       move this tab into its own git worktree
+/merge [--discard]     merge this worktree tab into its base branch (diff first), or throw it away
 /close (Ctrl+W)        close this session
 /msg <name> <text>     message another session as yourself
 /release               let this session's held messages through
@@ -54,9 +57,11 @@ Shift+←/→ (or Alt+←/→, Alt+1..9) switch tabs · Shift+↑/↓ or PgUp/Pg
 use crate::tools::DANGER;
 
 /// What the `/` autocomplete offers; custom commands are added from .qh/commands.
-const COMMANDS: [(&str, &str); 38] = [
+const COMMANDS: [(&str, &str); 41] = [
     ("/model", "pick this tab's model"), ("/provider", "connect providers: sign in, keys"),
-    ("/new", "new session tab"), ("/close", "close this tab"), ("/mode", "ask · auto-edit · auto · plan"),
+    ("/new", "new session tab"), ("/worktree", "this tab in its own git worktree"),
+    ("/merge", "merge this worktree tab back (diff first)"), ("/merge --discard", "remove this worktree and its branch"),
+    ("/close", "close this tab"), ("/mode", "ask · auto-edit · auto · plan"),
     ("/compact", "shrink the conversation"), ("/clear", "start this tab fresh"), ("/undo", "undo the agent's file changes"),
     ("/diff", "show the agent's file changes"), ("/cwd", "this tab's working folder"), ("/think", "thinking on/off, or an effort level"),
     ("/tokens", "context use, tokens and cost"), ("/tier", "this tab's context window"), ("/profile", "tool set: coding, general, browser, all"),
@@ -212,6 +217,7 @@ struct App {
     // the two spaces Ctrl+Space flips between: the last personal project and the last team one
     last_personal: std::path::PathBuf,
     last_team: std::path::PathBuf,
+    wt_hinted: bool, // the "two tabs edit one repo: try /worktree" hint was shown
     map_was_open: bool, // the team space had its map up when you left it
     notifier: crate::notify::Notifier,
 }
@@ -389,7 +395,7 @@ pub fn run(hub: Arc<Hub>, tx: Sender<Ui>, rx: Receiver<Ui>) -> std::io::Result<(
         log: VecDeque::new(), show_log: false, input: vec![], cur: 0, chips: vec![], hist: vec![], hist_i: 0,
         confirms: VecDeque::new(), picker: None, secret: None, map: None,
         tab_hits: vec![], body: Rect::default(), picker_rows: None, quit: false, sugg_sel: 0, team_view: None, outside: None,
-        last_personal: std::path::PathBuf::new(), last_team: std::path::PathBuf::new(), map_was_open: false,
+        last_personal: std::path::PathBuf::new(), last_team: std::path::PathBuf::new(), map_was_open: false, wt_hinted: false,
         notifier: Default::default(),
     };
     for n in hub.names() {
@@ -757,6 +763,7 @@ impl App {
                     title.push_str(&format!("  → {}", clip(result.lines().next().unwrap_or(""), 100)));
                     *r = if result.is_empty() { " ".into() } else { clip(&result, 4000) };
                 }
+                self.worktree_hint(&name);
             }
             Event::Compact { stage, before, after } => self.note(&name, format!("compacted ({stage}): ≈{before} → ≈{after} tokens")),
             Event::Notice(t) => {
@@ -776,6 +783,20 @@ impl App {
             }
             Event::Log(s) => self.log_line(s),
             Event::Changed => {}
+        }
+    }
+
+    /// Once per run: two plain tabs in one checkout have both edited files: suggest /worktree.
+    fn worktree_hint(&mut self, name: &str) {
+        if self.wt_hinted {
+            return;
+        }
+        let edited = |n: &str| self.hub.get(n).filter(|m| !lock(&m.turn).changed.is_empty())
+            .map(|m| m.cwd()).filter(|c| crate::worktree::info(c).is_none()).and_then(|c| crate::worktree::checkout(&c));
+        let Some(root) = edited(name) else { return };
+        if let Some(other) = self.hub.names().into_iter().find(|o| o != name && edited(o).as_ref() == Some(&root)) {
+            self.wt_hinted = true;
+            self.note(name, format!("{name} and {other} are both editing {}: /worktree gives this tab its own checkout and branch, /merge brings it back", root.display()));
         }
     }
 
@@ -1132,16 +1153,107 @@ impl App {
         match cmd {
             "/help" => self.note(&a, HELP),
             "/new" => {
-                let mut p = arg.split_whitespace();
-                let Some(n) = p.next() else { return self.err(&a, "usage: /new <name> [profile]") };
-                match self.hub.add(n, p.next(), "", "", None, false, Some(m.cwd())) {
+                let wt = arg.split_whitespace().any(|w| w == "--worktree");
+                let mut p = arg.split_whitespace().filter(|w| *w != "--worktree");
+                let auto;
+                let n = match p.next() {
+                    Some(n) => n,
+                    None if wt => {
+                        let names = self.hub.names();
+                        let main = crate::worktree::info(&m.cwd()).map(|w| w.main).or_else(|| crate::worktree::checkout(&m.cwd()));
+                        auto = (1..).map(|i| format!("wt{i}")).find(|n| !names.contains(n)
+                            && !main.as_ref().is_some_and(|d| d.join(crate::worktree::DIR).join(n).exists())).unwrap();
+                        &auto
+                    }
+                    None => return self.err(&a, "usage: /new <name> [profile]  ·  /new --worktree [name]"),
+                };
+                let mut cwd = m.cwd();
+                if wt {
+                    if self.hub.get(n).is_some() {
+                        return self.err(&a, format!("a tab named {n} already exists"));
+                    }
+                    match crate::worktree::create(&cwd, n) {
+                        Ok(w) => cwd = w.path,
+                        Err(e) => return self.err(&a, e),
+                    }
+                }
+                match self.hub.add(n, p.next(), "", "", None, false, Some(cwd.clone())) {
                     Ok(_) => {
                         if !self.views.contains_key(n) {
                             self.load_view(n);
                         }
                         self.set_active(n);
+                        if wt {
+                            self.note(n, format!("worktree {} on qh/{n}; /merge brings it back", cwd.display()));
+                        }
                     }
                     Err(e) => self.err(&a, e),
+                }
+            }
+            "/worktree" => {
+                if let Some(w) = crate::worktree::info(&m.cwd()) {
+                    return self.note(&a, format!("{a} already works in {} on {}", w.path.display(), w.branch()));
+                }
+                if busy {
+                    return self.err(&a, "wait for this tab's turn to finish (Esc interrupts)");
+                }
+                let n = if arg.is_empty() { a.clone() } else { arg.to_string() };
+                match crate::worktree::create(&m.cwd(), &n) {
+                    Ok(w) => {
+                        let msg = format!("{a} now works in {} on {}; /merge brings it back", w.path.display(), w.branch());
+                        *lock(&m.cwd) = w.path;
+                        self.hub.save();
+                        self.note(&a, msg);
+                    }
+                    Err(e) => self.err(&a, e),
+                }
+            }
+            "/merge" => {
+                let Some(w) = crate::worktree::info(&m.cwd()) else {
+                    return self.err(&a, "this tab isn't in a worktree (/new --worktree or /worktree)");
+                };
+                if busy {
+                    return self.err(&a, "wait for this tab's turn to finish (Esc interrupts)");
+                }
+                match arg {
+                    "" => match crate::worktree::summary(&w) {
+                        Ok(s) => {
+                            let base = crate::worktree::base(&w);
+                            self.note(&a, s);
+                            let all = vec![("confirm".to_string(), format!("yes: commit and merge {} into {base}", w.branch())),
+                                           ("cancel".to_string(), "no, keep working".to_string())];
+                            self.picker = Some(picker("merge this worktree?", "/merge", all));
+                        }
+                        Err(e) => self.err(&a, e),
+                    },
+                    "--discard" => {
+                        let s = crate::worktree::summary(&w).unwrap_or_default();
+                        self.note(&a, s);
+                        let all = vec![("discard-confirm".to_string(), format!("yes: delete {} and branch {}", w.path.display(), w.branch())),
+                                       ("cancel".to_string(), "no, keep it".to_string())];
+                        self.picker = Some(picker("throw this worktree away?", "/merge", all));
+                    }
+                    "cancel" => {}
+                    "confirm" => {
+                        let last = self.views.get(&a).and_then(|v| v.items.iter().rev().find_map(|i| match i {
+                            Item::Reply(t) => t.lines().map(str::trim).find(|l| !l.is_empty()).map(|l| l.trim_start_matches('#').trim().to_string()),
+                            _ => None,
+                        }));
+                        let msg = last.filter(|l| !l.is_empty()).map(|l| clip(&l, 72)).unwrap_or_else(|| format!("qh: {}", w.name));
+                        match crate::worktree::merge(&w, &msg) {
+                            Ok(r) => self.note(&a, r),
+                            Err(e) => self.err(&a, e),
+                        }
+                    }
+                    "discard-confirm" => match crate::worktree::discard(&w) {
+                        Ok(r) => {
+                            *lock(&m.cwd) = w.main.clone();
+                            self.hub.save();
+                            self.note(&a, format!("{r}\n{a} now works in {}", w.main.display()));
+                        }
+                        Err(e) => self.err(&a, e),
+                    },
+                    _ => self.err(&a, "usage: /merge  ·  /merge --discard"),
                 }
             }
             "/close" => {
@@ -2333,7 +2445,8 @@ then it's `git push -u origin {branch}` and `gh pr create --fill`.");
             let role = if role.is_empty() { String::new() } else { format!(" · {role}") };
             let model = { let s = lock(&m.set); crate::providers::display(&s.provider, &s.model) };
             let status = if m.status() == "working" && m.thinking.load(std::sync::atomic::Ordering::Relaxed) { "thinking" } else { m.status() };
-            format!(" {}{}{role} · {status} · {model} ", name, icon(m.status()))
+            let br = crate::worktree::branch(&m.cwd()).map(|b| format!(" · ⎇ {b}")).unwrap_or_default();
+            format!(" {}{}{role}{br} · {status} · {model} ", name, icon(m.status()))
         }).unwrap_or_default();
         let color = if name == self.active { ACCENT } else { DIM };
         let block = Block::bordered().title(title).border_style(Style::new().fg(color));

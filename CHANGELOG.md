@@ -8,6 +8,11 @@ Each version starts with a one-line summary; the website shows it once the versi
   queries DuckDuckGo's HTML page and returns numbered titles, links and snippets, marked as
   untrusted data. It contacts only html.duckduckgo.com and opens no result pages; 15 s timeout,
   and a clear error when DuckDuckGo rate-limits.
+- **Headless JSON output.** `qh -p "…" --json` prints JSONL events (start, text, tool_call,
+  tool_result, diff, permission_denied, usage, error, done) for scripts and CI. `--mode` works
+  with `-p`; prompts nobody can answer are refused and reported. `--max-turns N` caps tool rounds.
+  Exit codes: 0 ok, 1 agent error, 2 bad usage, 3 permission needed but refused. The docs include
+  an example GitHub Actions workflow that fixes failing tests on a PR.
 
 ## 0.1.9 — unreleased
 

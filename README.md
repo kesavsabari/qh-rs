@@ -101,6 +101,10 @@ All of these are optional.
 ```toml
 mode = "auto-edit"
 
+# when a long turn ends or a permission waits while you look elsewhere: bell + terminal
+# notification ("auto"), also notify-send / osascript ("desktop"), or "off"
+notify = "auto"
+
 # run a command after every edit; exit code 2 from a pre_tool hook blocks the action
 [[hooks]]
 event = "post_tool"

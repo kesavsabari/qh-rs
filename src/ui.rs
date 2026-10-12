@@ -210,6 +210,7 @@ struct App {
     last_personal: std::path::PathBuf,
     last_team: std::path::PathBuf,
     map_was_open: bool, // the team space had its map up when you left it
+    notifier: crate::notify::Notifier,
 }
 
 /// Popup list (`/model`, `/provider`): type to filter, arrows to move, Enter runs `cmd value`.
@@ -360,7 +361,7 @@ static KEYS_PAUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBoo
 
 pub fn run(hub: Arc<Hub>, tx: Sender<Ui>, rx: Receiver<Ui>) -> std::io::Result<()> {
     let mut term = ratatui::init();
-    let _ = execute!(std::io::stdout(), event::EnableBracketedPaste);
+    let _ = execute!(std::io::stdout(), event::EnableBracketedPaste, event::EnableFocusChange);
     if hub.cfg.mouse {
         let _ = execute!(std::io::stdout(), event::EnableMouseCapture);
     }
@@ -386,6 +387,7 @@ pub fn run(hub: Arc<Hub>, tx: Sender<Ui>, rx: Receiver<Ui>) -> std::io::Result<(
         confirms: VecDeque::new(), picker: None, secret: None, map: None,
         tab_hits: vec![], body: Rect::default(), picker_rows: None, quit: false, sugg_sel: 0, team_view: None, outside: None,
         last_personal: std::path::PathBuf::new(), last_team: std::path::PathBuf::new(), map_was_open: false,
+        notifier: Default::default(),
     };
     for n in hub.names() {
         app.load_view(&n);
@@ -437,7 +439,7 @@ pub fn run(hub: Arc<Hub>, tx: Sender<Ui>, rx: Receiver<Ui>) -> std::io::Result<(
             // hand the terminal to the guided team setup, then take it back
             KEYS_PAUSED.store(true, std::sync::atomic::Ordering::SeqCst);
             std::thread::sleep(std::time::Duration::from_millis(80)); // let an in-flight poll finish
-            let _ = execute!(std::io::stdout(), event::DisableBracketedPaste, event::DisableMouseCapture);
+            let _ = execute!(std::io::stdout(), event::DisableBracketedPaste, event::DisableMouseCapture, event::DisableFocusChange);
             ratatui::restore();
             let cwd = app.hub.get(&app.active).map(|m| m.cwd()).unwrap_or_default();
             let prev = std::env::current_dir().ok();
@@ -457,7 +459,7 @@ pub fn run(hub: Arc<Hub>, tx: Sender<Ui>, rx: Receiver<Ui>) -> std::io::Result<(
             if let Some(p) = prev { let _ = std::env::set_current_dir(p); }
             term = ratatui::init();
             KEYS_PAUSED.store(false, std::sync::atomic::Ordering::SeqCst);
-            let _ = execute!(std::io::stdout(), event::EnableBracketedPaste);
+            let _ = execute!(std::io::stdout(), event::EnableBracketedPaste, event::EnableFocusChange);
             if app.hub.cfg.mouse { let _ = execute!(std::io::stdout(), event::EnableMouseCapture); }
             let _ = term.clear();
             let a = app.active.clone();
@@ -473,7 +475,7 @@ pub fn run(hub: Arc<Hub>, tx: Sender<Ui>, rx: Receiver<Ui>) -> std::io::Result<(
             break Ok(());
         }
     };
-    let _ = execute!(std::io::stdout(), event::DisableBracketedPaste, event::DisableMouseCapture);
+    let _ = execute!(std::io::stdout(), event::DisableBracketedPaste, event::DisableMouseCapture, event::DisableFocusChange);
     ratatui::restore();
     crate::team::stop_and_flush(); // tell teammates we left
     res
@@ -688,6 +690,8 @@ impl App {
                     self.cur += 1;
                 }
             }
+            Ui::Term(TermEvent::FocusGained) => self.notifier.focused = Some(true),
+            Ui::Term(TermEvent::FocusLost) => self.notifier.focused = Some(false),
             Ui::Term(_) => {}
         }
     }
@@ -695,6 +699,14 @@ impl App {
     fn hub_event(&mut self, name: String, ev: Event) {
         if !name.is_empty() && name != self.active && !matches!(ev, Event::Changed | Event::Added | Event::Log(_)) {
             self.view(&name).unread = true;
+        }
+        let mode = crate::notify::mode(&self.hub.cfg.notify);
+        let now = std::time::Instant::now();
+        match &ev {
+            Event::Token(_) | Event::ToolCall { .. } | Event::ToolResult { .. } => self.notifier.activity(&name, now),
+            Event::Done { .. } if self.notifier.done(mode, &name, now) => crate::notify::send(mode, &format!("qh: {name} finished")),
+            Event::Confirm { .. } if self.notifier.confirm(mode, &name, now) => crate::notify::send(mode, &format!("qh: {name} needs your OK")),
+            _ => {}
         }
         match ev {
             Event::Token(t) => {

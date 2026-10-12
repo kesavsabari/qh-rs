@@ -7,6 +7,10 @@ Each version starts with a one-line summary; the website shows it once the versi
 - **Answers render as markdown.** Headings, bold, italic, `inline code`, lists that wrap under
   their text, quotes, tables with aligned columns, and code blocks in a frame with keywords,
   strings and comments coloured. A reply still streaming renders as it arrives.
+- **Notifications.** When a turn that ran over 10 s ends, or a permission is waiting, and the
+  terminal isn't focused, qh rings the bell and sends a terminal notification (iTerm2, kitty,
+  foot, ghostty, WezTerm, Windows Terminal). `notify = "desktop"` also uses notify-send or
+  osascript; `notify = "off"` stops it.
 
 ## 0.1.8 — 2026-10-12
 

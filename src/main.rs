@@ -9,6 +9,7 @@ mod map;
 mod oauth;
 mod platform;
 mod mcp;
+mod notify;
 mod hooks;
 mod hub;
 mod link;

@@ -339,6 +339,7 @@ trusted = false   <span class="c"># true: run its tools without asking</span></c
     <tr><td><code>profile</code></td><td>Tool set: <code>coding</code>, <code>general</code>, <code>browser</code> or <code>all</code></td></tr>
     <tr><td><code>allow</code></td><td>Commands that never need approval, e.g. <code>["cargo*", "npm test"]</code></td></tr>
     <tr><td><code>browser_headless</code></td><td><code>true</code> hides the browser window the agent uses</td></tr>
+    <tr><td><code>notify</code></td><td>When a turn over 10&nbsp;s ends or a permission waits while the terminal is in the background: <code>"auto"</code> (default) rings the bell and sends a terminal notification; <code>"desktop"</code> also uses <code>notify-send</code> or <code>osascript</code>; <code>"off"</code> stays quiet</td></tr>
     <tr><td><code>mouse</code></td><td><code>true</code> enables clicks and scrolling</td></tr>
     <tr><td><code>[[hooks]]</code>, <code>[mcp.name]</code></td><td>See <a href="#hooks">hooks</a> and <a href="#mcp">MCP</a></td></tr>
     <tr><td><code>[sandbox]</code></td><td>See <a href="#sandbox">sandbox</a>. <code>writable = ["~/other"]</code> adds folders; <code>allow_hosts = ["*.example.com"]</code> adds hosts; <code>env_keep = ["DATABASE_URL"]</code> keeps variables; <code>network = "off"</code> or <code>"open"</code>; <code>mode = "off"</code> turns it all off (or <code>QH_SANDBOX=off</code>)</td></tr>

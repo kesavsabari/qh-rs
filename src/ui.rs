@@ -1579,7 +1579,7 @@ impl App {
                 v => {
                     let ok = matches!(v, "default" | "none") || v.split(',').all(|spec| {
                         let (host, key) = spec.trim().split_once('#').map_or((spec.trim(), None), |(h, k)| (h, Some(k)));
-                        !host.is_empty() && !host.contains(' ') && key.map_or(true, |k| crate::oauth::b64url_decode(k).len() == 32)
+                        !host.is_empty() && !host.contains(' ') && key.is_none_or(|k| crate::oauth::b64url_decode(k).len() == 32)
                     });
                     if !ok {
                         return self.err(&a, "that doesn't look like a relay: host:port#key (the key is the 43 characters `qh relay` printed)");
@@ -2884,7 +2884,7 @@ fn draw_picker(f: &mut Frame, p: &Picker) -> (Rect, usize) {
     }
     for (i, label) in all_rows.iter().skip(top).take(rows) {
         match i {
-            None => lines.push(Line::styled(format!("{label}"), Style::new().fg(ACCENT).add_modifier(Modifier::BOLD))),
+            None => lines.push(Line::styled(label.to_string(), Style::new().fg(ACCENT).add_modifier(Modifier::BOLD))),
             Some(i) => {
                 let mark = if hits[*i].0 == p.cur { "● " } else { "  " };
                 let st = if *i == p.sel { Style::new().add_modifier(Modifier::REVERSED) } else { Style::new() };

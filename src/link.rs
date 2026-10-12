@@ -825,7 +825,7 @@ impl Link {
                 if stun {
                     found.extend(self.stun_round(&hosts));
                 }
-                if upnp && (moved || upnp_at.map_or(true, |t| t.elapsed() > UPNP_RENEW)) {
+                if upnp && (moved || upnp_at.is_none_or(|t| t.elapsed() > UPNP_RENEW)) {
                     mapped = here.0.and_then(|ip| upnp_map(ip, port)).map(|(a, m)| {
                         *lock(&self.mapping) = Some(m);
                         a
@@ -1078,7 +1078,7 @@ fn on_hello(i: &mut Inner, k: usize, pkt: &[u8], plain: &[u8; 17], from: Path, s
     let reply = plain[16] == 1;
     let now = Instant::now();
     let p = &mut i.peers[k];
-    let fresh_eph = p.sess.as_ref().map_or(true, |s| s.their_eph != eph);
+    let fresh_eph = p.sess.as_ref().is_none_or(|s| s.their_eph != eph);
     // Ten minutes of clock difference allowed; an old hello can't roll a newer line back, and one
     // seen before (a replay) does nothing at all.
     if now_ms().abs_diff(ts) > 600_000 || ts < p.hello_ts || (!fresh_eph && ts == p.hello_ts) {
@@ -1352,7 +1352,7 @@ fn stun_reply(i: &mut Inner, pkt: &[u8]) {
             i.stun_seen.push(a);
             return;
         }
-        at += 4 + (len + 3) / 4 * 4;
+        at += 4 + len.div_ceil(4) * 4;
     }
 }
 

@@ -366,7 +366,7 @@ fn vouched(repo: &str, tok: &str, p: &Peer) -> bool {
     }
     let tag = format!("{} {}", p.login, p.sign);
     let Some((due, poster)) = with(repo, |s| {
-        let due = s.asked_github.get(&tag).map_or(true, |t| t.elapsed() >= Duration::from_secs(600));
+        let due = s.asked_github.get(&tag).is_none_or(|t| t.elapsed() >= Duration::from_secs(600));
         if due { s.asked_github.insert(tag.clone(), Instant::now()); }
         // tests run several pretend people from one GitHub account: that account posts for all
         (due, if testing() { s.gh_login.clone() } else { p.login.clone() })
@@ -1568,7 +1568,7 @@ fn route(s: &State, root: &Path, text: &str, to: &str) -> Vec<(String, String, S
     let paths: Vec<&String> = words.iter().filter(|w| w.contains('.') || w.contains('/')).collect();
     let names: Vec<String> = words.iter().flat_map(|w| w.split(['.', '/'])).filter(|w| w.len() > 2).map(String::from).collect();
     let file_hit = |f: &str| paths.iter().any(|p| f == p.as_str() || f.ends_with(&format!("/{p}")) || p.ends_with(&format!("/{f}")));
-    let (want_login, want_sess) = to.split_once('/').map(|(a, b)| (a, b)).unwrap_or((to, ""));
+    let (want_login, want_sess) = to.split_once('/').unwrap_or((to, ""));
     let now = now();
     let mut scored: Vec<(i64, String, String, String)> = vec![];
     for p in s.peers.values().filter(|p| p.joined && p.login != s.me) {

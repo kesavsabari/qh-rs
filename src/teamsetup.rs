@@ -206,7 +206,7 @@ pub fn invite(cwd: &Path, users: &[String]) -> Result<String, String> {
             Ok((201, _, _)) => { invited = true; ok(f, &mut codes); format!("✓ invited {f}") }
             Ok((204, _, _)) => { invited = true; ok(f, &mut codes); format!("✓ {f} already has access") }
             Ok((404, _, _)) => format!("✗ no GitHub user {f}"),
-            Ok((403, _, _)) => format!("✗ GitHub refused: only the repo's owner or an admin can invite"),
+            Ok((403, _, _)) => "✗ GitHub refused: only the repo's owner or an admin can invite".to_string(),
             Ok((c, _, _)) => format!("✗ GitHub answered {c} for {f}"),
             Err(e) => format!("✗ {f}: {e}"),
         });

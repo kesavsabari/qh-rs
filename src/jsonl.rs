@@ -65,7 +65,7 @@ pub fn events(ev: &Event, last_call: &mut Option<(String, Value)>) -> Vec<Value>
 
 pub fn usage(u: &crate::usage::Usage) -> Value {
     json!({"type": "usage", "input": u.input, "cached": u.cached, "output": u.output,
-           "cost": if u.paid && !u.unpriced { Some(u.cost) } else if u.paid && u.cost > 0.0 { Some(u.cost) } else { None },
+           "cost": if u.paid && (!u.unpriced || u.cost > 0.0) { Some(u.cost) } else { None },
            "plan": !u.paid})
 }
 

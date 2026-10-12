@@ -6,6 +6,7 @@
 //! - Sign in with ChatGPT (`qh login chatgpt-official`; Plus/Pro only): OpenAI's open-source flow
 //!   (developers.openai.com/siwc/token-sharing-open-source), dynamic client registration over
 //!   OAuth PKCE on a 127.0.0.1 loopback, and api.openai.com.
+//!
 //! Either way tokens sit in a 0600 file and are refreshed before they expire, and inference goes
 //! through the Responses API (store false, stream true, system prompt as `instructions`).
 use crate::backend::{http, Error, Reply};

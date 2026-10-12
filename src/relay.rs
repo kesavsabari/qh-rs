@@ -110,7 +110,7 @@ pub fn serve(sock: &UdpSocket, secret: Option<[u8; 32]>, until: Option<Instant>)
     let (mut asked, mut asked_at, mut asked_all) = (HashMap::<IpAddr, u32>::new(), Instant::now(), 0u32);
     let (mut swept, mut stats, mut passed, mut dropped) = (Instant::now(), Instant::now(), 0u64, 0u64);
     let mut buf = [0u8; 2048];
-    while until.map_or(true, |u| Instant::now() < u) {
+    while until.is_none_or(|u| Instant::now() < u) {
         let now = Instant::now();
         if now - swept > Duration::from_secs(30) {
             swept = now;

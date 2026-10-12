@@ -119,21 +119,6 @@ fn set_in(text: &str, key: &str, value: &str) -> String {
     out.join("\n") + "\n"
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn set_changes_one_setting_and_keeps_the_rest() {
-        let text = "# mine\nmodel = \"a\"\nrelay = \"none\"\n\n[providers.x]\nrelay = \"table, untouched\"\n";
-        let out = super::set_in(text, "relay", "1.2.3.4:47232#k");
-        assert_eq!(out, "# mine\nmodel = \"a\"\nrelay = \"1.2.3.4:47232#k\"\n\n[providers.x]\nrelay = \"table, untouched\"\n");
-        let out = super::set_in("model = \"a\"\n[t]\nx = 1\n", "relay", "none");
-        assert_eq!(out, "model = \"a\"\nrelay = \"none\"\n[t]\nx = 1\n");
-        assert_eq!(super::set_in("", "relay", "say \"hi\""), "relay = \"say \\\"hi\\\"\"\n");
-        let parsed: toml::Table = super::set_in("", "relay", "a\\b\"c").parse().unwrap();
-        assert_eq!(parsed["relay"].as_str(), Some("a\\b\"c"));
-    }
-}
-
 /// The built-in settings, before config.toml.
 pub fn load_defaults() -> Config {
     Config {
@@ -287,4 +272,19 @@ pub fn load() -> Config {
         c.openrouter_key = k;
     }
     c
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn set_changes_one_setting_and_keeps_the_rest() {
+        let text = "# mine\nmodel = \"a\"\nrelay = \"none\"\n\n[providers.x]\nrelay = \"table, untouched\"\n";
+        let out = super::set_in(text, "relay", "1.2.3.4:47232#k");
+        assert_eq!(out, "# mine\nmodel = \"a\"\nrelay = \"1.2.3.4:47232#k\"\n\n[providers.x]\nrelay = \"table, untouched\"\n");
+        let out = super::set_in("model = \"a\"\n[t]\nx = 1\n", "relay", "none");
+        assert_eq!(out, "model = \"a\"\nrelay = \"none\"\n[t]\nx = 1\n");
+        assert_eq!(super::set_in("", "relay", "say \"hi\""), "relay = \"say \\\"hi\\\"\"\n");
+        let parsed: toml::Table = super::set_in("", "relay", "a\\b\"c").parse().unwrap();
+        assert_eq!(parsed["relay"].as_str(), Some("a\\b\"c"));
+    }
 }

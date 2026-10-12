@@ -2,7 +2,9 @@
 
 Each version starts with a one-line summary; the website shows it once the version is no longer recent.
 
-## 0.1.9 — unreleased
+## 0.1.9 — 2026-10-12
+
+Answers render as markdown; notifications, cost per session, and images in the chat.
 
 - **Answers render as markdown.** Headings, bold, italic, `inline code`, lists that wrap under
   their text, quotes, tables with aligned columns, and code blocks in a frame with keywords,

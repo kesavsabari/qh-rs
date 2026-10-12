@@ -41,3 +41,4 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: ${{ matrix.asset }}
+          make_latest: false

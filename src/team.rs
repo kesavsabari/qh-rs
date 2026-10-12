@@ -857,7 +857,7 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks) -> Result<String, Strin
             while let Some(left) = until.checked_duration_since(Instant::now()) {
                 match live_rx.recv_timeout(left.min(Duration::from_millis(100))) {
                     Ok((from, bytes)) => {
-                        take_live(&repo2, &from, &bytes, &hooks);
+                        take_live(&repo2, &root, &from, &bytes, &hooks);
                         (hooks.refresh)();
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => if line.is_some() && pulse(&repo2) != live.pulse { break },
@@ -2494,8 +2494,13 @@ fn push_live(repo: &str, me: &str, l: &Link, d: Value, live: &mut Live) {
 
 /// A teammate's data straight off the line. Only from someone git already showed us as a member,
 /// only from their own member key, and only if it's newer than what we have.
-fn take_live(repo: &str, from: &str, bytes: &[u8], hooks: &Hooks) {
+fn take_live(repo: &str, root: &Path, from: &str, bytes: &[u8], hooks: &Hooks) {
     let Ok(v) = serde_json::from_slice::<Value>(bytes) else { return };
+    match v["kind"].as_str() {
+        Some("file") => return take_file_req(repo, root, from, &v),
+        Some("file_re") => return take_file_reply(repo, from, &v),
+        _ => {}
+    }
     let login = v["login"].as_str().unwrap_or("").to_string();
     let Some((me, key, old)) = with(repo, |s| (s.me.clone(), s.key, s.peers.get(&login).cloned())) else { return };
     let (Some(k), Some(old)) = (key, old) else { return };
@@ -2514,6 +2519,288 @@ fn take_live(repo: &str, from: &str, bytes: &[u8], hooks: &Hooks) {
     take_in(repo, &me, key, p, hooks, &mut new_chat);
     if new_chat { save_chat(repo) }
     save_seen(repo);
+}
+
+// ---- a teammate's working copy, read over the line ----
+//
+// Each teammate has their own clone: nothing they haven't pushed is in ours. read_team_file asks
+// their qh for one file (uncommitted edits included) and list_team_files for what they changed
+// against HEAD. Both go only over the direct line, never into git (file contents don't belong on
+// the board), and the serving side answers on its own, within strict rules (`serve_file`).
+
+const FILE_WAIT: Duration = Duration::from_secs(10);
+const FILE_MAX_BYTES: usize = 200 * 1024;
+const FILE_MAX_LINES: usize = 2000;
+const FILE_PART: usize = 24 * 1024; // bytes of text per line message: sealed and escaped it stays under link's 256 KB
+const LIST_MAX: usize = 400;
+
+type FileWait = (String, std::sync::mpsc::Sender<Value>); // who must answer, where the parts go
+static FILE_WAITS: Mutex<Option<HashMap<u64, FileWait>>> = Mutex::new(None);
+static FILE_IDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A file request or reply as it goes over the line: sealed with the team key, bound to the sender.
+fn file_msg(repo: &str, me: &str, key: &Key, kind: &str, body: &Value) -> Vec<u8> {
+    json!({"repo": repo, "login": me, "kind": kind, "data": tc::seal(key, &format!("{kind}:{me}"), body.to_string().as_bytes())})
+        .to_string().into_bytes()
+}
+
+fn open_file_msg(key: &Key, v: &Value) -> Option<Value> {
+    let (kind, login) = (v["kind"].as_str()?, v["login"].as_str()?);
+    tc::open(key, &format!("{kind}:{login}"), v["data"].as_str()?).and_then(|b| serde_json::from_slice(&b).ok())
+}
+
+/// A reply in parts small enough for the line: {re, part, parts, ok, text}.
+fn reply_parts(re: u64, r: Result<String, String>) -> Vec<Value> {
+    let (ok, text) = match r { Ok(t) => (true, t), Err(e) => (false, e) };
+    let mut parts: Vec<String> = vec![];
+    let mut rest = text.as_str();
+    while !rest.is_empty() || parts.is_empty() {
+        let mut cut = rest.len().min(FILE_PART);
+        while !rest.is_char_boundary(cut) { cut -= 1 }
+        parts.push(rest[..cut].to_string());
+        rest = &rest[cut..];
+    }
+    let n = parts.len();
+    parts.into_iter().enumerate().map(|(i, t)| json!({"re": re, "part": i, "parts": n, "ok": ok, "text": t})).collect()
+}
+
+/// The whole reply once every part is in; None while some are missing.
+fn assemble(parts: &[Value]) -> Option<Result<String, String>> {
+    let n = parts.first()?["parts"].as_u64()? as usize;
+    if n == 0 || n > 64 { return Some(Err("a malformed reply".into())) }
+    let mut slots: Vec<Option<&str>> = vec![None; n];
+    for p in parts {
+        let i = p["part"].as_u64().unwrap_or(u64::MAX) as usize;
+        if i < n { slots[i] = p["text"].as_str() }
+    }
+    let text: String = slots.iter().map(|s| s.map(str::to_string)).collect::<Option<Vec<_>>>()?.concat();
+    Some(if parts[0]["ok"].as_bool() == Some(true) { Ok(text) } else { Err(text) })
+}
+
+/// May `login`, on the line as member key `from`, read our working copy? Joined members only,
+/// on their own key, not removed, and not someone we have as view only.
+fn may_read(s: &State, login: &str, from: &str) -> Result<(), String> {
+    let p = s.peers.get(login).ok_or("not a member of this team")?;
+    if s.key.is_none() || !p.joined || p.pub_key != from || login == s.me {
+        return Err("not a member of this team".into());
+    }
+    if s.removed.iter().any(|r| r == login) {
+        return Err("removed from this team".into());
+    }
+    if s.roles.get(login).is_some_and(|r| r == "viewer") {
+        return Err(format!("{} has you as view only", s.me));
+    }
+    Ok(())
+}
+
+/// Read one file of the team repo at `root` for a teammate, or list what's changed against HEAD.
+/// Only plain text files inside the repo (symlinks resolved), never secrets, git's own files,
+/// protected files or anything git ignores; at most FILE_MAX_LINES lines / FILE_MAX_BYTES.
+pub(crate) fn serve_file(root: &Path, req: &Value) -> Result<String, String> {
+    let root = root.canonicalize().map_err(|_| "the project folder is gone".to_string())?;
+    if req["op"] == "list" {
+        return list_changed(&root);
+    }
+    let path = req["path"].as_str().unwrap_or("").trim();
+    if path.is_empty() || path.contains('\0') {
+        return Err("no path given".into());
+    }
+    let rel = Path::new(path);
+    if rel.is_absolute() || rel.components().any(|c| !matches!(c, std::path::Component::Normal(_) | std::path::Component::CurDir)) {
+        return Err(format!("{path}: give a path relative to the project root, without .."));
+    }
+    let full = root.join(rel).canonicalize().map_err(|_| format!("{path}: no such file in their working copy"))?;
+    if !crate::sandbox::under(&full, &root) {
+        return Err(format!("{path}: outside the project (a link out of it)"));
+    }
+    let inner = full.strip_prefix(&root).map_err(|_| format!("{path}: outside the project"))?.to_path_buf();
+    if inner.as_os_str().is_empty() || !full.is_file() {
+        return Err(format!("{path}: not a file"));
+    }
+    let named = [rel, inner.as_path()];
+    if named.iter().any(|p| p.components().any(|c| c.as_os_str() == ".git")) {
+        return Err(format!("{path}: git's own files aren't shared"));
+    }
+    if crate::sandbox::secret(&full) || crate::sandbox::secret(&root.join(rel)) || crate::sandbox::protected(&full) {
+        return Err(format!("{path}: a secret or protected file; it's never shared"));
+    }
+    for p in named {
+        let p = p.to_string_lossy();
+        if git(&root, &["check-ignore", "-q", "--", &p]).is_some() {
+            return Err(format!("{path}: ignored by git, so it isn't shared"));
+        }
+    }
+    let bytes = std::fs::read(&full).map_err(|e| format!("{path}: {e}"))?;
+    if bytes[..bytes.len().min(8192)].contains(&0) {
+        return Err(format!("{path}: a binary file"));
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    let lines: Vec<&str> = text.lines().collect();
+    let start = req["start"].as_u64().unwrap_or(1).max(1) as usize;
+    if start > lines.len().max(1) {
+        return Err(format!("{path} has only {} lines", lines.len()));
+    }
+    let want_end = req["end"].as_u64().filter(|e| *e > 0).map_or(lines.len(), |e| (e as usize).min(lines.len()));
+    let (mut out, mut last) = (String::new(), start - 1);
+    for i in start..=want_end {
+        let row = format!("{i}\t{}\n", lines[i - 1]);
+        if i - start >= FILE_MAX_LINES || out.len() + row.len() > FILE_MAX_BYTES {
+            break;
+        }
+        out.push_str(&row);
+        last = i;
+    }
+    let dirty = git(&root, &["status", "--porcelain", "--", &inner.to_string_lossy()]).is_some_and(|s| !s.trim().is_empty());
+    let mut head = format!("{} ({} lines{})", inner.to_string_lossy().replace('\\', "/"), lines.len(),
+                           if dirty { ", changed since their last commit" } else { "" });
+    if last < want_end {
+        head += &format!("; showing lines {start}-{last}, ask again with start_line={} for more", last + 1);
+    }
+    Ok(format!("{head}\n{}", out.trim_end()))
+}
+
+/// What the working copy changed against HEAD (git status), secrets left out.
+fn list_changed(root: &Path) -> Result<String, String> {
+    let st = git_raw(root, &["status", "--porcelain=v1", "-z", "--untracked-files=all"], None, &[])
+        .ok_or("git status failed in their working copy")?;
+    let branch = git(root, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default();
+    let mut rows = vec![];
+    let mut it = st.split(|b| *b == 0).filter(|e| e.len() > 3);
+    while let Some(e) = it.next() {
+        let e = String::from_utf8_lossy(e);
+        let (code, path) = (e[..2].to_string(), e[3..].to_string());
+        if code.contains('R') || code.contains('C') { it.next(); } // the old name follows a rename
+        if crate::sandbox::secret(&root.join(&path)) || path.split('/').any(|c| c == ".git") {
+            continue;
+        }
+        let what = match code.trim() { "??" => "new", c if c.contains('D') => "deleted", c if c.contains('A') => "added",
+                                       c if c.contains('R') => "renamed", _ => "modified" };
+        rows.push(format!("{what}\t{path}"));
+    }
+    let n = rows.len();
+    rows.truncate(LIST_MAX);
+    Ok(format!("branch {branch}; {n} file{} changed against their last commit{}\n{}", if n == 1 { "" } else { "s" },
+               if n > LIST_MAX { format!(" (first {LIST_MAX} shown)") } else { String::new() },
+               if rows.is_empty() { "(nothing uncommitted)".to_string() } else { rows.join("\n") }))
+}
+
+/// A teammate's file request off the line: checked, answered in a thread of its own (git can be slow).
+fn take_file_req(repo: &str, root: &Path, from: &str, v: &Value) {
+    let login = v["login"].as_str().unwrap_or("").to_string();
+    let Some((me, key, ok)) = with(repo, |s| (s.me.clone(), s.key, may_read(s, &login, from))) else { return };
+    let Some(key) = key else { return };
+    let Some(req) = open_file_msg(&key, v) else { return };
+    let Some(id) = req["id"].as_u64() else { return };
+    let (repo, root, from) = (repo.to_string(), root.to_path_buf(), from.to_string());
+    let _ = std::thread::Builder::new().name("qh-team-file".into()).spawn(move || {
+        let what = if req["op"] == "list" { "listed your changed files".to_string() } else { format!("read {}", req["path"].as_str().unwrap_or("")) };
+        let r = ok.and_then(|_| if crate::config::load().team_share_files { Ok(()) } else {
+            Err(format!("{me} has turned off sharing files with teammates' agents (team_share_files = \"off\")"))
+        }).and_then(|_| serve_file(&root, &req));
+        match &r {
+            Ok(_) => log_to(&repo, &format!("{login}'s agent {what}")),
+            Err(e) => log_to(&repo, &format!("refused {login}'s agent ({what}): {e}")),
+        }
+        if let Some(l) = link() {
+            for part in reply_parts(id, r) {
+                l.send(&from, &file_msg(&repo, &me, &key, "file_re", &part));
+            }
+        }
+    });
+}
+
+/// A part of a reply to one of our file requests: to whoever is waiting, if it's from the one asked.
+fn take_file_reply(repo: &str, from: &str, v: &Value) {
+    let login = v["login"].as_str().unwrap_or("");
+    let Some(Some(key)) = with(repo, |s| s.peers.get(login).filter(|p| p.pub_key == from && p.joined).and(s.key)) else { return };
+    let Some(part) = open_file_msg(&key, v) else { return };
+    let re = part["re"].as_u64().unwrap_or(0);
+    let w = FILE_WAITS.lock().unwrap();
+    if let Some((who, tx)) = w.as_ref().and_then(|m| m.get(&re)) {
+        if who == login {
+            let _ = tx.send(part);
+        }
+    }
+}
+
+/// Ask `to`'s qh for something from their working copy and wait (up to FILE_WAIT) for the reply.
+fn file_request(cwd: &Path, to: &str, mut req: Value) -> Result<(String, String), String> {
+    let (_, repo) = repo_of(cwd).ok_or("this folder isn't a team project")?;
+    if !running_for(&repo) { return Err("team mode is off for this project".into()) }
+    let to = to.trim().trim_start_matches('@').split('/').next().unwrap_or("").to_string();
+    let (me, key, peer_key) = with(&repo, |s| -> Result<_, String> {
+        let key = s.key.ok_or("you're not in the team yet: waiting to be let in")?;
+        let mut team: Vec<&str> = s.peers.values().filter(|p| p.joined && p.login != s.me).map(|p| p.login.as_str()).collect();
+        team.sort();
+        let p = s.peers.get(&to).filter(|p| p.joined && to != s.me)
+            .ok_or_else(|| format!("no teammate {to}. Teammates: {}", if team.is_empty() { "nobody yet".into() } else { team.join(", ") }))?;
+        if p.roles.get(&s.me).is_some_and(|r| r == "viewer") {
+            return Err(format!("{to} has you as view only: their files aren't shared with you"));
+        }
+        Ok((s.me.clone(), key, p.pub_key.clone()))
+    }).ok_or("team mode is off for this project")??;
+    if !LINES.lock().unwrap().as_ref().is_some_and(|l| l.contains_key(&peer_key)) {
+        return Err(format!("no direct line to {to} right now (offline, or not reachable yet), so their working copy can't be read. \
+Ask them to commit and push a branch, then fetch it."));
+    }
+    let l = link().ok_or("the direct line is off on this machine (QH_LINK=off)")?;
+    let id = (now_ms() << 8) | (FILE_IDS.fetch_add(1, Relaxed) & 0xff);
+    req["id"] = json!(id);
+    let (tx, rx) = std::sync::mpsc::channel();
+    FILE_WAITS.lock().unwrap().get_or_insert_with(HashMap::new).insert(id, (to.clone(), tx));
+    l.send(&peer_key, &file_msg(&repo, &me, &key, "file", &req));
+    let until = Instant::now() + FILE_WAIT;
+    let mut parts = vec![];
+    let got = loop {
+        let Some(left) = until.checked_duration_since(Instant::now()) else { break None };
+        match rx.recv_timeout(left) {
+            Ok(p) => {
+                parts.push(p);
+                if let Some(r) = assemble(&parts) { break Some(r) }
+            }
+            Err(_) => break None,
+        }
+    };
+    if let Some(m) = FILE_WAITS.lock().unwrap().as_mut() { m.remove(&id); }
+    match got {
+        Some(Ok(text)) => Ok((to, text)),
+        Some(Err(e)) => Err(format!("{to}'s qh refused: {e}")),
+        None => Err(format!("{to}'s qh didn't answer within {}s (busy line, or they just went offline). Try again, or ask them to commit and push a branch.",
+                            FILE_WAIT.as_secs())),
+    }
+}
+
+/// A path as the model gave it, made relative to the repo root (theirs has the same layout):
+/// an absolute path in our clone, or one relative to a session working below the root.
+fn repo_path(cwd: &Path, path: &str) -> String {
+    let path = path.trim().replace('\\', "/");
+    let Some((root, _)) = repo_of(cwd) else { return path };
+    let root = root.canonicalize().unwrap_or(root);
+    if Path::new(&path).is_absolute() {
+        return Path::new(&path).strip_prefix(&root).map(|r| r.to_string_lossy().replace('\\', "/")).unwrap_or(path);
+    }
+    let here = cwd.canonicalize().unwrap_or(cwd.to_path_buf());
+    match here.strip_prefix(&root) {
+        Ok(sub) if !sub.as_os_str().is_empty() => sub.join(&path).to_string_lossy().replace('\\', "/"),
+        _ => path,
+    }
+}
+
+/// The read_team_file tool.
+pub fn read_team_file(cwd: &Path, to: &str, path: &str, start: Option<u64>, end: Option<u64>) -> String {
+    match file_request(cwd, to, json!({"op": "read", "path": repo_path(cwd, path), "start": start, "end": end})) {
+        Ok((who, text)) => format!("[{who}'s working copy, read live: it may include uncommitted changes that aren't in your clone. \
+Read-only: to build on it, wait until they commit and push a branch, then fetch it]\n{text}"),
+        Err(e) => format!("error: {e}"),
+    }
+}
+
+/// The list_team_files tool.
+pub fn list_team_files(cwd: &Path, to: &str) -> String {
+    match file_request(cwd, to, json!({"op": "list"})) {
+        Ok((who, text)) => format!("[{who}'s working copy, live] {text}\nRead one with read_team_file(to=\"{who}\", path=...)."),
+        Err(e) => format!("error: {e}"),
+    }
 }
 
 #[cfg(test)]
@@ -2727,5 +3014,136 @@ mod tests {
         // just a couple: everything in full
         let two: Vec<&NoteIn> = all[..2].iter().collect();
         assert!(shape_notes(&two, &[], &[]).iter().all(|t| t.contains("+ new line")));
+    }
+
+    /// A team repo with the files a teammate might ask for, and one outside it.
+    fn share_repo(tag: &str) -> (PathBuf, PathBuf) {
+        let base = std::env::temp_dir().join(format!("qh-share-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (root, out) = (base.join("proj"), base.join("outside"));
+        for d in [root.join("src"), root.join("dist"), root.join("certs"), out.clone()] { std::fs::create_dir_all(d).unwrap() }
+        git(&root, &["init", "-q"]).unwrap();
+        for (f, body) in [("src/server.js", "const a = 1;\nconst b = 2;\n"), (".gitignore", "dist/\nlocal.txt\n"), ("dist/out.js", "x"),
+                          ("local.txt", "mine"), (".env", "TOKEN=1"), ("certs/server.key", "k"), (".env.example", "TOKEN=")] {
+            std::fs::write(root.join(f), body).unwrap();
+        }
+        std::fs::write(out.join("secret.txt"), "outside").unwrap();
+        (root, out)
+    }
+
+    fn read(root: &Path, path: &str) -> Result<String, String> {
+        serve_file(root, &json!({"op": "read", "path": path}))
+    }
+
+    #[test]
+    fn a_teammate_reads_only_shareable_files_inside_the_repo() {
+        let (root, out) = share_repo("rules");
+        let ok = read(&root, "src/server.js").unwrap();
+        assert!(ok.starts_with("src/server.js (2 lines, changed since their last commit)"), "{ok}");
+        assert!(ok.contains("1\tconst a = 1;\n2\tconst b = 2;"), "{ok}");
+        assert!(read(&root, "./src/server.js").is_ok());
+        assert!(read(&root, ".env.example").is_ok(), "an example env file isn't a secret");
+        for (p, why) in [("../outside/secret.txt", "without .."), ("src/../../outside/secret.txt", "without .."),
+                         (&out.join("secret.txt").to_string_lossy() as &str, "relative to the project root"),
+                         (".env", "secret"), ("certs/server.key", "secret"), (".git/config", "git's own"),
+                         ("dist/out.js", "ignored by git"), ("local.txt", "ignored by git"), ("nope.js", "no such file"),
+                         ("src", "not a file"), ("", "no path")] {
+            let e = read(&root, p).unwrap_err();
+            assert!(e.contains(why), "{p}: {e}");
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(out.join("secret.txt"), root.join("link-out")).unwrap();
+            std::os::unix::fs::symlink(root.join("src/server.js"), root.join("link-in")).unwrap();
+            std::os::unix::fs::symlink(root.join(".env"), root.join("env-link")).unwrap();
+            std::os::unix::fs::symlink(root.join("dist/out.js"), root.join("ignored-link")).unwrap();
+            assert!(read(&root, "link-out").unwrap_err().contains("outside the project"));
+            assert!(read(&root, "link-in").unwrap().starts_with("src/server.js"), "a link inside is read as its target");
+            assert!(read(&root, "env-link").unwrap_err().contains("secret"), "a link to a secret is a secret");
+            assert!(read(&root, "ignored-link").unwrap_err().contains("ignored"), "a link to an ignored file is ignored");
+        }
+        std::fs::write(root.join("bin.dat"), b"ab\0cd").unwrap();
+        assert!(read(&root, "bin.dat").unwrap_err().contains("binary"));
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn a_read_is_capped_and_says_where_to_go_on() {
+        let (root, _) = share_repo("cap");
+        let long: String = (1..=5000).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(root.join("long.txt"), long).unwrap();
+        let r = read(&root, "long.txt").unwrap();
+        assert_eq!(r.lines().count(), 1 + FILE_MAX_LINES, "a header and 2000 lines");
+        assert!(r.contains("showing lines 1-2000, ask again with start_line=2001"), "{}", r.lines().next().unwrap());
+        let r = serve_file(&root, &json!({"op": "read", "path": "long.txt", "start": 4999, "end": 9000})).unwrap();
+        assert!(r.ends_with("4999\tline 4999\n5000\tline 5000") && !r.contains("showing"), "{r}");
+        assert!(serve_file(&root, &json!({"op": "read", "path": "long.txt", "start": 6000})).unwrap_err().contains("only 5000 lines"));
+        let wide: String = (0..400).map(|_| "x".repeat(1000) + "\n").collect();
+        std::fs::write(root.join("wide.txt"), wide).unwrap();
+        let r = read(&root, "wide.txt").unwrap();
+        assert!(r.len() <= FILE_MAX_BYTES + 200 && r.contains("start_line="), "{}", r.len());
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn changed_files_list_leaves_secrets_out() {
+        let (root, _) = share_repo("list");
+        let r = serve_file(&root, &json!({"op": "list"})).unwrap();
+        assert!(r.contains("new\tsrc/server.js") && r.contains("new\t.env.example"), "{r}");
+        assert!(!r.contains("\t.env\n") && !r.ends_with("\t.env") && !r.contains("server.key") && !r.contains("dist/"), "{r}");
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn only_joined_members_on_their_own_key_may_read() {
+        let mut s = state("bob");
+        s.key = Some(tc::new_team_key());
+        let mut p = peer("alice", &["main"], true);
+        p.joined = true;
+        p.pub_key = "ka".into();
+        s.peers.insert("alice".into(), p.clone());
+        p.login = "carol".into();
+        p.joined = false;
+        s.peers.insert("carol".into(), p);
+        assert!(may_read(&s, "alice", "ka").is_ok());
+        assert!(may_read(&s, "alice", "kx").is_err(), "someone else's key");
+        assert!(may_read(&s, "carol", "ka").is_err(), "not joined");
+        assert!(may_read(&s, "mallory", "ka").is_err(), "unknown");
+        s.roles.insert("alice".into(), "viewer".into());
+        assert!(may_read(&s, "alice", "ka").unwrap_err().contains("view only"));
+        s.roles.clear();
+        s.removed.push("alice".into());
+        assert!(may_read(&s, "alice", "ka").unwrap_err().contains("removed"));
+        s.removed.clear();
+        s.key = None;
+        assert!(may_read(&s, "alice", "ka").is_err(), "no team key: not in the team ourselves");
+    }
+
+    #[test]
+    fn file_requests_and_replies_survive_the_line() {
+        let key = tc::new_team_key();
+        let req = json!({"op": "read", "path": "src/server.js", "id": 7, "start": null, "end": null});
+        let bytes = file_msg("o/r", "alice", &key, "file", &req);
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["kind"], "file");
+        assert_eq!(open_file_msg(&key, &v), Some(req));
+        let mut forged = v.clone();
+        forged["login"] = json!("bob");
+        assert_eq!(open_file_msg(&key, &forged), None, "sealed for alice: it can't pass as bob's");
+        assert_eq!(open_file_msg(&tc::new_team_key(), &v), None, "another team's key");
+
+        // a full-size reply, with the worst characters for escaping, fits the line in parts
+        let text: String = (0..FILE_MAX_BYTES / 8).map(|i| if i % 2 == 0 { "\"\\\"\\\t\n\"\\" } else { "é€😀" }).collect();
+        let parts = reply_parts(7, Ok(text.clone()));
+        assert!(parts.len() > 1);
+        for p in &parts {
+            assert!(file_msg("o/r", "bob", &key, "file_re", p).len() < 256 * 1024);
+        }
+        let mut shuffled = parts.clone();
+        shuffled.reverse();
+        assert_eq!(assemble(&shuffled[..shuffled.len() - 1]), None, "a part missing");
+        assert_eq!(assemble(&shuffled), Some(Ok(text)));
+        assert_eq!(assemble(&reply_parts(7, Err("no".into()))), Some(Err("no".into())));
+        assert_eq!(assemble(&reply_parts(7, Ok(String::new()))), Some(Ok(String::new())));
     }
 }

@@ -162,6 +162,11 @@ notify = "auto"
 lsp = "auto"
 lsp_wait_ms = 3000  # how long an edit waits for diagnostics
 
+# team mode: each teammate has their own clone. Teammates' agents may read your working copy
+# live over the encrypted line (read_team_file / list_team_files), uncommitted edits included,
+# never secrets or git-ignored files, and each read shows in your team Activity; or "off"
+team_share_files = "auto"
+
 # run a command after every edit; exit code 2 from a pre_tool hook blocks the action
 [[hooks]]
 event = "post_tool"

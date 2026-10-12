@@ -261,7 +261,7 @@ session tests). Messages from other sessions start with [from <name>]. qh saves 
         let team = crate::team::running_here(&m.cwd());
         tools.into_iter().filter(|t| {
             let n = t["function"]["name"].as_str().unwrap_or("");
-            if (n == "screenshot" && !sees) || (matches!(n, "ask_team" | "tell_team") && !team) {
+            if (n == "screenshot" && !sees) || (matches!(n, "ask_team" | "tell_team" | "read_team_file" | "list_team_files") && !team) {
                 return false;
             }
             !(solo && matches!(n, "list_sessions" | "read_session" | "send_message" | "ask"))
@@ -1053,6 +1053,12 @@ fn last(m: &Member, r: &str) -> String {
         .map(|x| squash(content(x), 160)).unwrap_or_default()
 }
 
+/// How files move between teammates, for every place the model learns about them.
+pub const TEAM_FILES: &str = "Each teammate has their own git clone on their own machine: there is no shared workspace, and \
+nothing you write reaches them by itself. They see your files only with read_team_file (live, read-only) or after you commit \
+and push. Never tell a teammate files are \"in the shared workspace\". To hand off finished work: commit it to a branch \
+qh/<your login>/<topic>, push it (git push asks the user first), then tell_team them the branch name.";
+
 fn hub_schemas() -> Vec<Value> {
     vec![
         schema("list_sessions", "List sessions (tabs): status, task, latest output.", &[], &[]),
@@ -1064,15 +1070,24 @@ fn hub_schemas() -> Vec<Value> {
                &[("to", "string"), ("question", "string")], &["to", "question"]),
         schema("spawn", "Start a worker session on a task; its result comes back to you.",
                &[("name", "string"), ("task", "string"), ("profile", "string")], &["name", "task"]),
-        schema("ask_team", "Ask a teammate (another person on this team project, with their own agent) about code they \
-own or are changing: a function's shape, an API, what they're about to change. Name the file or function in the question \
-and it goes to whoever is changing or using it. First call: their fact sheet (cheap). deep=true: their agent answers from its \
-live session; the answer arrives later as a message, so keep working meanwhile. to = \"login\" or \"login/session\" (optional).",
+        schema("ask_team", "Ask a teammate (another person on this team project, with their own agent and their own git clone \
+on their own machine) about code they own or are changing: a function's shape, an API, what they're about to change. Name the \
+file or function in the question and it goes to whoever is changing or using it. First call: their fact sheet (cheap). deep=true: \
+their agent answers from its live session; the answer arrives later as a message, so keep working meanwhile. to = \"login\" or \
+\"login/session\" (optional). To see their actual code, use read_team_file instead.",
                &[("question", "string"), ("to", "string"), ("deep", "boolean")], &["question"]),
-        schema("tell_team", "Send a teammate's agent a message: hand them their part of a task, or tell them a decision \
+        schema("tell_team", &format!("Send a teammate's agent a message: hand them their part of a task, or tell them a decision \
 they build on (an API shape, a route, a file layout). It lands in their session on their machine. to = \"login\" or \
-\"login/session\" (their first session when no session is named). Be specific: what to build, and the agreed interface.",
+\"login/session\" (their first session when no session is named). Be specific: what to build, and the agreed interface. {TEAM_FILES}"),
                &[("to", "string"), ("text", "string")], &["to", "text"]),
+        schema("read_team_file", "Read a file live from a teammate's working copy (their clone, on their machine), uncommitted \
+changes included; read-only. Their qh answers within seconds if they're online; secrets, git-ignored files and files outside \
+the project are refused. path is relative to the project root. Lines are numbered; pass start_line/end_line for a range \
+(at most 2000 lines per call). to = their login.",
+               &[("to", "string"), ("path", "string"), ("start_line", "integer"), ("end_line", "integer")], &["to", "path"]),
+        schema("list_team_files", "List the files a teammate has changed in their working copy against their last commit \
+(git status on their machine), and their branch: a cheap way to find what to read with read_team_file. to = their login.",
+               &[("to", "string")], &["to"]),
     ]
 }
 

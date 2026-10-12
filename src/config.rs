@@ -44,6 +44,9 @@ pub struct Config {
     /// qh-link relay server for teammates nothing else reaches: "default", "none", or
     /// "host:port#secret" (from `qh relay`), comma-separated for several
     pub relay: String,
+    /// `team_share_files = "auto" | "off"`: whether teammates' agents may read this machine's
+    /// working copy of a team project over the line (read_team_file / list_team_files)
+    pub team_share_files: bool,
     /// look for a newer qh once a day (`update_check = "off"` or false stops it)
     pub update_check: bool,
     /// the safety guard and the OS sandbox for commands (`[sandbox] mode = "off"` turns both off)
@@ -147,6 +150,7 @@ pub fn load_defaults() -> Config {
         ctx_set: false,
         mouse: true,
         relay: "default".into(),
+        team_share_files: true,
         update_check: true,
         notify: "auto".into(),
         lsp: "auto".into(),
@@ -200,6 +204,11 @@ pub fn load() -> Config {
         }
         if let Some(v) = s("mode") { c.mode = v }
         if let Some(v) = s("relay") { c.relay = v }
+        match t.get("team_share_files") {
+            Some(toml::Value::Boolean(b)) => c.team_share_files = *b,
+            Some(toml::Value::String(v)) => c.team_share_files = !matches!(v.to_lowercase().as_str(), "off" | "false" | "no"),
+            _ => {}
+        }
         match t.get("update_check") {
             Some(toml::Value::Boolean(b)) => c.update_check = *b,
             Some(toml::Value::String(v)) => c.update_check = !matches!(v.as_str(), "off" | "false" | "no"),

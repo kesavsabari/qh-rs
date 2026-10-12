@@ -2,6 +2,13 @@
 
 Each version starts with a one-line summary; the website shows it once the version is no longer recent.
 
+## 0.1.9 — unreleased
+
+- **Notifications.** When a turn that ran over 10 s ends, or a permission is waiting, and the
+  terminal isn't focused, qh rings the bell and sends a terminal notification (iTerm2, kitty,
+  foot, ghostty, WezTerm, Windows Terminal). `notify = "desktop"` also uses notify-send or
+  osascript; `notify = "off"` stops it.
+
 ## 0.1.8 — 2026-10-12
 
 Teammates connect from any network, cloud models get their full window, and edits show as diffs.

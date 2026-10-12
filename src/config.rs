@@ -54,6 +54,8 @@ pub struct Config {
     pub sandbox_env_keep: Vec<String>,
     /// `[sandbox] network`: "allowlist" (default: through the proxy, other hosts ask), "off" or "open"
     pub sandbox_network: String,
+    /// `notify`: "auto" (bell + terminal notification), "desktop" (also notify-send / osascript) or "off"
+    pub notify: String,
 }
 
 pub fn config_dir() -> PathBuf {
@@ -154,6 +156,7 @@ pub fn load_defaults() -> Config {
         mouse: true,
         relay: "default".into(),
         update_check: true,
+        notify: "auto".into(),
         sandbox: true,
         sandbox_write: vec![],
         sandbox_hosts: vec![],
@@ -218,6 +221,11 @@ pub fn load() -> Config {
         }
         if let Some(p) = t.get("providers").and_then(|v| v.as_table()) {
             c.providers = p.iter().filter_map(|(k, v)| v.as_table().map(|t| (k.clone(), t.clone()))).collect();
+        }
+        match t.get("notify") {
+            Some(toml::Value::String(v)) => c.notify = v.clone(),
+            Some(toml::Value::Boolean(b)) => c.notify = if *b { "auto" } else { "off" }.into(),
+            _ => {}
         }
         if let Some(v) = t.get("mouse").and_then(|v| v.as_bool()) { c.mouse = v }
         if let Some(v) = t.get("browser_headless").and_then(|v| v.as_bool()) { c.browser_headless = v }

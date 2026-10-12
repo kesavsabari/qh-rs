@@ -622,7 +622,7 @@ fn dispatch(hub: &Arc<Hub>, m: &Arc<Member>, name: &str, args: &Value) -> String
                 None => return format!("error: {who} isn't a teammate with a session open right now; tell the user"),
             }
         } else { session.to_string() };
-        return match crate::team::send(who, &session, &format!("[from {}'s agent] {text}", crate::team::me().unwrap_or_default())) {
+        return match crate::team::send_from(who, &session, &format!("[from {}'s agent] {text}", crate::team::me().unwrap_or_default()), &m.name) {
             Ok(m) => m,
             Err(e) => format!("error: {e}"),
         };

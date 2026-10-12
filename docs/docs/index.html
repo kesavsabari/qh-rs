@@ -238,7 +238,9 @@ jobs:
     <tr><td><code>/cwd path</code></td><td>Change this tab's working folder</td></tr>
     <tr><td><code>/new --worktree name</code> · <code>/worktree</code></td><td>Give a tab its own git worktree (<code>.qh/worktrees/name</code>, branch <code>qh/name</code>) so two agents never edit the same checkout</td></tr>
     <tr><td><code>/merge</code> · <code>/merge --discard</code></td><td>Show the worktree's diff, then commit and merge it into its base branch (refused if the main checkout has uncommitted changes; a conflict is aborted), or remove it after a confirm</td></tr>
-    <tr><td><code>/team</code></td><td>Your team: who's online, read or message their sessions</td></tr>
+    <tr><td><code>/team</code></td><td>Your team: who's online, read or message their sessions; in a team, the team room (Ctrl+T)</td></tr>
+    <tr><td><code>/dm &lt;login&gt; &lt;text&gt;</code></td><td>A private message to a teammate: only the two of you can read it</td></tr>
+    <tr><td><code>/team group &lt;name&gt; &lt;login&gt;…</code></td><td>A private group chat; <code>/team group</code> lists yours</td></tr>
     <tr><td><code>/map</code></td><td>Live map of tabs and the messages between them</td></tr>
     <tr><td><code>/mcp</code> · <code>/commands</code></td><td>MCP servers, and your own commands</td></tr>
     <tr><td><code>/docs</code></td><td>Open this page</td></tr>
@@ -293,7 +295,12 @@ jobs:
     <li><b>write</b> into it: your message goes to that session on their computer.</li>
   </ul>
   <p>Or type directly: <code>/team open alex api</code> and <code>/team send alex api add rate limiting to login</code>.</p>
-  <p>When a teammate writes into one of your sessions, you're asked first: <b>allow once</b>, <b>always allow</b> that person, or <b>deny</b>. The message waits until you answer, and waits for you if you're offline.</p>
+  <p>When a teammate (or their agent, with <code>tell_team</code>) asks one of your sessions to do something, it lands in the <b>Requests</b> tab of the team room (Ctrl+T), never straight in the session, whatever their role and whatever mode the session runs in, auto included. The status bar says <code>· 1 request (Ctrl+T)</code> and you get a notification. Pick it and press <b>Enter</b> or <b>a</b> to accept (it goes into that session as <code>[accepted request from alex]: …</code>), <b>r</b> to reply without starting anything (the request keeps waiting), or <b>d</b> to decline (alex is told privately). Questions their agents ask yours are still answered on their own from a read-only copy, unless <code>/answers ask</code>, which puts them in Requests too.</p>
+  <h3>Chat, private messages and groups</h3>
+  <p>The room's <b>Chat</b> tab lists channels on the left: <code># team</code> for everyone, <code>@login</code> for a private conversation with each teammate, and your groups. Pick one and press Enter to write; <code>p</code> on the map writes privately to the person you picked. From the prompt: <code>/dm alex the staging password changed</code>, and <code>/team group backend alex sam</code> to make a group (<code>/team group</code> lists yours).</p>
+  <p>Write <code>@alex</code> in any message to ping alex (a notification, the line highlighted, and an <code>@</code> on the channel's unread count); <code>@team</code> pings everyone. An email address like <code>me@alex.dev</code> doesn't ping anyone.</p>
+  <p>Chat is for people: nothing in it ever reaches an agent unless you paste it into a session yourself.</p>
+  <p>Notifications (requests, pings, private messages, a teammate's answer) follow the <code>notify</code> setting and show only while the terminal isn't focused; <code>notify = "off"</code> silences them.</p>
   <p>Each of you works in your own clone: there's no shared folder, and nothing you write reaches a teammate by itself. While you're both online, their agent can read a file from your working copy over the encrypted direct line (<code>read_team_file</code>), uncommitted changes included, and see which files you've changed (<code>list_team_files</code>). It's read-only, answered in seconds without asking you, and every read shows in your team Activity, like <code>alex's agent read server.js</code>. To hand over finished work, the agent commits it to a branch <code>qh/&lt;login&gt;/&lt;topic&gt;</code>, pushes it (you're asked first) and tells the teammate the branch name.</p>
 </section>
 
@@ -302,6 +309,7 @@ jobs:
   <ul>
     <li>Only people with push access to the repo can take part. Someone who just knows the repo's name gets nothing.</li>
     <li>Everything qh shares (sessions, conversations, messages, file names) is encrypted with a key only the team has, so even on a public repo outsiders see noise. They can see team members' GitHub usernames and when each was last online.</li>
+    <li>Private messages and group chats get a second lock inside that one: a private message is sealed with a key only its two people share (from their own member keys), and a group has its own key that only its members are given. Other teammates see only sealed boxes. Both travel through the repo like everything else, so a private message reaches someone who's offline when they're back.</li>
     <li>A new member gets the key from a teammate who's already in, the next time that teammate is online.</li>
     <li>Each agent runs on its owner's computer, with the owner's model and keys. A teammate's message never runs without the owner allowing it, and the owner approves every file change and command it leads to.</li>
     <li>A teammate's agent can read only plain files inside the project, and only while you're online: never secret files (<code>.env</code>, keys, anything under <code>~/.ssh</code>), git's own files, or anything your <code>.gitignore</code> leaves out. Links pointing out of the project are refused, replies stop at 2,000 lines or 200&nbsp;KB, and people you have as view only or removed get nothing. <code>team_share_files = "off"</code> in your config turns it off.</li>

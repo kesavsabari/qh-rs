@@ -4,6 +4,21 @@ Each version starts with a one-line summary; the website shows it once the versi
 
 ## 0.2.0 — unreleased
 
+- **Requests: teammates' work waits for you.** Work a teammate or their agent sends one of your
+  sessions (`tell_team`, `/team send`, the room) now lands in a new **Requests** tab in the team
+  room instead of the session, always: for "trusted" teammates and in auto mode too. Enter/`a`
+  accepts it (it goes in as `[accepted request from <login>]: …`), `r` replies without starting
+  anything, `d` declines and tells them privately. A request from elsewhere can no longer be
+  allowed by a stray key on another tab. The status bar shows `· N requests`. Questions their
+  agents ask stay automatic (read-only copy) unless `/answers ask`.
+- **Private messages, groups and pings.** The room's Chat tab has channels: `# team`, `@login`
+  per teammate, and groups. `/dm <login> <text>`, `/team group <name> <login>…` (and
+  `/team group` to list). A DM is sealed with a key only its two people share (X25519 between
+  their member keys), a group with its own key handed only to its members; other teammates see
+  sealed boxes. `@login` pings that person, `@team` everyone (email addresses don't); unread counts
+  per channel, `· N unread` in the status bar. Chat never reaches an agent.
+- **Notifications for team events**: a new request, a ping, a private message, a teammate's answer,
+  one each, following `notify` and only while the terminal isn't focused.
 - **Mention teammates.** `@login` in a message tells the model that's another person on the
   team, what they're on, and that their part is theirs. A new `tell_team` tool hands their agent
   the work (it asks you first, outside auto mode). `send_message` to a teammate says to use it.

@@ -1077,7 +1077,7 @@ their agent answers from its live session; the answer arrives later as a message
 \"login/session\" (optional). To see their actual code, use read_team_file instead.",
                &[("question", "string"), ("to", "string"), ("deep", "boolean")], &["question"]),
         schema("tell_team", &format!("Send a teammate's agent a message: hand them their part of a task, or tell them a decision \
-they build on (an API shape, a route, a file layout). It lands in their session on their machine. to = \"login\" or \
+they build on (an API shape, a route, a file layout). It waits in their Requests until the person accepts it, then runs in their session on their machine; they may reply or decline instead. to = \"login\" or \
 \"login/session\" (their first session when no session is named). Be specific: what to build, and the agreed interface. {TEAM_FILES}"),
                &[("to", "string"), ("text", "string")], &["to", "text"]),
         schema("read_team_file", "Read a file live from a teammate's working copy (their clone, on their machine), uncommitted \

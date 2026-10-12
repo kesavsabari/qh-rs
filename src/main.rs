@@ -14,7 +14,13 @@ mod hub;
 mod link;
 mod prompt;
 mod providers;
+mod proxy;
 mod relay;
+mod sandbox;
+#[cfg(target_os = "linux")]
+mod sandbox_linux;
+mod sandbox_macos;
+mod sandbox_windows;
 mod session;
 mod setup;
 mod skills;
@@ -118,6 +124,14 @@ fn login(name: &str) -> i32 {
 
 fn main() {
     let argv: Vec<String> = std::env::args().collect();
+    // the command sandbox's helper: first, while this process still has one thread (namespaces need that)
+    #[cfg(target_os = "linux")]
+    if argv.get(1).map(String::as_str) == Some("__sandbox") {
+        std::process::exit(sandbox_linux::helper_main(&argv[2..]));
+    }
+    if argv.get(1).map(String::as_str) == Some("__tool") {
+        std::process::exit(tool_once(&argv[2..]));
+    }
     match (argv.get(1).map(String::as_str), argv.get(2).map(String::as_str)) {
         (Some("team"), Some("create")) => std::process::exit(teamsetup::create(&argv[3..])),
         (Some("join"), Some(repo)) => std::process::exit(teamsetup::join(repo, argv.get(3).map(String::as_str))),
@@ -128,6 +142,19 @@ fn main() {
             std::process::exit(0);
         }
         (Some("update"), _) => std::process::exit(update::cli()),
+        (Some("sandbox"), Some("reset")) => {
+            // Windows: take back every folder permission the sandbox granted (they return on the next command)
+            #[cfg(windows)]
+            match sandbox_windows::reset() {
+                Ok(n) => { println!("removed the sandbox's permissions from {n} folders"); std::process::exit(0) }
+                Err(e) => { eprintln!("{e}"); std::process::exit(1) }
+            }
+            #[cfg(not(windows))]
+            {
+                println!("nothing to reset: only the Windows sandbox changes folder permissions");
+                std::process::exit(0);
+            }
+        }
         (Some("docs"), _) => {
             platform::open_url(platform::DOCS);
             println!("{}", platform::DOCS);
@@ -260,4 +287,36 @@ fn headless(hub: &std::sync::Arc<Hub>, prompts: &[String], rx: std::sync::mpsc::
         let _ = std::fs::write(path, serde_json::json!({"tokens": peak, "calls": calls, "compacts": compacts}).to_string());
     }
     code
+}
+
+/// `qh __tool <name> '<json args>'`: one tool call in the current folder as a session would make
+/// it, with the safety guard and the sandbox, no model and nobody to ask (a guarded call is
+/// refused, exit 3). For the red-team tests; network asks are refused too.
+fn tool_once(args: &[String]) -> i32 {
+    let cfg = config::load();
+    if args.first().map(String::as_str) == Some("--status") {
+        match sandbox::unavailable() {
+            None => println!("sandboxed"),
+            Some(why) => println!("unsandboxed: {why}"),
+        }
+        return 0;
+    }
+    let (Some(name), Some(a)) = (args.first(), args.get(1).and_then(|a| serde_json::from_str::<serde_json::Value>(a).ok())) else {
+        eprintln!("usage: qh __tool <name> '<json args>'");
+        return 2;
+    };
+    let mut cwd = std::env::current_dir().unwrap_or_default();
+    if let Some(why) = sandbox::guard(name, &a, &cwd, &cwd, &cfg) {
+        println!("refused: it {why}");
+        return 3;
+    }
+    let hosts = cfg.sandbox_hosts.clone();
+    let proxy = proxy::start(std::sync::Arc::new(move |h: &str, _| sandbox::host_listed(h, &hosts))).ok();
+    #[cfg(unix)]
+    let proxy = proxy.map(|p| (p.port, p.sock));
+    #[cfg(not(unix))]
+    let proxy = proxy.map(|p| (p.port, None));
+    let sb = sandbox::Ctx { root: cwd.clone(), proxy: if cfg!(windows) { None } else { proxy } };
+    println!("{}", tools::call(name, &a, &cfg, &mut cwd, &tier::Limits::for_ctx(32768), &sb));
+    0
 }

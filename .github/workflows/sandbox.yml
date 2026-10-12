@@ -1,0 +1,40 @@
+name: sandbox
+# The safety exit check (PLAN.md, Phase 5): the red-team suite blocked 100% and real work passing
+# inside the sandbox, on Linux (with and without unprivileged namespaces), macOS and Windows.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, name: linux-no-namespaces }  # Ubuntu 24.04 restricts unprivileged user namespaces
+          - { os: ubuntu-latest, name: linux-namespaces, userns: true }
+          - { os: macos-latest, name: macos }
+          - { os: windows-latest, name: windows }
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    env:
+      QH_REQUIRE_SANDBOX: "1"
+      QH_REALWORK: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: pytest
+        shell: bash
+        run: python3 -m pip install --quiet pytest || python -m pip install --quiet pytest
+      - name: allow unprivileged user namespaces
+        if: matrix.userns
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: what this runner offers
+        if: runner.os == 'Linux'
+        run: cat /sys/kernel/security/lsm; echo; uname -r
+      - run: cargo test --release -- --nocapture
+        shell: bash

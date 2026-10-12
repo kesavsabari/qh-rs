@@ -89,6 +89,11 @@ fn turn(hub: &Arc<Hub>, m: &Arc<Member>, user: &str) -> Result<String, Error> {
             hub.emit(&m.name, Event::Notice("teammate's answer arrived".into()));
             m.push(json!({"role": "user", "content": a}));
         }
+        // a helper's result or the waiting session's follow-up, arrived mid-turn: this turn takes
+        // it in, instead of answering it in a turn of its own afterwards
+        for f in hub.take_followups(m) {
+            m.push(json!({"role": "user", "content": f}));
+        }
         let (snapshot, schemas) = (lock(&m.msgs).clone(), hub.visible_tools(m));
         let msg = call(hub, m, &snapshot, &schemas, false)?;
         m.push(msg.clone());
@@ -360,8 +365,11 @@ End with one line 'RELIED ON: <comma-separated function, type or field names you
         for c in calls {
             let name = c["function"]["name"].as_str().unwrap_or("").to_string();
             let args = parse_args(&c["function"]["arguments"]);
-            let out = if schemas.iter().any(|s| s["function"]["name"] == name.as_str()) && read_only(hub, &name, &args) {
-                tools::call(&name, &args, &hub.cfg, &mut cwd, &hub.limits(m))
+            let guarded = crate::sandbox::guard(&name, &args, &cwd, &m.root, &hub.cfg);
+            let out = if let Some(why) = guarded {
+                format!("error: not here: it {why}")
+            } else if schemas.iter().any(|s| s["function"]["name"] == name.as_str()) && read_only(hub, &name, &args) {
+                tools::call(&name, &args, &hub.cfg, &mut cwd, &hub.limits(m), &crate::sandbox::Ctx { root: m.root.clone(), proxy: None })
             } else {
                 format!("error: {name} isn't available here: read_file, grep and find_references only")
             };
@@ -619,12 +627,18 @@ fn dispatch(hub: &Arc<Hub>, m: &Arc<Member>, name: &str, args: &Value) -> String
             }
         }
     }
-    if tools::risky(name, &args, &hub.cfg) && !allowed(&lock(&m.set).allow, name, &args)
-        && !hub.confirm(m, name, &args) {
+    // a secret, a write outside the project, a protected path, an unsandboxed run: asked in every mode
+    if let Some(why) = crate::sandbox::guard(name, &args, &cwd, &m.root, &hub.cfg) {
+        if !hub.confirm(m, name, &args, Some(&why)) {
+            return format!("denied by user: it {why}. Don't try another way around it; ask the user if it's needed.");
+        }
+    } else if tools::risky(name, &args, &hub.cfg) && !allowed(&lock(&m.set).allow, name, &args)
+        && !hub.confirm(m, name, &args, None) {
         return "denied by user".into();
     }
     lock(&m.turn).ckpt.snapshot(name, &args, &cwd);
-    let mut out = tools::call(name, &args, &hub.cfg, &mut cwd, &hub.limits(m));
+    let sb = if name == "bash" { hub.sandbox_ctx(m) } else { crate::sandbox::Ctx { root: m.root.clone(), proxy: None } };
+    let mut out = tools::call(name, &args, &hub.cfg, &mut cwd, &hub.limits(m), &sb);
     if !out.starts_with("error") {
         for t in &touched {
             crate::team::claim(&m.name, &lock(&m.purpose).clone(), t);
@@ -729,5 +743,46 @@ mod rule_tests {
         assert!(!ok(&["cargo*"], "cargo build & rm x"));
         assert!(!ok(&["cargo*"], "cargo $(rm x)"));
         assert!(!ok(&[], "cd x && cargo check"));
+    }
+}
+
+#[cfg(test)]
+mod guard_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// auto mode and -y approve ordinary calls, but never one the safety guard flags: that asks, and
+    /// with nobody to say yes it is refused. Every target here is harmless if the guard ever failed.
+    #[test]
+    fn auto_mode_and_yes_still_ask_about_guarded_calls() {
+        let _env = lock(&crate::hub::tests::ENV);
+        let root = crate::sandbox::canon(&std::env::temp_dir()).join(format!("qh-guard-e2e-{}", std::process::id()));
+        std::fs::create_dir_all(root.join(".git/hooks")).unwrap();
+        std::env::set_var("QH_STATE_DIR", root.join("state"));
+        std::fs::write(root.join(".env"), "API_KEY=s3cr3t-value\n").unwrap();
+        let asked = Arc::new(Mutex::new(vec![]));
+        let seen = asked.clone();
+        let emit: crate::hub::Emit = Box::new(move |_, ev| if let Event::Confirm { tool, reply, guard, .. } = ev {
+            lock(&seen).push((tool, guard));
+            let _ = reply.send(crate::hub::Answer::No);
+        });
+        let mut cfg = crate::config::load_defaults();
+        cfg.sandbox = true;
+        let hub = Hub::new(cfg, Some(format!("guard-{}", std::process::id())), emit, true);
+        hub.set_mode("auto");
+        let m = hub.add("g", None, "", "", None, false, Some(root.clone())).unwrap();
+        let outside = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/qh-guard-outside.txt");
+        let out = dispatch(&hub, &m, "write_file", &json!({"path": ".git/hooks/pre-commit", "content": "#!/bin/sh\necho hi"}));
+        assert!(out.starts_with("denied") && !root.join(".git/hooks/pre-commit").exists(), "{out}");
+        let out = dispatch(&hub, &m, "write_file", &json!({"path": outside, "content": "x"}));
+        assert!(out.starts_with("denied") && !outside.exists(), "{out}");
+        let out = dispatch(&hub, &m, "read_file", &json!({"path": ".env"}));
+        assert!(out.starts_with("denied") && !out.contains("s3cr3t"), "{out}");
+        assert_eq!(lock(&asked).len(), 3);
+        assert!(lock(&asked).iter().all(|(_, g)| *g), "asked as guarded calls");
+        // an ordinary edit in the project goes through without asking in auto
+        let out = dispatch(&hub, &m, "write_file", &json!({"path": "src/ok.rs", "content": "// ok"}));
+        assert!(root.join("src/ok.rs").exists() && lock(&asked).len() == 3, "{out}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

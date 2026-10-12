@@ -88,18 +88,22 @@ pub fn shell_cmd(script: &str) -> Command {
 }
 
 pub fn shell_cmd_for(sh: Shell, script: &str) -> Command {
+    let (prog, args) = shell_argv_for(sh, script);
+    let mut c = Command::new(prog);
+    c.args(args);
+    c
+}
+
+/// The program and arguments that run `script` in the platform shell.
+pub fn shell_argv(script: &str) -> (PathBuf, Vec<String>) {
+    shell_argv_for(shell(), script)
+}
+
+fn shell_argv_for(sh: Shell, script: &str) -> (PathBuf, Vec<String>) {
     match sh {
-        Shell::Bash => {
-            let mut c = Command::new(bash_exe().clone().unwrap_or_else(|| PathBuf::from("bash")));
-            c.arg("-c").arg(script);
-            c
-        }
-        Shell::PowerShell => {
-            let exe = if on_path("pwsh") { "pwsh" } else { "powershell" };
-            let mut c = Command::new(exe);
-            c.args(["-NoProfile", "-NonInteractive", "-Command", script]);
-            c
-        }
+        Shell::Bash => (bash_exe().clone().unwrap_or_else(|| PathBuf::from("bash")), vec!["-c".into(), script.into()]),
+        Shell::PowerShell => (PathBuf::from(if on_path("pwsh") { "pwsh" } else { "powershell" }),
+                              ["-NoProfile", "-NonInteractive", "-Command", script].map(String::from).to_vec()),
     }
 }
 

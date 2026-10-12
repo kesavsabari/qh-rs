@@ -44,6 +44,16 @@ pub struct Config {
     pub relay: String,
     /// look for a newer qh once a day (`update_check = "off"` or false stops it)
     pub update_check: bool,
+    /// the safety guard and the OS sandbox for commands (`[sandbox] mode = "off"` turns both off)
+    pub sandbox: bool,
+    /// `[sandbox] writable`: more folders the model may write without asking
+    pub sandbox_write: Vec<String>,
+    /// `[sandbox] allow_hosts`: more hosts commands may reach without asking ("example.com", "*.example.com")
+    pub sandbox_hosts: Vec<String>,
+    /// `[sandbox] env_keep`: secret-looking variables commands still get
+    pub sandbox_env_keep: Vec<String>,
+    /// `[sandbox] network`: "allowlist" (default: through the proxy, other hosts ask), "off" or "open"
+    pub sandbox_network: String,
 }
 
 pub fn config_dir() -> PathBuf {
@@ -116,8 +126,9 @@ mod tests {
     }
 }
 
-pub fn load() -> Config {
-    let mut c = Config {
+/// The built-in settings, before config.toml.
+pub fn load_defaults() -> Config {
+    Config {
         // OLLAMA_HOST is what the ollama CLI itself reads ("127.0.0.1:11434" or a full URL)
         host: std::env::var("OLLAMA_HOST").ok().filter(|h| !h.is_empty() && !h.starts_with("0.0.0.0"))
             .map(|h| if h.starts_with("http") { h } else { format!("http://{h}") })
@@ -143,7 +154,22 @@ pub fn load() -> Config {
         mouse: true,
         relay: "default".into(),
         update_check: true,
-    };
+        sandbox: true,
+        sandbox_write: vec![],
+        sandbox_hosts: vec![],
+        sandbox_env_keep: vec![],
+        sandbox_network: "allowlist".into(),
+    }
+}
+
+/// The config loaded once, for code with no Config at hand (tool schemas, the file walker).
+pub fn load_cached() -> &'static Config {
+    static C: std::sync::OnceLock<Config> = std::sync::OnceLock::new();
+    C.get_or_init(load)
+}
+
+pub fn load() -> Config {
+    let mut c = load_defaults();
     let path = std::env::var("QH_CONFIG")
         .map(PathBuf::from)
         .unwrap_or_else(|_| crate::platform::config_base().join("config.toml"));
@@ -180,6 +206,15 @@ pub fn load() -> Config {
             Some(toml::Value::Boolean(b)) => c.update_check = *b,
             Some(toml::Value::String(v)) => c.update_check = !matches!(v.as_str(), "off" | "false" | "no"),
             _ => {}
+        }
+        if let Some(sb) = t.get("sandbox").and_then(|v| v.as_table()) {
+            let list = |k: &str| sb.get(k).and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
+            c.sandbox = !matches!(sb.get("mode"), Some(toml::Value::String(m)) if matches!(m.as_str(), "off" | "false" | "no"))
+                && !matches!(sb.get("mode"), Some(toml::Value::Boolean(false)));
+            (c.sandbox_write, c.sandbox_hosts, c.sandbox_env_keep) = (list("writable"), list("allow_hosts"), list("env_keep"));
+            if let Some(n) = sb.get("network").and_then(|v| v.as_str()) {
+                c.sandbox_network = n.to_lowercase();
+            }
         }
         if let Some(p) = t.get("providers").and_then(|v| v.as_table()) {
             c.providers = p.iter().filter_map(|(k, v)| v.as_table().map(|t| (k.clone(), t.clone()))).collect();

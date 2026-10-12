@@ -43,7 +43,9 @@ pub enum Event {
     Compact { stage: &'static str, before: usize, after: usize },
     Notice(String),
     Done { tokens: u64 },
-    Confirm { tool: String, args: Value, reply: Sender<Answer>, cwd: PathBuf, warn: String },
+    /// `guard`: the call crosses a safety line (sandbox::guard); it asks in every mode and offers no "always"
+    /// (network asks excepted: those may add a `net:` rule)
+    Confirm { tool: String, args: Value, reply: Sender<Answer>, cwd: PathBuf, warn: String, guard: bool },
     Added,
     Log(String),
     Changed,
@@ -87,6 +89,8 @@ pub struct Ctl {
     inbox: VecDeque<Msg>,
     pub hops: u32,
     reply: Option<Sender<String>>,
+    /// Sessions that get this turn's final reply automatically: the asker, or whoever sent the work.
+    owed: Vec<String>,
     pub asking: String,
     pub running: bool,
 }
@@ -94,9 +98,18 @@ pub struct Ctl {
 pub struct Member {
     pub name: String,
     pub purpose: Mutex<String>, // the session's role: set by spawn, /role, or named from its first real request
+    /// The role was only named from the first request: it labels the tab and routes work, but stays
+    /// out of the system prompt (it would tell a lone session to refuse other work, and changing
+    /// the prompt mid-conversation throws away the provider's prompt cache).
+    pub named: AtomicBool,
     pub spawner: String,
     pub session: Mutex<PathBuf>,
     pub cwd: Mutex<PathBuf>, // this session's working folder; bash `cd` moves only this session
+    /// the project, fixed when the session starts: file tools write here without asking, and
+    /// sandboxed commands may write here (a `cd` elsewhere doesn't move it)
+    pub root: PathBuf,
+    /// this session's allowlist proxy for sandboxed commands, started on first use: (port, Unix socket)
+    proxy: std::sync::OnceLock<Option<(u16, Option<PathBuf>)>>,
     pub msgs: Mutex<Vec<Value>>,
     pub set: Mutex<Settings>,
     pub turn: Mutex<Turn>,
@@ -123,6 +136,11 @@ impl Member {
 
     pub fn cwd(&self) -> PathBuf {
         lock(&self.cwd).clone()
+    }
+
+    /// The sandbox context as it stands, without starting the proxy (for /sandbox).
+    pub fn sandbox_now(&self) -> crate::sandbox::Ctx {
+        crate::sandbox::Ctx { root: self.root.clone(), proxy: self.proxy.get().cloned().flatten() }
     }
 
     pub fn status(&self) -> &'static str {
@@ -245,9 +263,23 @@ session tests). Messages from other sessions start with [from <name>]. qh saves 
         s
     }
 
+    /// Name a session's role from its first request: the label only, the prompt is unchanged.
+    pub fn name_role(&self, m: &Member, role: &str) {
+        *lock(&m.purpose) = role.to_string();
+        m.named.store(true, Relaxed);
+        self.save();
+        self.changed();
+    }
+
+    /// The role that goes into the system prompt: none when it was only named automatically.
+    fn prompt_role(m: &Member) -> String {
+        if m.named.load(Relaxed) { String::new() } else { lock(&m.purpose).clone() }
+    }
+
     /// Give a session a role and put it into its system prompt.
     pub fn set_role(&self, m: &Member, role: &str) {
         *lock(&m.purpose) = role.to_string();
+        m.named.store(false, Relaxed);
         let profile = lock(&m.set).profile.clone();
         let sys = self.system_msg(&m.name, &profile, role, &m.cwd());
         let mut msgs = lock(&m.msgs);
@@ -290,6 +322,8 @@ session tests). Messages from other sessions start with [from <name>]. qh saves 
         let m = Arc::new(Member {
             name: name.into(), purpose: Mutex::new(purpose.into()), spawner: spawner.into(),
             session: Mutex::new(path.clone()),
+            root: crate::sandbox::canon(&cwd),
+            proxy: std::sync::OnceLock::new(),
             cwd: Mutex::new(cwd),
             msgs: Mutex::new(msgs),
             set: Mutex::new(Settings {
@@ -301,6 +335,7 @@ session tests). Messages from other sessions start with [from <name>]. qh saves 
             ctl: Mutex::new(Ctl::default()),
             cancel: AtomicBool::new(false),
             chars: AtomicUsize::new(0),
+            named: AtomicBool::new(false),
         });
         m.touched(&lock(&m.msgs));
         lock(&self.members).push(m.clone());
@@ -317,7 +352,7 @@ session tests). Messages from other sessions start with [from <name>]. qh saves 
             set.profile = p.into();
             set.tools = self.tools_for(p, !m.spawner.is_empty());
         }
-        let msgs = vec![json!({"role": "system", "content": self.system_msg(&m.name, &set.profile, &lock(&m.purpose), &m.cwd())})];
+        let msgs = vec![json!({"role": "system", "content": self.system_msg(&m.name, &set.profile, &Self::prompt_role(m), &m.cwd())})];
         m.touched(&msgs);
         *lock(&m.msgs) = msgs;
         *lock(&m.turn) = new_turn(&path);
@@ -342,9 +377,9 @@ session tests). Messages from other sessions start with [from <name>]. qh saves 
 
     pub fn save(&self) {
         let ms: Vec<Value> = lock(&self.members).iter().map(|m| json!({
-            "name": m.name, "profile": lock(&m.set).profile, "purpose": *lock(&m.purpose), "spawner": m.spawner,
+            "name": m.name, "profile": lock(&m.set).profile, "purpose": *lock(&m.purpose), "named": m.named.load(Relaxed), "spawner": m.spawner,
             "session": lock(&m.session).display().to_string(), "cwd": m.cwd().display().to_string(),
-            "model": lock(&m.set).model.clone(), "provider": lock(&m.set).provider.clone()})).collect();
+            "root": m.root.display().to_string(), "model": lock(&m.set).model.clone(), "provider": lock(&m.set).provider.clone()})).collect();
         let _ = std::fs::create_dir_all(hubs_dir());
         let _ = std::fs::write(hubs_dir().join(format!("{}.json", self.id)),
                                serde_json::to_string_pretty(&json!({"members": ms})).unwrap_or_default());
@@ -365,8 +400,18 @@ session tests). Messages from other sessions start with [from <name>]. qh saves 
             let sp = PathBuf::from(g("session"));
             let p = g("profile");
             let cwd = Some(PathBuf::from(g("cwd"))).filter(|c| !c.as_os_str().is_empty());
-            if let Ok(m) = self.add(&g("name"), Some(p.as_str()).filter(|p| !p.is_empty()), &g("purpose"), &g("spawner"),
-                                    Some(sp).filter(|p| p.exists()), false, cwd) {
+            let root = Some(PathBuf::from(g("root"))).filter(|c| c.is_dir()).or(cwd.clone());
+            let named = d["named"].as_bool().unwrap_or(false);
+            let role = if named { String::new() } else { g("purpose") };
+            if let Ok(m) = self.add(&g("name"), Some(p.as_str()).filter(|p| !p.is_empty()), &role, &g("spawner"),
+                                    Some(sp).filter(|p| p.exists()), false, root) {
+                if let Some(c) = cwd.filter(|c| c.is_dir()) {
+                    *lock(&m.cwd) = c; // where its last `cd` left it, inside or outside the project
+                }
+                if named {
+                    *lock(&m.purpose) = g("purpose");
+                    m.named.store(true, Relaxed);
+                }
                 let mut s = lock(&m.set);
                 if !g("model").is_empty() {
                     s.model = g("model");
@@ -411,9 +456,49 @@ session tests). Messages from other sessions start with [from <name>]. qh saves 
         self.changed();
     }
 
-    fn next(self: &Arc<Self>, m: &Arc<Member>) {
+    /// Who should hear when a turn on these messages ends: the senders of work, but not for a
+    /// completion report (two sessions would ping-pong), the user (who sees the turn), or a
+    /// worker this session spawned (it works for this session, not the other way round).
+    fn owed_for(&self, me: &str, batch: &[(String, bool)]) -> Vec<String> {
+        let mut out: Vec<String> = vec![];
+        for (sender, report) in batch {
+            let worker = self.get(sender).is_some_and(|s| s.spawner == me);
+            if !report && sender != "user" && !worker && self.get(sender).is_some() && !out.contains(sender) {
+                out.push(sender.clone());
+            }
+        }
+        out
+    }
+
+    /// Messages that belong in the turn already running: completion reports, and follow-ups from
+    /// a session waiting on this turn's result. Taken off the inbox so they don't start a turn of
+    /// their own after this one.
+    pub fn take_followups(&self, m: &Member) -> Vec<String> {
+        if self.paused.load(Relaxed) {
+            return vec![];
+        }
         let mut c = lock(&m.ctl);
-        if c.running || c.inbox.is_empty() || self.get(&m.name).is_none() {
+        let owed = c.owed.clone();
+        let (mut out, mut keep) = (vec![], VecDeque::new());
+        while let Some(msg) = c.inbox.pop_front() {
+            if msg.reply.is_none() && msg.hops <= MAX_HOPS && (msg.report || owed.contains(&msg.sender)) {
+                c.hops = c.hops.max(msg.hops);
+                out.push(format!("[from {}] {}", msg.sender, msg.text));
+            } else {
+                keep.push_back(msg);
+            }
+        }
+        c.inbox = keep;
+        out
+    }
+
+    fn next(self: &Arc<Self>, m: &Arc<Member>) {
+        // looked up before taking ctl: never lock the member list while holding a session's ctl
+        if self.get(&m.name).is_none() {
+            return;
+        }
+        let mut c = lock(&m.ctl);
+        if c.running || c.inbox.is_empty() {
             return;
         }
         if self.paused.load(Relaxed) || c.inbox[0].hops > MAX_HOPS {
@@ -426,12 +511,26 @@ session tests). Messages from other sessions start with [from <name>]. qh saves 
         c.hops = msg.hops;
         c.running = true;
         let mut text = if msg.sender == "user" { msg.text } else { format!("[from {}] {}", msg.sender, msg.text) };
+        // other sessions' messages that queued up while this one was busy go in the same turn,
+        // so it answers once instead of once per message
+        let mut batch = vec![(msg.sender.clone(), msg.report)];
+        if msg.sender != "user" && msg.reply.is_none() {
+            while c.inbox.front().is_some_and(|n| n.sender != "user" && n.reply.is_none() && n.hops <= MAX_HOPS) {
+                let n = c.inbox.pop_front().unwrap();
+                c.hops = c.hops.max(n.hops);
+                text += &format!("\n\n[from {}] {}", n.sender, n.text);
+                batch.push((n.sender, n.report));
+            }
+        }
         if msg.reply.is_some() {
             text += &format!("\n(reply with your answer as your final message; it is returned to {})", msg.sender);
         }
+        let asker = msg.reply.is_some().then(|| msg.sender.clone());
         c.reply = msg.reply;
-        let is_report = msg.report;
         drop(c);
+        // set before the turn starts, so its send_message already knows who gets the result
+        let owed = match asker { Some(a) => vec![a], None => self.owed_for(&m.name, &batch) };
+        lock(&m.ctl).owed = owed;
         m.cancel.store(false, Relaxed);
         *lock(&m.status) = "working";
         let (hub, m, sender) = (self.clone(), m.clone(), msg.sender);
@@ -444,7 +543,7 @@ session tests). Messages from other sessions start with [from <name>]. qh saves 
                 std::thread::spawn(move || {
                     if let Some(role) = engine::label(&hub, &m, &request) {
                         if lock(&m.purpose).is_empty() {
-                            hub.set_role(&m, &role);
+                            hub.name_role(&m, &role);
                         }
                     }
                 });
@@ -461,17 +560,19 @@ session tests). Messages from other sessions start with [from <name>]. qh saves 
                     }
                 });
             }
-            let (reply, hops) = {
+            let (reply, owed, hops) = {
                 let mut c = lock(&m.ctl);
-                (c.reply.take(), c.hops)
+                (c.reply.take(), std::mem::take(&mut c.owed), c.hops)
             };
             if let Some(r) = reply {
                 let _ = r.send(if fin.is_empty() { "(no answer)".into() } else { fin });
-            } else if !is_report && sender != "user" && hub.get(&sender).is_some() {
+            } else {
                 // whoever sent the work hears when it is done, so it can tell the user
-                let what = if sender == m.spawner { "task done" } else { "finished what you sent" };
-                hub.send_report(&sender, &format!("{what}: {fin}\n(This is a completion report; no reply needed. \
-                    Tell the user what happened if it matters to them.)"), &m.name, hops + 1);
+                for to in owed {
+                    let what = if to == m.spawner { "task done" } else { "finished what you sent" };
+                    hub.send_report(&to, &format!("{what}: {fin}\n(This is a completion report; no reply needed. \
+                        Tell the user what happened if it matters to them.)"), &m.name, hops + 1);
+                }
             }
             *lock(&m.status) = "idle";
             lock(&m.ctl).running = false;
@@ -516,15 +617,17 @@ session tests). Messages from other sessions start with [from <name>]. qh saves 
         }
     }
 
-    pub fn confirm(&self, m: &Member, tool: &str, args: &Value) -> bool {
-        if self.auto_yes || self.mode_allows(tool, args) {
+    /// Ask the user. `guard` is why the call crosses a safety line: then neither the mode nor -y
+    /// approves it, and with nobody to answer (headless) it is refused.
+    pub fn confirm(&self, m: &Member, tool: &str, args: &Value, guard: Option<&str>) -> bool {
+        if guard.is_none() && (self.auto_yes || self.mode_allows(tool, args)) {
             return true;
         }
         *lock(&m.status) = "confirm";
         self.changed();
         let (tx, rx) = channel();
-        let warn = self.others_files(m, tool, args);
-        self.emit(&m.name, Event::Confirm { tool: tool.into(), args: args.clone(), reply: tx, cwd: m.cwd(), warn });
+        let warn = guard.map(String::from).unwrap_or_else(|| self.others_files(m, tool, args));
+        self.emit(&m.name, Event::Confirm { tool: tool.into(), args: args.clone(), reply: tx, cwd: m.cwd(), warn, guard: guard.is_some() });
         let ans = loop {
             match rx.recv_timeout(Duration::from_millis(200)) {
                 Ok(a) => break a,
@@ -543,6 +646,38 @@ session tests). Messages from other sessions start with [from <name>]. qh saves 
             }
             Answer::No => false,
         }
+    }
+
+    /// What this session's commands run with: its project and its allowlist proxy, whose every new
+    /// host outside the allowlist is asked about (in every mode; "always" adds a `net:host` rule).
+    pub fn sandbox_ctx(self: &Arc<Self>, m: &Arc<Member>) -> crate::sandbox::Ctx {
+        let proxy = m.proxy.get_or_init(|| {
+            if !crate::sandbox::enabled(&self.cfg) || cfg!(windows) || self.cfg.sandbox_network != "allowlist" {
+                return None;
+            }
+            let (hub, name) = (Arc::downgrade(self), m.name.clone());
+            let decide: crate::proxy::Decide = Arc::new(move |host: &str, port: u16| {
+                let Some(hub) = hub.upgrade() else { return false };
+                if crate::sandbox::host_listed(host, &hub.cfg.sandbox_hosts) {
+                    return true;
+                }
+                let Some(m) = hub.get(&name) else { return false };
+                let target = format!("net:{host}");
+                if lock(&m.set).allow.iter().any(|r| r.starts_with("net:") && crate::engine::glob(r.as_bytes(), target.as_bytes())) {
+                    return true;
+                }
+                hub.confirm(&m, "network", &json!({"host": host, "port": port}),
+                            Some(&format!("a command wants to reach {host}:{port}, which isn't on the allowlist")))
+            });
+            match crate::proxy::start(decide) {
+                #[cfg(unix)]
+                Ok(p) => Some((p.port, p.sock)),
+                #[cfg(not(unix))]
+                Ok(p) => Some((p.port, None)),
+                Err(_) => None, // no proxy: commands get no network
+            }
+        });
+        crate::sandbox::Ctx { root: m.root.clone(), proxy: proxy.clone() }
     }
 
     /// (window, compact-at) for a session. A local model gets the configured window (what fits
@@ -568,7 +703,10 @@ session tests). Messages from other sessions start with [from <name>]. qh saves 
 
     /// Every session idle with nothing queued: no work is in flight anywhere.
     pub fn quiet(&self) -> bool {
-        lock(&self.members).iter().all(|m| {
+        // a copy of the list: holding it while taking a session's ctl lock would deadlock with
+        // next(), which holds ctl and looks sessions up
+        let ms = lock(&self.members).clone();
+        ms.iter().all(|m| {
             let c = lock(&m.ctl);
             !c.running && (c.inbox.is_empty() || m.status() == "held")
         })
@@ -711,6 +849,11 @@ session tests). Messages from other sessions start with [from <name>]. qh saves 
                 let to = s("to");
                 if to == me.name {
                     return "error: cannot message yourself".into();
+                }
+                // the result already goes back on its own; a message too would make it answer twice
+                if lock(&me.ctl).owed.contains(&to) {
+                    return format!("error: not sent. {to} gets your final reply automatically when you finish this turn; \
+put your result or answer there.");
                 }
                 let hops = lock(&me.ctl).hops + 1;
                 if !self.send(&to, &s("text"), &me.name, hops, None) {
@@ -887,11 +1030,11 @@ live session; the answer arrives later as a message, so keep working meanwhile. 
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     // tests that point QH_STATE_DIR somewhere run one at a time
-    static ENV: Mutex<()> = Mutex::new(());
+    pub(crate) static ENV: Mutex<()> = Mutex::new(());
 
     #[test]
     fn delete_of_another_sessions_files_is_flagged() {
@@ -911,6 +1054,63 @@ mod tests {
         // its own files and harmless commands raise nothing
         assert!(hub.others_files(&s2, "bash", &json!({"cmd": "rm -rf api-gateway"})).is_empty());
         assert!(hub.others_files(&core, "bash", &json!({"cmd": "ls api-gateway"})).is_empty());
+    }
+
+    #[test]
+    fn a_named_role_labels_the_tab_but_stays_out_of_the_prompt() {
+        let _env = lock(&ENV);
+        let root = std::env::temp_dir().join(format!("qh-named-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::env::set_var("QH_STATE_DIR", root.join("state"));
+        let sys = |m: &Member| lock(&m.msgs)[0]["content"].as_str().unwrap_or("").to_string();
+        let hub = Hub::new(crate::config::load(), Some("n1".into()), Box::new(|_, _| {}), false);
+        let a = hub.add("a", None, "", "", None, false, Some(root.clone())).unwrap();
+        let before = sys(&a);
+        hub.name_role(&a, "fix shop tax calculation");
+        assert_eq!(*lock(&a.purpose), "fix shop tax calculation");
+        assert_eq!(sys(&a), before, "naming must not change the system prompt");
+        // after a restart it is still a label only
+        let hub2 = Hub::new(crate::config::load(), Some("n2".into()), Box::new(|_, _| {}), false);
+        hub2.restore(&hubs_dir().join("n1.json"));
+        let a2 = hub2.get("a").unwrap();
+        assert_eq!(*lock(&a2.purpose), "fix shop tax calculation");
+        assert!(!sys(&a2).contains("Your role"));
+        // a role the user sets does go in
+        hub2.set_role(&a2, "tests");
+        assert!(sys(&a2).contains("Your role in this workspace: tests."));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn helper_results_reach_the_waiting_session_once() {
+        let _env = lock(&ENV);
+        let root = std::env::temp_dir().join(format!("qh-owed-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::env::set_var("QH_STATE_DIR", root.join("state"));
+        let hub = Hub::new(crate::config::load(), Some("o1".into()), Box::new(|_, _| {}), false);
+        let main = hub.add("main", None, "", "", None, false, Some(root.clone())).unwrap();
+        hub.add("worker", None, "do x", "main", None, false, Some(root.clone())).unwrap();
+        hub.add("peer", None, "", "", None, false, Some(root.clone())).unwrap();
+        // work from a peer is reported back; the user, reports and main's own worker are not
+        let batch = [("peer".to_string(), false), ("user".to_string(), false), ("worker".to_string(), false),
+                     ("peer".to_string(), true), ("peer".to_string(), false)];
+        assert_eq!(hub.owed_for("main", &batch), vec!["peer".to_string()]);
+        assert_eq!(hub.owed_for("worker", &[("main".to_string(), false)]), vec!["main".to_string()]);
+        // mid-turn: reports and the waiting session's follow-ups join the turn; the rest wait
+        let msg = |sender: &str, report: bool, reply: Option<Sender<String>>| Msg { sender: sender.into(), text: "t".into(), hops: 1, reply, report };
+        {
+            let mut c = lock(&main.ctl);
+            c.owed = vec!["peer".into()];
+            c.inbox.push_back(msg("worker", true, None));
+            c.inbox.push_back(msg("user", false, None));
+            c.inbox.push_back(msg("peer", false, None));
+            c.inbox.push_back(msg("peer", false, Some(channel().0)));
+            c.inbox.push_back(msg("other", false, None));
+        }
+        assert_eq!(hub.take_followups(&main), vec!["[from worker] t".to_string(), "[from peer] t".to_string()]);
+        let left: Vec<String> = lock(&main.ctl).inbox.iter().map(|m| m.sender.clone()).collect();
+        assert_eq!(left, ["user", "peer", "other"]);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

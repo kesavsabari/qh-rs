@@ -5,7 +5,7 @@ use crate::config::Config;
 use regex::Regex;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::LazyLock;
 
 thread_local! {
@@ -36,6 +36,12 @@ pub fn cap(text: String) -> String {
 /// File errors name the path and where relative paths resolve, so a model
 /// that guessed an absolute path can correct itself.
 fn ferr(cwd: &Path, path: &str, e: std::io::Error) -> String {
+    // an absolute path is not refused, just missing: say so, or a model concludes it is sandboxed
+    // (or that sessions don't share files: they all see the same disk)
+    if e.kind() == std::io::ErrorKind::NotFound && resolve(cwd, path).display().to_string() == path {
+        return format!("{path}: no such file. Paths outside the project can be read too (secrets ask the user first), and \
+every session sees the same files, so it doesn't exist (yet): check the name, or list the folder. Relative paths resolve in {}.", cwd.display());
+    }
     format!("{path}: {e}. The working directory is {}; use a path relative to it (e.g. answer.txt)", cwd.display())
 }
 
@@ -121,13 +127,28 @@ fn check_syntax(path: &str) -> String {
     if !path.ends_with(".py") {
         return String::new();
     }
-    match Command::new("python").args(["-m", "py_compile", path]).output() {
+    let Some(py) = python() else { return String::new() };
+    // compile() rather than py_compile: names the line, and leaves no __pycache__ in the project
+    let check = "import sys\ntry: compile(open(sys.argv[1], 'rb').read(), sys.argv[1], 'exec')\n\
+                 except SyntaxError as e: print(f'line {e.lineno}: {e.msg}'); sys.exit(1)";
+    match Command::new(py[0]).args(&py[1..]).args(["-c", check, path]).output() {
         Ok(o) if !o.status.success() => {
-            let err = String::from_utf8_lossy(&o.stderr);
-            format!("\nsyntax error:\n{}", err.trim().lines().last().unwrap_or("?"))
+            let out = String::from_utf8_lossy(&o.stdout);
+            format!("\nsyntax error:\n{}", out.trim().lines().last().unwrap_or("?"))
         }
         _ => String::new(),
     }
+}
+
+/// The Python on this computer, found once: macOS and most Linux have only `python3`, Windows
+/// has `py -3` or `python` (whose Store stub fails `--version`, so it is skipped).
+fn python() -> Option<&'static [&'static str]> {
+    static PY: std::sync::OnceLock<Option<&'static [&'static str]>> = std::sync::OnceLock::new();
+    let tries: &[&'static [&'static str]] = if cfg!(windows) { &[&["py", "-3"], &["python"], &["python3"]] } else { &[&["python3"], &["python"]] };
+    *PY.get_or_init(|| tries.iter().copied().find(|p| {
+        Command::new(p[0]).args(&p[1..]).arg("--version").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
+            .status().is_ok_and(|s| s.success())
+    }))
 }
 
 fn write_file(cwd: &Path, a: &Value) -> Result<String, String> {
@@ -306,7 +327,9 @@ pub fn source_files(cwd: &Path, root: &str) -> Vec<(PathBuf, String)> {
             out
         }
     } };
-    files.into_iter().filter_map(|f| {
+    // secrets (.env, keys) only by read_file, which asks first
+    let guard = crate::sandbox::enabled(crate::config::load_cached());
+    files.into_iter().filter(|f| !guard || !crate::sandbox::secret(&crate::sandbox::canon(f))).filter_map(|f| {
         let md = std::fs::metadata(&f).ok()?;
         if md.len() >= 1_000_000 {
             return None;
@@ -421,14 +444,14 @@ fn fix_slash(cwd: &Path, cmd: &str) -> String {
     re.replace_all(cmd, format!("${{1}}{}", regex::escape(&full).replace('$', "$$")).as_str()).to_string()
 }
 
-fn bash(cwd: &mut PathBuf, a: &Value) -> Result<String, String> {
+fn bash(cwd: &mut PathBuf, a: &Value, cfg: &Config, sb: &crate::sandbox::Ctx) -> Result<String, String> {
     let cmd = &fix_slash(cwd, sa(a, "cmd"));
     if !cwd.is_dir() {
         *cwd = crate::config::home();
     }
     let script = crate::platform::with_cwd_report(cmd, CWD_MARK);
-    let (o, killed) = crate::platform::run_timeout(crate::platform::shell_cmd(&script), None, 120, cwd)
-        .map_err(|e| e.to_string())?;
+    let outside = a["unsandboxed"].as_bool() == Some(true);
+    let (o, killed, ran) = crate::sandbox::run(sb, cfg, &script, outside, 120, cwd).map_err(|e| e.to_string())?;
     let killed = if killed { "\n(killed after 120 s; run long or never-ending commands in the background)" } else { "" };
     let mut out = String::from_utf8_lossy(&o.stdout).to_string();
     let mut moved = String::new();
@@ -443,7 +466,12 @@ fn bash(cwd: &mut PathBuf, a: &Value) -> Result<String, String> {
             *cwd = dir;
         }
     }
-    Ok(cap(format!("exit {}\n{out}{}{moved}{killed}", o.status.code().unwrap_or(-1), String::from_utf8_lossy(&o.stderr))))
+    let err = String::from_utf8_lossy(&o.stderr);
+    let hint = match (ran, o.status.success()) {
+        (crate::sandbox::Ran::Sandboxed, false) => crate::sandbox::hint(&format!("{out}{err}")).map(|h| format!("\n{h}")).unwrap_or_default(),
+        _ => String::new(),
+    };
+    Ok(cap(format!("exit {}\n{out}{err}{moved}{killed}{hint}", o.status.code().unwrap_or(-1))))
 }
 
 fn grep(cwd: &Path, a: &Value) -> Result<String, String> {
@@ -540,9 +568,18 @@ pub fn builtin_schema(name: &str) -> Option<Value> {
         "find_references" => schema(name, "List every line using a name (whole word).", &[("name", "string"), ("path", "string")], &["name"]),
         "rename_symbol" => schema(name, "Rename a name everywhere in the project (whole word).", &[("old", "string"), ("new", "string"), ("path", "string")], &["old", "new"]),
         "remember" => schema(name, "Save a lasting project fact to NOTES.md for future sessions.", &[("fact", "string")], &["fact"]),
-        "bash" => schema(name, if crate::platform::shell() == crate::platform::Shell::PowerShell {
-            "Run a PowerShell command (Windows). Stopped after 120 s; long output is cut, and says so; a cd carries over to the next call." } else {
-            "Run a shell command. Stopped after 120 s; long output is cut, and says so; a cd carries over to the next call." }, &[("cmd", "string")], &["cmd"]),
+        "bash" => {
+            let what = if crate::platform::shell() == crate::platform::Shell::PowerShell { "Run a PowerShell command (Windows)." } else { "Run a shell command." };
+            let sandbox = if !crate::sandbox::enabled(crate::config::load_cached()) || crate::sandbox::unavailable().is_some() { "" } else {
+                " It runs in a sandbox: writes only in the project, temp and package caches; secrets unreadable; network only via an \
+allowlist the user approves per host. unsandboxed=true reruns it outside (the user is asked); use it only after the sandbox blocked something needed." };
+            let mut s = schema(name, &format!("{what} Stopped after 120 s; long output is cut, and says so; a cd carries over to the next call.{sandbox}"),
+                               &[("cmd", "string")], &["cmd"]);
+            if !sandbox.is_empty() {
+                s["function"]["parameters"]["properties"]["unsandboxed"] = json!({"type": "boolean"});
+            }
+            s
+        }
         "grep" => schema(name, "Search files recursively for a regex. Long results are cut: narrow the pattern or path.", &[("pattern", "string"), ("path", "string")], &["pattern"]),
         "web_fetch" => schema(name, "Fetch a URL as plain text (20 s at most; long pages are cut). It doesn't run JavaScript: use the browser tools for pages that need it.", &[("url", "string")], &["url"]),
         _ => return None,
@@ -616,7 +653,7 @@ pub fn risky(name: &str, a: &Value, cfg: &Config) -> bool {
     }
 }
 
-pub fn call(name: &str, a: &Value, cfg: &Config, cwd: &mut PathBuf, lim: &crate::tier::Limits) -> String {
+pub fn call(name: &str, a: &Value, cfg: &Config, cwd: &mut PathBuf, lim: &crate::tier::Limits, sb: &crate::sandbox::Ctx) -> String {
     OUT_CAP.with(|c| c.set(lim.out_cap));
     if browser::TOOLS.contains(&name) {
         return browser::call(name, a, cfg.browser_headless, &cfg.browser_allow_hosts);
@@ -632,7 +669,7 @@ pub fn call(name: &str, a: &Value, cfg: &Config, cwd: &mut PathBuf, lim: &crate:
         "find_references" => find_references(cwd, a),
         "rename_symbol" => rename_symbol(cwd, a),
         "remember" => remember(cwd, a),
-        "bash" => bash(cwd, a),
+        "bash" => bash(cwd, a, cfg, sb),
         "grep" => grep(cwd, a),
         "web_fetch" => web_fetch(a),
         _ => match cfg.webhooks.iter().find(|h| h.name == name) {
@@ -648,6 +685,32 @@ mod cwd_tests {
     use super::*;
 
     #[test]
+    fn syntax_errors_name_the_line_and_leave_no_cache() {
+        if python().is_none() {
+            return; // no Python on this machine: the check is skipped there too
+        }
+        let d = std::env::temp_dir().join(format!("qh-syntax-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let (bad, good) = (d.join("bad.py"), d.join("good.py"));
+        std::fs::write(&bad, "x = 1\ndef f(:\n    pass\n").unwrap();
+        std::fs::write(&good, "def f():\n    return 1\n").unwrap();
+        assert!(check_syntax(&bad.display().to_string()).contains("line 2:"));
+        assert_eq!(check_syntax(&good.display().to_string()), "");
+        assert!(!d.join("__pycache__").exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_missing_absolute_path_is_not_called_off_limits() {
+        let cwd = std::env::temp_dir();
+        let abs = cwd.join(format!("qh-no-such-file-{}.txt", std::process::id())).display().to_string();
+        let e = read_file(&cwd, &json!({"path": abs})).unwrap_err();
+        assert!(e.contains("no such file") && e.contains("every session sees the same files"), "{e}");
+        let e = read_file(&cwd, &json!({"path": "qh-no-such-file.txt"})).unwrap_err();
+        assert!(e.contains("use a path relative to it"), "{e}");
+    }
+
+    #[test]
     fn failed_edits_point_at_the_right_lines() {
         let text = "fn main() {\n    let total = price * qty;\n    println!(\"{total}\");\n}\n";
         // a wrong variable name: not found, but the error shows lines 2-3 to copy
@@ -659,6 +722,12 @@ mod cwd_tests {
         // twice: says where
         let e = edit_text("a = 1\nb = 2\na = 1\n", "a = 1", "a = 3").unwrap_err();
         assert!(e.contains("2 times (lines 1, 3)"), "{e}");
+    }
+
+    fn bash(cwd: &mut PathBuf, a: &Value) -> Result<String, String> {
+        let mut cfg = crate::config::load_defaults();
+        cfg.sandbox = false;
+        super::bash(cwd, a, &cfg, &crate::sandbox::Ctx::default())
     }
 
     fn tmp(name: &str) -> PathBuf {

@@ -47,20 +47,20 @@ const HELP: &str = "/new <name> [profile]  new session (Ctrl+N: instant, auto-na
 /promise [fn what]     make a teammate's last answer (or your own words) a checked promise: edits that break it are held
 /tier                  how the context window was sized to your GPU
 /mode [ask|auto-edit|auto|plan] (Shift+Tab)  /role [text]  /think  /tokens  /compact  /clear  /profile [name]
-/docs (guide in your browser)  /update (newest qh)  /undo  /diff  /allow [pattern]  /sessions  /commands (your own /name prompts)  /mcp (servers)
+/docs (guide in your browser)  /update (newest qh)  /undo  /diff  /allow [pattern]  /sandbox  /sessions  /commands (your own /name prompts)  /mcp (servers)
 Shift+←/→ (or Alt+←/→, Alt+1..9) switch tabs · Shift+↑/↓ or PgUp/PgDn scroll · Option+←/→ a word · Ctrl+O open last tool · Ctrl+L log · Esc interrupt · Ctrl+Q quit";
 
 use crate::tools::DANGER;
 
 /// What the `/` autocomplete offers; custom commands are added from .qh/commands.
-const COMMANDS: [(&str, &str); 36] = [
+const COMMANDS: [(&str, &str); 37] = [
     ("/model", "pick this tab's model"), ("/provider", "connect providers: sign in, keys"),
     ("/new", "new session tab"), ("/close", "close this tab"), ("/mode", "ask · auto-edit · auto · plan"),
     ("/compact", "shrink the conversation"), ("/clear", "start this tab fresh"), ("/undo", "undo the agent's file changes"),
     ("/diff", "show the agent's file changes"), ("/cwd", "this tab's working folder"), ("/think", "toggle thinking"),
     ("/tokens", "context use"), ("/tier", "this tab's context window"), ("/profile", "tool set: coding, general, browser, all"),
     ("/role", "give this tab a role"), ("/map", "map of sessions and messages"), ("/layout", "tabs or grid"),
-    ("/msg", "message another tab"), ("/sessions", "saved sessions"), ("/allow", "auto-approve rules"),
+    ("/msg", "message another tab"), ("/sessions", "saved sessions"), ("/allow", "auto-approve rules"), ("/sandbox", "what commands and tools may touch"),
     ("/release", "let held messages through"), ("/pause", "hold automatic messaging"), ("/resume", "resume messaging"),
     ("/mcp", "MCP servers"), ("/team", "your team: start or join; in a team, opens the team room (Ctrl+T)"), ("/relay", "relay server for teammates nothing else reaches"), ("/commands", "your own /commands"), ("/help", "everything"), ("/docs", "open the docs in your browser"), ("/update", "install the newest qh"), ("/project", "switch project (Ctrl+P)"),
     ("/anyway", "let this tab edit what a teammate is changing"),
@@ -475,6 +475,9 @@ pub fn run(hub: Arc<Hub>, tx: Sender<Ui>, rx: Receiver<Ui>) -> std::io::Result<(
 }
 
 fn suggest_rule(tool: &str, a: &Value, rules: &[String]) -> String {
+    if tool == "network" {
+        return format!("net:{}", a["host"].as_str().unwrap_or(""));
+    }
     if tool == "bash" {
         let cmd = a["cmd"].as_str().unwrap_or("");
         if DANGER.is_match(cmd) {
@@ -577,14 +580,15 @@ fn tool_title(tool: &str, a: &Value) -> String {
 /// Tabs and control characters have no cell width, so the terminal and ratatui disagree on
 /// where text ends and stale characters stay on screen. Expand tabs, drop the rest.
 fn clean(s: &str) -> String {
-    s.chars()
-        .flat_map(|c| match c {
-            '\t' => "    ".chars().collect::<Vec<_>>(),
-            '\n' => vec!['\n'],
-            c if c.is_control() => vec![],
-            c => vec![c],
-        })
-        .collect()
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\t' => out.push_str("    "),
+            c if c.is_control() && c != '\n' => {}
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 fn clip(s: &str, n: usize) -> String {
@@ -690,8 +694,10 @@ impl App {
         match ev {
             Event::Token(t) => {
                 let v = self.view(&name);
-                match v.items.back_mut() {
-                    Some(Item::Reply(s)) if v.streaming => s.push_str(&t),
+                // a /command typed meanwhile adds lines below the reply; the reply still grows in place
+                let streaming = v.streaming;
+                match v.items.iter_mut().rev().find(|i| matches!(i, Item::Reply(_))) {
+                    Some(Item::Reply(s)) if streaming => s.push_str(&t),
                     _ => {
                         v.push(Item::Reply(t));
                         v.streaming = true;
@@ -727,9 +733,9 @@ impl App {
                 self.note(&name, t)
             }
             Event::Done { .. } => self.view(&name).streaming = false,
-            Event::Confirm { tool, args, reply, cwd, warn } => {
+            Event::Confirm { tool, args, reply, cwd, warn, guard } => {
                 let rules = self.hub.get(&name).map(|m| lock(&m.set).allow.clone()).unwrap_or_default();
-                let rule = suggest_rule(&tool, &args, &rules);
+                let rule = if guard && tool != "network" { String::new() } else { suggest_rule(&tool, &args, &rules) };
                 self.confirms.push_back(Confirm { session: name, tool, args, rule, reply, cwd, warn });
             }
             Event::Added => {
@@ -1301,6 +1307,10 @@ impl App {
                 drop(s);
                 self.note(&a, msg);
             }
+            "/sandbox" => {
+                let d = crate::sandbox::describe(&m.sandbox_now(), &self.hub.cfg);
+                self.note(&a, d);
+            }
             "/sessions" => self.note(&a, session::list(10)),
             "/mode" => {
                 if !arg.is_empty() && !self.hub.set_mode(arg) {
@@ -1701,6 +1711,9 @@ $ARGUMENTS is replaced by what you type after the command".into()
             })
             .map(|(c, d)| (c.to_string(), d.to_string())).collect();
         if typed.contains(' ') {
+            // what's typed exactly, highlighted first: Enter on `/mode auto` runs auto, not auto-edit
+            let mut subs = subs;
+            subs.sort_by_key(|(c, _)| *c != typed);
             return subs;
         }
         let cwd = self.hub.get(&self.active).map(|m| m.cwd()).unwrap_or_default();
@@ -1795,7 +1808,9 @@ $ARGUMENTS is replaced by what you type after the command".into()
         };
         f.render_widget(Paragraph::new(line), input);
         f.set_cursor_position((input.x + 2 + cx as u16, input.y));
-        let hints = "⇧Tab mode  ⇧←/→ tabs  ^N new tab  ^G grid  ^P projects  ^T team  Esc stop  ^Q quit  ·  /help for all keys";
+        // macOS writes the control key as ⌃, the way its own menus show it
+        let c = if cfg!(target_os = "macos") { "⌃" } else { "^" };
+        let hints = format!("⇧Tab mode  ⇧←/→ tabs  {c}N new tab  {c}G grid  {c}P projects  {c}T team  Esc stop  {c}Q quit  ·  /help for all keys");
         // a newer qh: a standing notice at the right end of the bottom line, over the hints
         let foot = match crate::update::available() {
             Some(v) => {
@@ -2384,6 +2399,7 @@ fn draw_confirm(f: &mut Frame, c: &Confirm, queued: usize) {
              body.lines().take(200).enumerate().map(|(i, l)| Line::raw(format!("{:>4} {l}", i + 1))).collect(), exists)
         }
         "rename_symbol" => (format!("{} → {} across the project", s("old"), s("new")), vec![], false),
+        "network" => (format!("{}:{}", s("host"), a["port"]), vec![Line::raw("a sandboxed command is connecting to a host that isn't on the allowlist")], true),
         _ => (clip(&a.to_string(), 80), vec![Line::raw(a.to_string())], false),
     };
     let area = f.area();

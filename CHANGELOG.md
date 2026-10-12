@@ -2,6 +2,35 @@
 
 Each version starts with a one-line summary; the website shows it once the version is no longer recent.
 
+## 0.1.7 — unreleased
+
+The safety update: secrets and anything outside the project ask first, and commands run in a sandbox on Linux, macOS and Windows.
+
+- **Secrets ask first, in every mode.** Reading `~/.ssh`, `~/.aws`, `.env` files, keys, cloud and
+  git credentials, browser profiles or qh's own logins asks you, even in `auto`. `grep` and the
+  other search tools skip those files.
+- **Writes stay in the project.** The file tools write freely in the project and temp. Anything
+  else asks, even in `auto`, and so do files that run code later: `.git/hooks`, `.git/config`,
+  shell rc files, `.envrc`, `.qh/` and qh's config. Symlinks and hard links can't get around it.
+- **Commands run in a sandbox.** They can write only in the project, temp and package caches, can't
+  read secrets, and don't get variables holding tokens and keys. Linux uses Landlock and seccomp
+  (plus private network and mount namespaces where the kernel allows them), macOS uses Seatbelt,
+  and Windows an AppContainer (early). Nothing to install.
+- **Network through an allowlist.** Package registries and git hosts just work; any other host
+  asks first, even in `auto`.
+- When the sandbox blocks something a command really needs, the agent can ask to rerun it outside.
+  You're asked every time.
+- `/sandbox` shows what's in force. `[sandbox]` in the config adds folders, hosts or variables, or
+  turns it off. On Windows, `qh sandbox reset` removes the folder permissions the sandbox added.
+- A helper's answer that arrives mid-turn is taken in by that turn, not answered twice; a hang when
+  two sessions waited on each other is fixed; and a missing file's error says where it looked.
+- `/mode auto` autocompletes; Python is found on macOS (`python3`); build folders (any marked with
+  `CACHEDIR.TAG`) stay out of the project map.
+- Python projects with bare `test_` functions get `pytest` as their test command, since
+  `unittest` would find nothing and still say OK.
+- Roles that qh named from your first request stay out of the system prompt.
+- Mac key hints show ⌃ for Control.
+
 ## 0.1.6 — 2026-10-11
 
 The browser no longer gets stuck, a quieter screen, and keys that work on a Mac.

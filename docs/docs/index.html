@@ -29,6 +29,7 @@
     <a href="#switch">Switching models</a>
     <div class="grp">Work</div>
     <a href="#modes">Modes and approvals</a>
+    <a href="#sandbox">Sandbox</a>
     <a href="#commands">Commands and keys</a>
     <a href="#tabs">Several agents at once</a>
     <a href="#undo">Undo and diff</a>
@@ -162,6 +163,25 @@ what does src/engine.rs do?</code></pre>
   <p>When it asks, you can allow once, deny, or "always" allow that kind of command. <code>/allow</code> lists the rules you've added.</p>
 </section>
 
+<section id="sandbox">
+  <h2>Sandbox</h2>
+  <p>On by default, in every mode. <code>/sandbox</code> shows exactly what's in force.</p>
+  <ul>
+    <li><strong>Secrets ask first.</strong> Reading <code>~/.ssh</code>, <code>~/.aws</code>, <code>.env</code> files, keys (<code>*.pem</code>, <code>id_rsa</code>…), cloud and git credentials, browser profiles, or qh's own logins always asks, even in <code>auto</code>.</li>
+    <li><strong>Writes stay in the project.</strong> The file tools write freely in the project and temp; anywhere else asks, even in <code>auto</code>. So do files that run code later: <code>.git/hooks</code>, shell rc files, <code>.envrc</code>, <code>.qh/</code> and qh's config.</li>
+    <li><strong>Commands run sandboxed.</strong> They can write only in the project, temp and package caches, and can't read secrets. Variables holding tokens and keys (<code>*_TOKEN</code>, <code>*_KEY</code>, passwords in URLs) are withheld from them.</li>
+    <li><strong>The network goes through an allowlist.</strong> Package registries and git hosts (crates.io, npm, PyPI, GitHub…) just work. Any other host asks you first, even in <code>auto</code>; "always" allows that host for the session.</li>
+    <li><strong>Blocked by mistake?</strong> The agent can ask to rerun one command outside the sandbox. You're asked every time.</li>
+  </ul>
+  <table>
+    <tr><th>System</th><th>How commands are confined</th></tr>
+    <tr><td>Linux</td><td>Landlock (kernel 5.13+) and seccomp, plus private network and mount namespaces where the kernel allows them. Nothing to install.</td></tr>
+    <tr><td>macOS</td><td>Seatbelt (<code>sandbox-exec</code>), built in.</td></tr>
+    <tr><td>Windows</td><td>An AppContainer (early: it grants the container access to your project and toolchain folders; <code>qh sandbox reset</code> takes that back). The network is off inside it.</td></tr>
+  </table>
+  <div class="note">Where the system can't sandbox commands (an old Linux kernel, say), <code>/sandbox</code> says so. The secret and write guards still apply.</div>
+</section>
+
 <section id="commands">
   <h2>Commands and keys</h2>
   <table>
@@ -169,6 +189,7 @@ what does src/engine.rs do?</code></pre>
     <tr><td><code>/model</code></td><td>Pick this tab's model</td></tr>
     <tr><td><code>/provider</code></td><td>Connect providers: sign in, add or test keys</td></tr>
     <tr><td><code>/mode</code></td><td>ask · auto-edit · auto · plan</td></tr>
+    <tr><td><code>/sandbox</code></td><td>What commands and tools may touch</td></tr>
     <tr><td><code>/new name</code> · <code>/close</code></td><td>Open or close a tab</td></tr>
     <tr><td><code>/undo</code> · <code>/diff</code></td><td>Undo or show the agent's file changes</td></tr>
     <tr><td><code>/compact</code> · <code>/clear</code></td><td>Shrink the conversation, or start the tab fresh</td></tr>
@@ -320,6 +341,7 @@ trusted = false   <span class="c"># true: run its tools without asking</span></c
     <tr><td><code>browser_headless</code></td><td><code>true</code> hides the browser window the agent uses</td></tr>
     <tr><td><code>mouse</code></td><td><code>true</code> enables clicks and scrolling</td></tr>
     <tr><td><code>[[hooks]]</code>, <code>[mcp.name]</code></td><td>See <a href="#hooks">hooks</a> and <a href="#mcp">MCP</a></td></tr>
+    <tr><td><code>[sandbox]</code></td><td>See <a href="#sandbox">sandbox</a>. <code>writable = ["~/other"]</code> adds folders; <code>allow_hosts = ["*.example.com"]</code> adds hosts; <code>env_keep = ["DATABASE_URL"]</code> keeps variables; <code>network = "off"</code> or <code>"open"</code>; <code>mode = "off"</code> turns it all off (or <code>QH_SANDBOX=off</code>)</td></tr>
   </table>
 </section>
 

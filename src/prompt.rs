@@ -76,7 +76,10 @@ fn walk(root: &Path, dir: &Path, ignore: &[String], out: &mut Vec<std::path::Pat
             continue;
         }
         if e.path().is_dir() {
-            if !SKIP.contains(&n.as_str()) && !n.ends_with(".egg-info") { dirs.push(e.path()) }
+            // CACHEDIR.TAG marks build output (any cargo target dir, whatever it is called)
+            if !SKIP.contains(&n.as_str()) && !n.ends_with(".egg-info") && !e.path().join("CACHEDIR.TAG").exists() {
+                dirs.push(e.path())
+            }
         } else if !n.ends_with(".pyc") && !n.ends_with(".lock") {
             names.push(e.path());
         }
@@ -175,12 +178,16 @@ fn commands(cwd: &Path) -> Vec<String> {
         }
     }
     // plain Python tests with no manifest: test_*.py / *_test.py here or in tests/
-    if !v.iter().any(|c| c.starts_with("pytest")) && (has("tests") || std::fs::read_dir(cwd).into_iter().flatten().flatten().any(|e| {
-        let n = e.file_name().to_string_lossy().to_string();
-        n.ends_with(".py") && (n.starts_with("test_") || n.ends_with("_test.py"))
-    })) {
-        let pytest = has("pytest.ini") || has("conftest.py") || read("pyproject.toml").contains("pytest");
-        v.push(if pytest { "pytest" } else if cfg!(windows) { "python -m unittest" } else { "python3 -m unittest" }.into());
+    let tests: Vec<std::path::PathBuf> = [cwd.to_path_buf(), cwd.join("tests")].iter()
+        .flat_map(|d| std::fs::read_dir(d).into_iter().flatten().flatten().map(|e| e.path()))
+        .filter(|p| p.file_name().map(|n| n.to_string_lossy().to_string())
+            .is_some_and(|n| n.ends_with(".py") && (n.starts_with("test_") || n.ends_with("_test.py"))))
+        .collect();
+    if !v.iter().any(|c| c.starts_with("pytest")) && !tests.is_empty() {
+        // unittest only finds TestCase classes; bare test_ functions need pytest (unittest would
+        // find nothing and still say OK)
+        let unittest = tests.iter().all(|p| std::fs::read_to_string(p).is_ok_and(|t| t.contains("unittest")));
+        v.push(if !unittest { "pytest" } else if cfg!(windows) { "python -m unittest" } else { "python3 -m unittest" }.into());
     }
     if has("Makefile") {
         for line in read("Makefile").lines() {
@@ -240,6 +247,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn build_output_stays_out_of_the_map() {
+        let d = std::env::temp_dir().join(format!("qh-map-{}", std::process::id()));
+        std::fs::create_dir_all(d.join("out-dev/debug")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "").unwrap();
+        std::fs::write(d.join("main.rs"), "").unwrap();
+        std::fs::write(d.join("out-dev/CACHEDIR.TAG"), "Signature: 8a477f597d28d172789f06886806bc55").unwrap();
+        std::fs::write(d.join("out-dev/debug/qh"), "").unwrap();
+        let map = repomap(&d, 4000);
+        assert!(map.contains("main.rs") && !map.contains("out-dev"), "{map}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
     fn facts_name_branch_changes_and_commands() {
         let d = std::env::temp_dir().join(format!("qh-facts-{}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
@@ -257,8 +277,16 @@ mod tests {
         let d = std::env::temp_dir().join(format!("qh-facts-py-{}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
         std::fs::write(d.join("math_utils.py"), "").unwrap();
-        std::fs::write(d.join("test_math_utils.py"), "").unwrap();
+        std::fs::write(d.join("test_math_utils.py"), "import unittest\nclass T(unittest.TestCase): pass\n").unwrap();
         assert!(commands(&d)[0].ends_with(" -m unittest"));
+        // bare test functions: unittest would find none
+        std::fs::write(d.join("test_more.py"), "def test_x():\n    assert True\n").unwrap();
+        assert_eq!(commands(&d), vec!["pytest".to_string()]);
+        // a JavaScript tests/ folder is not Python
+        let js = d.join("js");
+        std::fs::create_dir_all(js.join("tests")).unwrap();
+        std::fs::write(js.join("tests/app.test.js"), "").unwrap();
+        assert!(commands(&js).is_empty());
         let _ = std::fs::remove_dir_all(&d);
     }
 }

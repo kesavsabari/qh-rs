@@ -487,7 +487,7 @@ fn to_input(messages: &[Value]) -> (String, Vec<Value>) {
     let mut ids: std::collections::VecDeque<String> = Default::default();
     for (n, m) in messages.iter().enumerate() {
         let images: Vec<Value> = m["images"].as_array().into_iter().flatten().filter_map(|i| i.as_str())
-            .map(|i| json!({"type": "input_image", "image_url": format!("data:image/png;base64,{i}")})).collect();
+            .map(|i| json!({"type": "input_image", "image_url": format!("data:{};base64,{i}", crate::image::mime(i))})).collect();
         match m["role"].as_str().unwrap_or("") {
             "system" => { if !instructions.is_empty() { instructions.push('\n') } instructions.push_str(text(m)) }
             "user" if !images.is_empty() => {
@@ -625,6 +625,14 @@ pub fn chat(model: &str, messages: &[Value], tools: &[Value], think: &str,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn user_images_become_input_image_parts() {
+        let gif = crate::image::b64(b"GIF89a....");
+        let (_, input) = to_input(&[json!({"role": "user", "content": "see", "images": [gif]})]);
+        assert_eq!(input[0]["content"][0], json!({"type": "input_text", "text": "see"}));
+        assert_eq!(input[0]["content"][1], json!({"type": "input_image", "image_url": format!("data:image/gif;base64,{gif}")}));
+    }
 
     #[test]
     fn history_maps_to_responses_items() {

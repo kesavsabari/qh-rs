@@ -39,6 +39,7 @@ const HELP: &str = "/new <name> [profile]  new session (Ctrl+N: instant, auto-na
 /model [search]        pick this tab's model (local, Ollama cloud, any provider); /model default <m> for new tabs
 /provider              connect providers: sign in, add/test/remove keys
 /cwd [path]            this session's working folder
+/image <path> (Ctrl+V)  attach an image to your next message; Backspace on an empty line removes it
 /map (Ctrl+B)          live map of sessions, messages and shared folders
 /team (Ctrl+T)         start or join a team; in a team, the team map
 /project (Ctrl+P)      switch project: team and personal; the others keep running (Ctrl+Space flips team ⇄ personal)
@@ -53,7 +54,7 @@ Shift+←/→ (or Alt+←/→, Alt+1..9) switch tabs · Shift+↑/↓ or PgUp/Pg
 use crate::tools::DANGER;
 
 /// What the `/` autocomplete offers; custom commands are added from .qh/commands.
-const COMMANDS: [(&str, &str); 37] = [
+const COMMANDS: [(&str, &str); 38] = [
     ("/model", "pick this tab's model"), ("/provider", "connect providers: sign in, keys"),
     ("/new", "new session tab"), ("/close", "close this tab"), ("/mode", "ask · auto-edit · auto · plan"),
     ("/compact", "shrink the conversation"), ("/clear", "start this tab fresh"), ("/undo", "undo the agent's file changes"),
@@ -63,6 +64,7 @@ const COMMANDS: [(&str, &str); 37] = [
     ("/msg", "message another tab"), ("/sessions", "saved sessions"), ("/allow", "auto-approve rules"), ("/sandbox", "what commands and tools may touch"),
     ("/release", "let held messages through"), ("/pause", "hold automatic messaging"), ("/resume", "resume messaging"),
     ("/mcp", "MCP servers"), ("/team", "your team: start or join; in a team, opens the team room (Ctrl+T)"), ("/relay", "relay server for teammates nothing else reaches"), ("/commands", "your own /commands"), ("/help", "everything"), ("/docs", "open the docs in your browser"), ("/update", "install the newest qh"), ("/project", "switch project (Ctrl+P)"),
+    ("/image", "attach an image to your next message (Ctrl+V pastes one)"),
     ("/anyway", "let this tab edit what a teammate is changing"),
     ("/answers", "may teammates' agents ask yours: auto · ask · off"),
     ("/promise", "hold teammates to their last answer: edits that break it are held"),
@@ -192,6 +194,7 @@ struct App {
     show_log: bool,
     input: Vec<char>,
     cur: usize,
+    chips: Vec<String>, // images (base64) attached to the next message
     hist: Vec<String>,
     hist_i: usize,
     confirms: VecDeque<Confirm>,
@@ -382,7 +385,7 @@ pub fn run(hub: Arc<Hub>, tx: Sender<Ui>, rx: Receiver<Ui>) -> std::io::Result<(
     let mut app = App {
         project: std::path::PathBuf::new(),
         hub: hub.clone(), views: HashMap::new(), active: String::new(), grid: false, recent: vec![],
-        log: VecDeque::new(), show_log: false, input: vec![], cur: 0, hist: vec![], hist_i: 0,
+        log: VecDeque::new(), show_log: false, input: vec![], cur: 0, chips: vec![], hist: vec![], hist_i: 0,
         confirms: VecDeque::new(), picker: None, secret: None, map: None,
         tab_hits: vec![], body: Rect::default(), picker_rows: None, quit: false, sugg_sel: 0, team_view: None, outside: None,
         last_personal: std::path::PathBuf::new(), last_team: std::path::PathBuf::new(), map_was_open: false,
@@ -683,6 +686,15 @@ impl App {
             Ui::Term(TermEvent::Key(k)) if k.kind != KeyEventKind::Release => self.key(k),
             Ui::Term(TermEvent::Mouse(ev)) => self.mouse(ev),
             Ui::Term(TermEvent::Paste(s)) => {
+                let cwd = self.hub.get(&self.active).map(|m| m.cwd()).unwrap_or_default();
+                if self.secret.is_none() {
+                    if let Some(p) = crate::image::path_in(&s, &cwd) {
+                        let p = p.display().to_string();
+                        let all = vec![(p.clone(), "attach it as an image".to_string()), (format!("--text {s}"), "paste the path as text".to_string())];
+                        self.picker = Some(picker("that's an image file: attach it?", "/image", all));
+                        return;
+                    }
+                }
                 for c in s.chars().map(|c| if c == '\n' || c == '\r' { ' ' } else { c }) {
                     self.input.insert(self.cur, c);
                     self.cur += 1;
@@ -923,6 +935,16 @@ impl App {
                 self.cur = 0;
             }
             KeyCode::Char('a') if ctrl => self.cur = 0,
+            KeyCode::Char('v') if ctrl && self.secret.is_none() => {
+                let a = self.active.clone();
+                match crate::image::clipboard() {
+                    Some(b) => match crate::image::encode(&b) {
+                        Ok(img) => self.chips.push(img),
+                        Err(e) => self.err(&a, e),
+                    },
+                    None => self.note(&a, "no image on the clipboard (Linux needs wl-paste or xclip); /image <path> attaches a file"),
+                }
+            }
             KeyCode::Char('e') if ctrl => self.cur = self.input.len(),
             KeyCode::Char(d @ '1'..='9') if alt || ctrl => {
                 if let Some(n) = self.tabs().get(d as usize - '1' as usize) {
@@ -975,9 +997,12 @@ impl App {
             KeyCode::Enter => {
                 let line: String = self.input.drain(..).collect();
                 self.cur = 0;
-                let line = line.trim().to_string();
-                if line.is_empty() {
+                let mut line = line.trim().to_string();
+                if line.is_empty() && self.chips.is_empty() {
                     return;
+                }
+                if line.is_empty() {
+                    line = "(see the attached image)".into();
                 }
                 self.hist.push(line.clone());
                 self.hist_i = self.hist.len();
@@ -999,6 +1024,9 @@ impl App {
                 self.hist_i = if k.code == KeyCode::Up { self.hist_i.saturating_sub(1) } else { (self.hist_i + 1).min(self.hist.len()) };
                 self.input = self.hist.get(self.hist_i).map(|s| s.chars().collect()).unwrap_or_default();
                 self.cur = self.input.len();
+            }
+            KeyCode::Backspace if self.input.is_empty() && !self.chips.is_empty() => {
+                self.chips.pop();
             }
             KeyCode::Backspace if self.cur > 0 => {
                 self.cur -= 1;
@@ -1033,10 +1061,54 @@ impl App {
         let a = self.active.clone();
         let Some(m) = self.hub.get(&a) else { return };
         self.view(&a).push(Item::User(line.to_string()));
+        if !self.chips.is_empty() {
+            let imgs = std::mem::take(&mut self.chips);
+            let (provider, model) = { let s = lock(&m.set); (s.provider.clone(), s.model.clone()) };
+            let n = imgs.len();
+            crate::image::stage(&a, imgs);
+            let what = if n == 1 { "1 image".to_string() } else { format!("{n} images") };
+            if crate::image::likely_vision(&provider, &model) {
+                self.note(&a, format!("+ {what}"));
+            } else {
+                self.note(&a, format!("+ {what} (sent anyway, but {model} may not read images)"));
+            }
+        }
         if lock(&m.ctl).running {
             self.note(&a, "queued: sent when the current turn ends");
         }
         self.hub.send(&a, &expand_mentions(line), "user", 0, None);
+    }
+
+    /// `/image <path>`; a secret path asks first, like a read_file of it would.
+    fn attach(&mut self, a: &str, cwd: &std::path::Path, arg: &str) {
+        if let Some(text) = arg.strip_prefix("--text ") {
+            for c in text.chars().map(|c| if c == '\n' || c == '\r' { ' ' } else { c }) {
+                self.input.insert(self.cur, c);
+                self.cur += 1;
+            }
+            return;
+        }
+        let (sure, arg) = match arg.strip_prefix("--yes ") { Some(r) => (true, r.trim()), None => (false, arg) };
+        if arg.is_empty() {
+            return self.note(a, "/image <path>  attach a PNG, JPEG, WebP or GIF (up to 5 MB) to your next message; Ctrl+V pastes one from the clipboard");
+        }
+        let p = crate::tools::resolve(cwd, arg.trim_matches(|c| c == '\'' || c == '"'));
+        if !sure {
+            if let Some(why) = crate::sandbox::guard("read_file", &serde_json::json!({"path": p.display().to_string()}), cwd, cwd, &self.hub.cfg) {
+                // "no" first: a stray Enter must never send a key to a provider
+                let all = vec![("--no".to_string(), "no, don't attach it".to_string()),
+                               (format!("--yes {}", p.display()), format!("yes, send it to the model ({why})"))];
+                self.picker = Some(picker("attach a secret file?", "/image", all));
+                return;
+            }
+        }
+        if arg == "--no" {
+            return;
+        }
+        match crate::image::load(&p) {
+            Ok(img) => self.chips.push(img),
+            Err(e) => self.err(a, e),
+        }
     }
 
     fn command(&mut self, line: &str) {
@@ -1329,6 +1401,7 @@ impl App {
                 self.note(&a, d);
             }
             "/sessions" => self.note(&a, session::list(10)),
+            "/image" => self.attach(&a, &m.cwd(), arg),
             "/mode" => {
                 if !arg.is_empty() && !self.hub.set_mode(arg) {
                     return self.err(&a, "usage: /mode ask|auto-edit|auto|plan (Shift+Tab cycles)");
@@ -1815,7 +1888,12 @@ $ARGUMENTS is replaced by what you type after the command".into()
         } else {
             (text, before)
         };
-        let line = if self.input.is_empty() {
+        let chips: String = self.chips.iter().enumerate()
+            .map(|(i, c)| format!("[image {}: {}] ", i + 1, crate::image::size(crate::image::bytes_of(c)))).collect();
+        let cx = cx + chips.len();
+        let line = if !chips.is_empty() {
+            Line::from(vec![Span::styled(prompt, Style::new().fg(pc)), Span::styled(chips, Style::new().fg(ACCENT)), Span::raw(shown_text)])
+        } else if self.input.is_empty() {
             Line::from(vec![Span::styled(prompt, Style::new().fg(pc)), Span::styled(match &self.secret {
                 Some(p) => format!("API key for {p} (hidden, Esc cancels)"),
                 None => "message, /help, @file to attach".into(),

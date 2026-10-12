@@ -2,6 +2,16 @@
 
 Each version starts with a one-line summary; the website shows it once the version is no longer recent.
 
+## 0.1.9 — unreleased
+
+- **Paste images into the chat.** Ctrl+V attaches the clipboard's image (wl-paste or xclip on
+  Linux, pngpaste or osascript on macOS, PowerShell on Windows), `/image <path>` attaches a file,
+  and pasting the path of a .png/.jpg/.webp/.gif offers to attach it. Each shows as an
+  `[image 1: 34 KB]` chip; Backspace on an empty line removes the last one. Images go to Ollama,
+  OpenAI-compatible, Anthropic and ChatGPT models alike, with a note when the model may not read
+  them. Up to 5 MB each; a secret path (~/.ssh, .env…) asks first. Images are saved in the
+  session, so `--resume` sends them again.
+
 ## 0.1.8 — 2026-10-12
 
 Teammates connect from any network, cloud models get their full window, and edits show as diffs.

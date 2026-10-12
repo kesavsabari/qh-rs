@@ -11,6 +11,7 @@ mod platform;
 mod mcp;
 mod hooks;
 mod hub;
+mod image;
 mod link;
 mod prompt;
 mod providers;

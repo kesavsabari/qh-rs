@@ -708,10 +708,14 @@ session tests). Messages from other sessions start with [from <name>]. qh saves 
         }
         // with fetch, list the provider's models once so the window comes from it, not the fallback
         // (once per provider per run: a failed list isn't cached, and this runs every turn)
-        if fetch && crate::providers::info(&provider, &model).is_none() {
+        // (without fetch, e.g. the status bar before the first turn, the list is fetched in the
+        // background so the real window shows on a later redraw instead of the fallback)
+        if crate::providers::info(&provider, &model).is_none() {
             static TRIED: Mutex<Vec<String>> = Mutex::new(Vec::new());
             let first = { let mut t = lock(&TRIED); !t.contains(&provider) && { t.push(provider.clone()); true } };
-            if first { if let Some(p) = crate::providers::resolve(&provider) { let _ = crate::providers::models(&p); } }
+            if let (true, Some(p)) = (first, crate::providers::resolve(&provider)) {
+                if fetch { let _ = crate::providers::models(&p); } else { std::thread::spawn(move || { let _ = crate::providers::models(&p); }); }
+            }
         }
         let known = crate::providers::info(&provider, &model).and_then(|i| i.ctx).or_else(|| {
             let p = crate::providers::resolve(&provider)?;

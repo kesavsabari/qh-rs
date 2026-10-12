@@ -2,6 +2,13 @@
 
 Each version starts with a one-line summary; the website shows it once the version is no longer recent.
 
+## 0.2.0 — unreleased
+
+- **Web search.** A `web_search(query, max_results?)` tool (coding, general and all profiles)
+  queries DuckDuckGo's HTML page and returns numbered titles, links and snippets, marked as
+  untrusted data. It contacts only html.duckduckgo.com and opens no result pages; 15 s timeout,
+  and a clear error when DuckDuckGo rate-limits.
+
 ## 0.1.9 — unreleased
 
 - **Answers render as markdown.** Headings, bold, italic, `inline code`, lists that wrap under

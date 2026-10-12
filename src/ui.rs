@@ -568,6 +568,7 @@ fn tool_title(tool: &str, a: &Value) -> String {
         "find_references" => format!("⌕ references to {}", s("name")),
         "rename_symbol" => format!("⇄ rename {} → {}", s("old"), s("new")),
         "remember" => format!("✱ remember {}", one(s("fact"), 80)),
+        "web_search" => format!("⌕ search {}", one(s("query"), 90)),
         "web_fetch" | "browse" => format!("↗ {tool} {}", clip(&s("url"), 90)),
         "click" => format!("◉ click [{}]", a["ref"]),
         "type" => format!("⌨ type [{}] \"{}\"{}", a["ref"], one(s("text"), 60),

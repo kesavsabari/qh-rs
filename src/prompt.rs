@@ -204,7 +204,7 @@ fn commands(cwd: &Path) -> Vec<String> {
 pub fn system(profile: &str, cwd: &Path, lim: &crate::tier::Limits) -> String {
     let mut text = if profile == "general" {
         format!("You are a terse personal assistant on the user's computer. Today is {}.
-You have live tools: web_fetch reads any URL, bash runs commands. Use them for anything current
+You have live tools: web_search searches the web, web_fetch reads any URL, bash runs commands. Use them for anything current
 or online instead of saying you lack access. Answer directly when no tool is needed. Keep replies short.",
                 crate::session::stamp().get(..8).unwrap_or(""))
     } else {

@@ -54,7 +54,7 @@ const HELP: &str = "/new <name> [profile]  new session (Ctrl+N: instant, auto-na
 /tier                  how the context window was sized to your GPU
 /mode [ask|auto-edit|auto|plan] (Shift+Tab)  /role [text]  /think  /tokens  /compact  /clear  /profile [name]
 /docs (guide in your browser)  /update (newest qh)  /undo  /diff  /allow [pattern]  /sandbox  /tasks [stop <id>]  /sessions  /commands (your own /name prompts)  /mcp (servers)
-Shift+←/→ (or Alt+←/→, Alt+1..9) switch tabs · Shift+↑/↓ or PgUp/PgDn scroll · Option+←/→ a word · Ctrl+O open last tool · Ctrl+L log · Esc interrupt · Ctrl+Q quit";
+Shift+←/→ (or Alt+←/→, Alt+1..9) switch tabs · Shift+↑/↓ or PgUp/PgDn scroll · Option+←/→ a word · Ctrl+O open last tool · Ctrl+R replies only · Ctrl+L log · Esc interrupt · Ctrl+Q quit";
 
 use crate::tools::DANGER;
 
@@ -204,6 +204,7 @@ struct App {
     recent: Vec<String>,
     log: VecDeque<String>,
     show_log: bool,
+    replies: bool, // only your messages and the agent's answers; tool calls fold to a count
     input: Vec<char>,
     cur: usize,
     chips: Vec<String>, // images (base64) attached to the next message
@@ -399,7 +400,7 @@ pub fn run(hub: Arc<Hub>, tx: Sender<Ui>, rx: Receiver<Ui>) -> std::io::Result<(
     let mut app = App {
         project: std::path::PathBuf::new(),
         hub: hub.clone(), views: HashMap::new(), active: String::new(), grid: false, recent: vec![],
-        log: VecDeque::new(), show_log: false, input: vec![], cur: 0, chips: vec![], hist: vec![], hist_i: 0,
+        log: VecDeque::new(), show_log: false, replies: false, input: vec![], cur: 0, chips: vec![], hist: vec![], hist_i: 0,
         confirms: VecDeque::new(), picker: None, secret: None, map: None,
         tab_hits: vec![], body: Rect::default(), picker_rows: None, quit: false, sugg_sel: 0, team_view: None, outside: None,
         last_personal: std::path::PathBuf::new(), last_team: std::path::PathBuf::new(), map_was_open: false, wt_hinted: false,
@@ -988,6 +989,7 @@ impl App {
                 self.note(&a, format!("mode: {m} — {}", crate::hub::mode_help(m)));
             }
             KeyCode::Char('l') if ctrl => self.show_log = !self.show_log,
+            KeyCode::Char('r') if ctrl => self.replies = !self.replies,
             KeyCode::Char('o') if ctrl => {
                 let a = self.active.clone();
                 if let Some(Item::Tool { open, .. }) = self.view(&a).items.iter_mut().rev().find(|i| matches!(i, Item::Tool { .. })) {
@@ -2101,7 +2103,7 @@ $ARGUMENTS is replaced by what you type after the command".into()
         f.set_cursor_position((input.x + 2 + cx as u16, input.y));
         // macOS writes the control key as ⌃, the way its own menus show it
         let c = if cfg!(target_os = "macos") { "⌃" } else { "^" };
-        let hints = format!("⇧Tab mode  ⇧←/→ tabs  {c}N new tab  {c}G grid  {c}P projects  {c}T team  Esc stop  {c}Q quit  ·  /help for all keys");
+        let hints = format!("⇧Tab mode  ⇧←/→ tabs  {c}N new tab  {c}G grid  {c}R replies  {c}P projects  {c}T team  Esc stop  {c}Q quit  ·  /help for all keys");
         // a newer qh: a standing notice at the right end of the bottom line, over the hints
         let foot = match crate::update::available() {
             Some(v) => {
@@ -2534,11 +2536,24 @@ then it's `git push -u origin {branch}` and `gh pr create --fill`.");
         // long lines are hard to read on a wide screen
         let width = area.width.saturating_sub(2).clamp(10, MAX_LINE) as usize;
         let h = area.height as usize;
+        let replies = self.replies;
         let v = self.views.entry(name.to_string()).or_default();
         let need = h + v.scroll;
         let mut lines: Vec<Line<'static>> = vec![];
-        for it in v.items.iter().rev() {
-            let mut ls = item_lines(it, width, need - lines.len());
+        let mut steps = 0; // tool calls folded away since the last item shown
+        for (i, it) in v.items.iter().enumerate().rev() {
+            if replies && matches!(it, Item::Tool { .. }) {
+                steps += 1;
+                if i > 0 {
+                    continue;
+                }
+            }
+            let mut ls = if replies && matches!(it, Item::Tool { .. }) { vec![] } else { item_lines(it, width, need - lines.len()) };
+            if steps > 0 {
+                let s = if steps == 1 { "" } else { "s" };
+                ls.push(Line::styled(format!("  · {steps} step{s}"), Style::new().fg(DIM)));
+                steps = 0;
+            }
             ls.append(&mut lines);
             lines = ls;
             if lines.len() >= need {

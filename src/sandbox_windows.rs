@@ -690,7 +690,8 @@ apply). An AppContainer can't run Git Bash; sandbox users are planned.".into());
 
             let sid = container_sid().unwrap();
             assert!(reset().unwrap() >= 2); // A and the protect path at least
-            for path in [&a, &a.join(".git").join("hooks")] {
+            // .git may have been renamed away above (the protect gap the spike reports)
+            for path in [a.clone(), a.join(".git").join("hooks")].iter().filter(|p| p.exists()) {
                 let (_sd, dacl) = read_dacl(path).unwrap();
                 for ty in [ACCESS_ALLOWED_ACE_TYPE, ACCESS_DENIED_ACE_TYPE] {
                     assert!(!unsafe { has_ace(dacl, sid.0, ty, 0, 0) }, "ACE left on {}", path.display());

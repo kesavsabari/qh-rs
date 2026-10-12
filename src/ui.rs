@@ -2910,7 +2910,7 @@ fn word_right(input: &[char], cur: usize) -> usize {
 }
 
 /// Word wrap by display width; overlong words are broken hard.
-fn wrap(text: &str, w: usize) -> Vec<String> {
+pub fn wrap(text: &str, w: usize) -> Vec<String> {
     let text = &clean(text);
     let w = w.max(1);
     let mut out = vec![];

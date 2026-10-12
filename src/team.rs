@@ -1523,7 +1523,8 @@ fn take_in(repo: &str, me: &String, key: Option<Key>, mut p: Peer, hooks: &Hooks
             if !relied.is_empty() {
                 s.last_answer.insert(q.session.clone(), (from.clone(), relied.clone(), format!("Q: {} A: {}", q.q, inc.text)));
             }
-            let head = inc.text.lines().next().unwrap_or("").chars().take(100).collect::<String>();
+            // the whole answer for you to read (the agent gets it in full either way); a very long one is cut with …
+            let head = clip_to(&inc.text, 1500);
             alert(format!("qh: {from} answered: {}", clip_to(&head, 80)));
             if q.session.is_empty() {
                 say_locked(repo, s, hooks, format!("{from} answered you: {head}"));
@@ -1564,7 +1565,7 @@ If this answer matters a lot, the user can make it a checked promise with /promi
             s.seen.insert(login.clone(), id);
             s.answered.push(now);
             s.dirty = true;
-            say_locked(repo, s, hooks, format!("{who} asked your {}: \"{}\" (answering from a read-only copy)", q.session, q.text.chars().take(80).collect::<String>()));
+            say_locked(repo, s, hooks, format!("{who} asked your {}: \"{}\" (answering from a read-only copy)", q.session, clip_to(&q.text, 300)));
             (hooks.answer)(q);
             continue;
         }

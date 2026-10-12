@@ -630,15 +630,17 @@ impl TeamView {
                                if i.replied { " · you replied" } else { "" });
             lines.push(Line::styled(clip(&head, w), if on { Style::new().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD) }
                                                    else { Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD) }));
-            // the whole request on the picked one, two lines on the others
+            // the whole request, wrapped, on the picked one; two lines on the others
             let text: String = i.text.chars().filter(|c| !c.is_control() || *c == '\n').collect();
-            let body: Vec<&str> = text.lines().collect();
-            let shown = if on { body.len().min(12) } else { body.len().min(2) };
-            for l in &body[..shown] { lines.push(Line::raw(format!("    {}", clip(l, w.saturating_sub(4))))) }
-            if body.len() > shown { lines.push(Line::styled(format!("    … {} more lines", body.len() - shown), Style::new().fg(Color::DarkGray))) }
+            let body: Vec<String> = if on { crate::ui::wrap(&text, w.saturating_sub(4).max(10)) }
+                                    else { text.lines().map(|l| clip(l, w.saturating_sub(4))).collect() };
+            let shown = if on { body.len() } else { body.len().min(2) };
+            for l in &body[..shown] { lines.push(Line::raw(format!("    {l}"))) }
+            if body.len() > shown { lines.push(Line::styled(format!("    … {} more lines (↑↓ to pick it)", body.len() - shown), Style::new().fg(Color::DarkGray))) }
             lines.push(Line::raw(""));
         }
-        let top = sel_line.saturating_sub((area.height as usize).saturating_sub(6)) as u16;
+        // the picked request from its top, so a long one is readable whole
+        let top = sel_line.saturating_sub(1) as u16;
         f.render_widget(Paragraph::new(lines).scroll((top, 0)), area);
     }
 

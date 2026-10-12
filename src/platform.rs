@@ -134,12 +134,22 @@ pub fn with_cwd_report_for(sh: Shell, script: &str, mark: &str) -> String {
 
 /// Run to completion or kill after `secs`; stdout/stderr are drained on threads so a chatty
 /// command can't deadlock on a full pipe.
-pub fn run_timeout(mut cmd: Command, stdin: Option<&[u8]>, secs: u64, cwd: &Path) -> std::io::Result<(Output, bool)> {
+/// A command qh runs must never talk to the user's terminal: a prompt there (git asking for a
+/// username, ssh for a passphrase) would draw over qh and hang. A new session has no controlling
+/// terminal, so /dev/tty can't be opened and such tools fail with an error instead; it's also its
+/// own process group, so a timeout or stop kills everything it started.
+pub fn no_tty(cmd: &mut Command) {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        cmd.process_group(0); // so a timeout can kill what the shell started, not just the shell
+        // SAFETY: setsid is async-signal-safe, the only kind of call allowed between fork and exec
+        unsafe { cmd.pre_exec(|| { libc::setsid(); Ok(()) }); }
     }
+    cmd.env("GIT_TERMINAL_PROMPT", "0").env("GCM_INTERACTIVE", "never").env("SSH_ASKPASS_REQUIRE", "never");
+}
+
+pub fn run_timeout(mut cmd: Command, stdin: Option<&[u8]>, secs: u64, cwd: &Path) -> std::io::Result<(Output, bool)> {
+    no_tty(&mut cmd);
     let mut child = cmd.current_dir(cwd).stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
     if let (Some(data), Some(mut i)) = (stdin, child.stdin.take()) {
@@ -345,6 +355,15 @@ pub fn diff(label: &str, before: Option<&str>, after: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn commands_cant_reach_the_terminal_so_prompts_fail_instead_of_hanging() {
+        let (o, killed) = run_timeout(shell_cmd("read x < /dev/tty; echo rc=$?; echo $GIT_TERMINAL_PROMPT"), None, 5, &std::env::temp_dir()).unwrap();
+        let out = String::from_utf8_lossy(&o.stdout);
+        assert!(!killed, "hung on the terminal");
+        assert!(out.contains("rc=1") && out.contains('0'), "{out}");
+    }
 
     #[test]
     fn the_old_qwen_harness_folder_moves_to_qh_once() {

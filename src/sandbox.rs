@@ -475,8 +475,7 @@ pub fn spawn(ctx: &Ctx, cfg: &Config, script: &str, outside: bool, cwd: &Path)
     let go = |mut c: std::process::Command| -> std::io::Result<std::process::Child> {
         #[cfg(unix)]
         {
-            use std::os::unix::process::CommandExt;
-            c.process_group(0);
+            crate::platform::no_tty(&mut c);
         }
         #[cfg(windows)]
         {

@@ -54,13 +54,16 @@ impl Notifier {
     }
 }
 
-/// bell + OSC 9 and OSC 777 (terminals ignore the one they don't know); `desktop` adds the OS notifier
-pub fn send(mode: Mode, text: &str) {
+/// The bell, then the OS notifier when there is one (notify-send, osascript): many terminals
+/// (Alacritty, foot without setup) drop OSC notifications. With no notifier, OSC 9 and 777 instead
+/// (terminals ignore the one they don't know). `mode` only matters for Off, checked by the caller.
+pub fn send(_mode: Mode, text: &str) {
     let t: String = text.chars().filter(|c| !c.is_control() && *c != ';').collect();
     let mut out = std::io::stdout();
-    let _ = write!(out, "\x07\x1b]9;{t}\x07\x1b]777;notify;qh;{t}\x07");
+    let os = !cfg!(windows) && crate::platform::on_path(if cfg!(target_os = "macos") { "osascript" } else { "notify-send" });
+    let _ = if os { write!(out, "\x07") } else { write!(out, "\x07\x1b]9;{t}\x07\x1b]777;notify;qh;{t}\x07") };
     let _ = out.flush();
-    if mode != Mode::Desktop || cfg!(windows) {
+    if !os {
         return;
     }
     let mut cmd = if cfg!(target_os = "macos") {

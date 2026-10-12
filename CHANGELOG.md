@@ -2,7 +2,7 @@
 
 Each version starts with a one-line summary; the website shows it once the version is no longer recent.
 
-## 0.1.7 — unreleased
+## 0.1.7 — 2026-10-12
 
 The safety update: secrets and anything outside the project ask first, and commands run in a sandbox on Linux and macOS.
 

@@ -212,7 +212,7 @@ mod tests {
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
         std::fs::create_dir_all(&d).unwrap();
         for a in [&["init", "-q", "-b", "main"][..], &["config", "user.email", "t@t"], &["config", "user.name", "t"],
-                  &["config", "commit.gpgsign", "false"]] {
+                  &["config", "commit.gpgsign", "false"], &["config", "core.autocrlf", "false"]] {
             git(&d, a).unwrap();
         }
         std::fs::write(d.join("a.txt"), "one\n").unwrap();

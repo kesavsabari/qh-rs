@@ -4,7 +4,7 @@ Each version starts with a one-line summary; the website shows it once the versi
 
 ## 0.2.0 — 2026-10-12
 
-Team requests, private chat and pings; markdown answers, images, cost, web search, LSP, background tasks and worktrees.
+Team requests, private chat and pings; web search, LSP, background tasks and worktrees.
 
 - **Requests: teammates' work waits for you.** Work a teammate or their agent sends one of your
   sessions (`tell_team`, `/team send`, the room) now lands in a new **Requests** tab in the team
@@ -70,6 +70,10 @@ Team requests, private chat and pings; markdown answers, images, cost, web searc
   own background tasks listen on, never one another process also listens on, Ollama's 11434 or
   qh's Chrome debug port. The bash tool and the sandbox hint tell the model to start servers this
   way (a `cmd &` dies when its call ends).
+
+## 0.1.9 — 2026-10-12
+
+Answers render as markdown; notifications, cost per session, and images in the chat.
 
 - **Answers render as markdown.** Headings, bold, italic, `inline code`, lists that wrap under
   their text, quotes, tables with aligned columns, and code blocks in a frame with keywords,

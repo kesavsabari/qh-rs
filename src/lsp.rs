@@ -128,7 +128,8 @@ fn path_of(u: &str) -> PathBuf {
     let s = u.strip_prefix("file://").unwrap_or(u).replace("%20", " ").replace("%23", "#").replace("%3F", "?").replace("%3A", ":");
     // file:///C:/x on Windows
     let s = if s.len() > 3 && s.as_bytes()[2] == b':' && s.starts_with('/') { s[1..].to_string() } else { s };
-    PathBuf::from(s)
+    // shown to the model and the user, so in the platform's own separators
+    if cfg!(windows) { PathBuf::from(s.replace('/', "\\")) } else { PathBuf::from(s) }
 }
 
 /// A diagnostic reduced to what we show and compare.

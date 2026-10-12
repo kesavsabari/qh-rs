@@ -2,6 +2,15 @@
 
 Each version starts with a one-line summary; the website shows it once the version is no longer recent.
 
+## 0.2.0 — unreleased
+
+- **Background tasks.** `bash` takes `background=true` for servers, watchers and long builds: it
+  starts under the same sandbox and approval rules, returns a task id (`bg1`) with the first 2 s
+  of output, and the agent reads more with `task_output(id, tail_lines?)` and stops it with
+  `task_stop(id)`. Each task keeps its last 2000 lines; up to 8 per tab; the whole process group
+  is killed when the tab closes or qh exits. The status bar shows `· 2 bg`; `/tasks` lists them,
+  `/tasks stop <id>` stops one.
+
 ## 0.1.9 — unreleased
 
 - **Answers render as markdown.** Headings, bold, italic, `inline code`, lists that wrap under

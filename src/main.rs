@@ -1,4 +1,5 @@
 mod backend;
+mod bg;
 mod browser;
 mod chatgpt;
 mod checkpoints;
@@ -240,6 +241,7 @@ fn main() {
     }
     update::check_in_background(update_check);
     let r = ui::run(hub, tx, rx);
+    bg::kill_all();
     browser::shutdown();
     if let Err(e) = r {
         eprintln!("{e}");
@@ -319,7 +321,7 @@ fn tool_once(args: &[String]) -> i32 {
     let proxy = proxy.map(|p| (p.port, p.sock));
     #[cfg(not(unix))]
     let proxy = proxy.map(|p| (p.port, None));
-    let sb = sandbox::Ctx { root: cwd.clone(), proxy: if cfg!(windows) { None } else { proxy } };
+    let sb = sandbox::Ctx { root: cwd.clone(), proxy: if cfg!(windows) { None } else { proxy }, tab: String::new() };
     println!("{}", tools::call(name, &a, &cfg, &mut cwd, &tier::Limits::for_ctx(32768), &sb));
     0
 }

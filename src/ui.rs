@@ -48,13 +48,13 @@ const HELP: &str = "/new <name> [profile]  new session (Ctrl+N: instant, auto-na
 /promise [fn what]     make a teammate's last answer (or your own words) a checked promise: edits that break it are held
 /tier                  how the context window was sized to your GPU
 /mode [ask|auto-edit|auto|plan] (Shift+Tab)  /role [text]  /think  /tokens  /compact  /clear  /profile [name]
-/docs (guide in your browser)  /update (newest qh)  /undo  /diff  /allow [pattern]  /sandbox  /sessions  /commands (your own /name prompts)  /mcp (servers)
+/docs (guide in your browser)  /update (newest qh)  /undo  /diff  /allow [pattern]  /sandbox  /tasks [stop <id>]  /sessions  /commands (your own /name prompts)  /mcp (servers)
 Shift+←/→ (or Alt+←/→, Alt+1..9) switch tabs · Shift+↑/↓ or PgUp/PgDn scroll · Option+←/→ a word · Ctrl+O open last tool · Ctrl+L log · Esc interrupt · Ctrl+Q quit";
 
 use crate::tools::DANGER;
 
 /// What the `/` autocomplete offers; custom commands are added from .qh/commands.
-const COMMANDS: [(&str, &str); 38] = [
+const COMMANDS: [(&str, &str); 39] = [
     ("/model", "pick this tab's model"), ("/provider", "connect providers: sign in, keys"),
     ("/new", "new session tab"), ("/close", "close this tab"), ("/mode", "ask · auto-edit · auto · plan"),
     ("/compact", "shrink the conversation"), ("/clear", "start this tab fresh"), ("/undo", "undo the agent's file changes"),
@@ -62,6 +62,7 @@ const COMMANDS: [(&str, &str); 38] = [
     ("/tokens", "context use, tokens and cost"), ("/tier", "this tab's context window"), ("/profile", "tool set: coding, general, browser, all"),
     ("/role", "give this tab a role"), ("/map", "map of sessions and messages"), ("/layout", "tabs or grid"),
     ("/msg", "message another tab"), ("/sessions", "saved sessions"), ("/allow", "auto-approve rules"), ("/sandbox", "what commands and tools may touch"),
+    ("/tasks", "background tasks; /tasks stop <id>"),
     ("/release", "let held messages through"), ("/pause", "hold automatic messaging"), ("/resume", "resume messaging"),
     ("/mcp", "MCP servers"), ("/team", "your team: start or join; in a team, opens the team room (Ctrl+T)"), ("/relay", "relay server for teammates nothing else reaches"), ("/commands", "your own /commands"), ("/help", "everything"), ("/docs", "open the docs in your browser"), ("/update", "install the newest qh"), ("/project", "switch project (Ctrl+P)"),
     ("/image", "attach an image to your next message (Ctrl+V pastes one)"),
@@ -1412,6 +1413,14 @@ impl App {
                 drop(s);
                 self.note(&a, msg);
             }
+            "/tasks" => {
+                let d = match arg.strip_prefix("stop").map(str::trim) {
+                    Some(id) if !id.is_empty() => crate::bg::stop(&m.name, id).unwrap_or_else(|e| e),
+                    Some(_) => return self.err(&a, "usage: /tasks stop <id>"),
+                    None => crate::bg::list(&m.name),
+                };
+                self.note(&a, d);
+            }
             "/sandbox" => {
                 let d = crate::sandbox::describe(&m.sandbox_now(), &self.hub.cfg);
                 self.note(&a, d);
@@ -2318,6 +2327,8 @@ then it's `git push -u origin {branch}` and `gh pr create --fill`.");
         if tps > 0.0 { out += &format!(" · {tps} tok/s") }
         if !holder.is_empty() { out += &format!(" · model: {holder}") }
         if busy > 0 { out += &format!(" · {busy} other busy") }
+        let bg = crate::bg::running(&m.name);
+        if bg > 0 { out += &format!(" · {bg} bg") }
         if self.hub.paused.load(std::sync::atomic::Ordering::Relaxed) { out += " · PAUSED" }
         if m.status() == "held" { out += &format!(" · held (> {MAX_HOPS} hops): /release") }
         if let Some(t) = crate::team::status_line() { out += &format!(" · {t}") }

@@ -449,8 +449,13 @@ fn bash(cwd: &mut PathBuf, a: &Value, cfg: &Config, sb: &crate::sandbox::Ctx) ->
     if !cwd.is_dir() {
         *cwd = crate::config::home();
     }
-    let script = crate::platform::with_cwd_report(cmd, CWD_MARK);
     let outside = a["unsandboxed"].as_bool() == Some(true);
+    if a["background"].as_bool() == Some(true) {
+        crate::bg::room(&sb.tab)?;
+        let (child, _, snap) = crate::sandbox::spawn(sb, cfg, cmd, outside, cwd).map_err(|e| e.to_string())?;
+        return Ok(crate::bg::start(&sb.tab, cmd, child, snap, std::time::Duration::from_secs(2)));
+    }
+    let script = crate::platform::with_cwd_report(cmd, CWD_MARK);
     let (o, killed, ran) = crate::sandbox::run(sb, cfg, &script, outside, 120, cwd).map_err(|e| e.to_string())?;
     let killed = if killed { "\n(killed after 120 s; run long or never-ending commands in the background)" } else { "" };
     let mut out = String::from_utf8_lossy(&o.stdout).to_string();
@@ -573,13 +578,17 @@ pub fn builtin_schema(name: &str) -> Option<Value> {
             let sandbox = if !crate::sandbox::enabled(crate::config::load_cached()) || crate::sandbox::unavailable().is_some() { "" } else {
                 " It runs in a sandbox: writes only in the project, temp and package caches; secrets unreadable; network only via an \
 allowlist the user approves per host. unsandboxed=true reruns it outside (the user is asked); use it only after the sandbox blocked something needed." };
-            let mut s = schema(name, &format!("{what} Stopped after 120 s; long output is cut, and says so; a cd carries over to the next call.{sandbox}"),
-                               &[("cmd", "string")], &["cmd"]);
+            let mut s = schema(name, &format!("{what} Stopped after 120 s; long output is cut, and says so; a cd carries over to the next call. \
+background=true starts it in the background (servers, watchers, long builds) and returns a task id with its first 2 s of output; \
+read more with task_output, stop it with task_stop.{sandbox}"),
+                               &[("cmd", "string"), ("background", "boolean")], &["cmd"]);
             if !sandbox.is_empty() {
                 s["function"]["parameters"]["properties"]["unsandboxed"] = json!({"type": "boolean"});
             }
             s
         }
+        "task_output" => schema(name, "New output of a background task since the last read (its last 2000 lines at most), and whether it still runs. tail_lines keeps only the last n.", &[("id", "string"), ("tail_lines", "integer")], &["id"]),
+        "task_stop" => schema(name, "Stop a background task and everything it started.", &[("id", "string")], &["id"]),
         "grep" => schema(name, "Search files recursively for a regex. Long results are cut: narrow the pattern or path.", &[("pattern", "string"), ("path", "string")], &["pattern"]),
         "web_fetch" => schema(name, "Fetch a URL as plain text (20 s at most; long pages are cut). It doesn't run JavaScript: use the browser tools for pages that need it.", &[("url", "string")], &["url"]),
         _ => return None,
@@ -601,11 +610,11 @@ pub const PROFILES: [&str; 4] = ["coding", "general", "browser", "all"];
 /// Tool names for a profile; "*webhooks" expands to the configured hooks.
 pub fn profile_tools(profile: &str) -> &'static [&'static str] {
     match profile {
-        "general" => &["read_file", "bash", "web_fetch", "remember", "skill", "*browser", "*webhooks"],
+        "general" => &["read_file", "bash", "task_output", "task_stop", "web_fetch", "remember", "skill", "*browser", "*webhooks"],
         "browser" => &["read_file", "write_file", "remember", "*browser"],
         "all" => &["read_file", "write_file", "edit_file", "find_references", "rename_symbol", "remember", "todo", "skill",
-                   "bash", "grep", "web_fetch", "*browser", "*webhooks"],
-        _ => &["read_file", "write_file", "edit_file", "rename_symbol", "find_references", "bash", "grep", "remember", "todo", "skill", "*browser"],
+                   "bash", "task_output", "task_stop", "grep", "web_fetch", "*browser", "*webhooks"],
+        _ => &["read_file", "write_file", "edit_file", "rename_symbol", "find_references", "bash", "task_output", "task_stop", "grep", "remember", "todo", "skill", "*browser"],
     }
 }
 
@@ -671,6 +680,8 @@ pub fn call(name: &str, a: &Value, cfg: &Config, cwd: &mut PathBuf, lim: &crate:
         "remember" => remember(cwd, a),
         "bash" => bash(cwd, a, cfg, sb),
         "grep" => grep(cwd, a),
+        "task_output" => crate::bg::output(&sb.tab, sa(a, "id"), a["tail_lines"].as_u64().map(|n| n as usize)),
+        "task_stop" => crate::bg::stop(&sb.tab, sa(a, "id")),
         "web_fetch" => web_fetch(a),
         _ => match cfg.webhooks.iter().find(|h| h.name == name) {
             Some(h) => webhook(&h.url, a),

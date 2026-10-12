@@ -611,6 +611,20 @@ fn dispatch(hub: &Arc<Hub>, m: &Arc<Member>, name: &str, args: &Value) -> String
     if name == "todo" {
         return todo(&m.name, &args);
     }
+    if name == "tell_team" {
+        let (to, text) = (args["to"].as_str().unwrap_or("").trim_start_matches('@'), args["text"].as_str().unwrap_or(""));
+        let (who, session) = to.split_once('/').unwrap_or((to, ""));
+        let session = if session.is_empty() {
+            match crate::team::people().into_iter().find(|p| p.0 == who).and_then(|p| p.3.into_iter().next()) {
+                Some(s) => s,
+                None => return format!("error: {who} isn't a teammate with a session open right now; tell the user"),
+            }
+        } else { session.to_string() };
+        return match crate::team::send(who, &session, &format!("[from {}'s agent] {text}", crate::team::me().unwrap_or_default())) {
+            Ok(m) => m,
+            Err(e) => format!("error: {e}"),
+        };
+    }
     if name == "ask_team" {
         return crate::team::ask_team(&m.name, &m.cwd(), args["question"].as_str().unwrap_or(""),
                                      args["to"].as_str().unwrap_or(""), args["deep"].as_bool().unwrap_or(false));

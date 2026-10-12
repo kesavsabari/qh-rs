@@ -523,10 +523,24 @@ fn suggest_rule(tool: &str, a: &Value, rules: &[String]) -> String {
     }
 }
 
-/// `@path` attaches that file's contents (capped) to the message.
+/// `@path` attaches that file's contents (capped) to the message; `@login` of a teammate tells
+/// the model who that is, what they're on, and how to hand them their part.
 fn expand_mentions(line: &str) -> String {
     let mut out = line.to_string();
+    let people = crate::team::people();
+    let mut named: Vec<String> = vec![];
     for w in line.split_whitespace().filter_map(|w| w.strip_prefix('@')) {
+        let login = w.trim_end_matches(|c: char| !(c.is_alphanumeric() || c == '-' || c == '_'));
+        if let Some((who, _, seen, sessions, role)) = people.iter().find(|p| p.0.eq_ignore_ascii_case(login)) {
+            if !named.contains(who) {
+                named.push(who.clone());
+                out += &format!("\n\n<teammate login=\"{who}\" role=\"{role}\" status=\"{seen}\" sessions=\"{}\">\n\
+{who} is another person on this team, with their own qh agent on their own machine. Work the user gives to {who} is theirs: \
+don't do it yourself. Agree the shared parts first (API routes, data shapes, file layout), then send {who} their part with \
+tell_team, and use ask_team for questions about what they own.\n</teammate>", sessions.join(","));
+            }
+            continue;
+        }
         let p = if let Some(r) = w.strip_prefix("~/") { crate::config::home().join(r) } else { w.into() };
         if let Ok(body) = std::fs::read(&p) {
             let body = String::from_utf8_lossy(&body);
@@ -584,6 +598,7 @@ fn tool_title(tool: &str, a: &Value) -> String {
         "scroll" => format!("↕ scroll {}", if s("direction").is_empty() { "down".into() } else { s("direction") }),
         "back" | "screenshot" | "snapshot" | "list_sessions" => format!("· {tool}"),
         "send_message" => format!("→ {}: {}", s("to"), one(s("text"), 90)),
+        "tell_team" => format!("→ @{}: {}", s("to").trim_start_matches('@'), one(s("text"), 90)),
         "ask" => format!("? {}: {}", s("to"), one(s("question"), 90)),
         "spawn" => format!("+ spawn {}: {}", s("name"), one(s("task"), 80)),
         "read_session" => format!("▤ read session {}", s("name")),

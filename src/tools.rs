@@ -827,7 +827,7 @@ pub fn risky(name: &str, a: &Value, cfg: &Config) -> bool {
         Regex::new(r"(?i)submit|buy|pay|order|checkout|send|delete|remove|confirm|purchase|sign ?up|apply|post").unwrap()
     });
     match name {
-        "write_file" | "edit_file" | "rename_symbol" | "type" => true,
+        "write_file" | "edit_file" | "rename_symbol" | "type" | "tell_team" => true,
         "bash" => !is_safe(sa(a, "cmd")),
         "click" => RISKY_LABEL.is_match(&browser::label(a)),
         _ if crate::mcp::is_mcp(name) => !crate::mcp::trusted(name),

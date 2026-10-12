@@ -4,6 +4,10 @@ Each version starts with a one-line summary; the website shows it once the versi
 
 ## 0.2.0 — unreleased
 
+- **Mention teammates.** `@login` in a message tells the model that's another person on the
+  team, what they're on, and that their part is theirs. A new `tell_team` tool hands their agent
+  the work (it asks you first, outside auto mode). `send_message` to a teammate says to use it.
+- **Ctrl+]** also flips team ⇄ personal, since input methods often take Ctrl+Space.
 - **Web search.** A `web_search(query, max_results?)` tool (coding, general and all profiles)
   queries DuckDuckGo's HTML page and returns numbered titles, links and snippets, marked as
   untrusted data. It contacts only html.duckduckgo.com and opens no result pages; 15 s timeout,

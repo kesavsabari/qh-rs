@@ -1713,6 +1713,11 @@ pub fn waiting_elsewhere() -> Vec<(String, usize)> {
 }
 
 /// Teammates for the /team menu: (login, online, "online" or "2h ago", session names, our role for them).
+/// Your GitHub login in the running team.
+pub fn me() -> Option<String> {
+    cur(|s| s.me.clone())
+}
+
 pub fn people() -> Vec<(String, bool, String, Vec<String>, String)> {
     cur(|s| {
         let mut peers: Vec<&Peer> = s.peers.values().filter(|p| p.joined).collect();

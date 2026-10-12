@@ -261,7 +261,7 @@ session tests). Messages from other sessions start with [from <name>]. qh saves 
         let team = crate::team::running_here(&m.cwd());
         tools.into_iter().filter(|t| {
             let n = t["function"]["name"].as_str().unwrap_or("");
-            if (n == "screenshot" && !sees) || (n == "ask_team" && !team) {
+            if (n == "screenshot" && !sees) || (matches!(n, "ask_team" | "tell_team") && !team) {
                 return false;
             }
             !(solo && matches!(n, "list_sessions" | "read_session" | "send_message" | "ask"))
@@ -888,6 +888,12 @@ put your result or answer there.");
                 }
                 let hops = lock(&me.ctl).hops + 1;
                 if !self.send(&to, &s("text"), &me.name, hops, None) {
+                    // a teammate's login: that's another person's machine, which send_message can't reach
+                    let login = to.trim_start_matches('@').split('/').next().unwrap_or("");
+                    if crate::team::people().iter().any(|p| p.0 == login) {
+                        return format!("error: {login} is a teammate on another machine; send_message only reaches your own tabs. \
+Use tell_team (to=\"{login}\") to hand them work, or ask_team to ask them something.");
+                    }
                     return format!("error: no session {to}. Sessions: {}", others());
                 }
                 let held = if hops > MAX_HOPS { " (held: message chain too long, the user must release it)" } else { "" };
@@ -1057,6 +1063,10 @@ own or are changing: a function's shape, an API, what they're about to change. N
 and it goes to whoever is changing or using it. First call: their fact sheet (cheap). deep=true: their agent answers from its \
 live session; the answer arrives later as a message, so keep working meanwhile. to = \"login\" or \"login/session\" (optional).",
                &[("question", "string"), ("to", "string"), ("deep", "boolean")], &["question"]),
+        schema("tell_team", "Send a teammate's agent a message: hand them their part of a task, or tell them a decision \
+they build on (an API shape, a route, a file layout). It lands in their session on their machine. to = \"login\" or \
+\"login/session\" (their first session when no session is named). Be specific: what to build, and the agreed interface.",
+               &[("to", "string"), ("text", "string")], &["to", "text"]),
     ]
 }
 

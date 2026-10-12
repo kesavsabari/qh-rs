@@ -374,7 +374,7 @@ End with one line 'RELIED ON: <comma-separated function, type or field names you
             let out = if let Some(why) = guarded {
                 format!("error: not here: it {why}")
             } else if schemas.iter().any(|s| s["function"]["name"] == name.as_str()) && read_only(hub, &name, &args) {
-                tools::call(&name, &args, &hub.cfg, &mut cwd, &hub.limits(m), &crate::sandbox::Ctx { root: m.root.clone(), proxy: None })
+                tools::call(&name, &args, &hub.cfg, &mut cwd, &hub.limits(m), &crate::sandbox::Ctx { root: m.root.clone(), proxy: None, tab: m.name.clone() })
             } else {
                 format!("error: {name} isn't available here: read_file, grep and find_references only")
             };
@@ -654,7 +654,7 @@ fn dispatch(hub: &Arc<Hub>, m: &Arc<Member>, name: &str, args: &Value) -> String
         return "denied by user".into();
     }
     lock(&m.turn).ckpt.snapshot(name, &args, &cwd);
-    let sb = if name == "bash" { hub.sandbox_ctx(m) } else { crate::sandbox::Ctx { root: m.root.clone(), proxy: None } };
+    let sb = if name == "bash" { hub.sandbox_ctx(m) } else { crate::sandbox::Ctx { root: m.root.clone(), proxy: None, tab: m.name.clone() } };
     let mut out = tools::call(name, &args, &hub.cfg, &mut cwd, &hub.limits(m), &sb);
     if !out.starts_with("error") {
         for t in &touched {

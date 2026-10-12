@@ -151,7 +151,7 @@ impl Member {
 
     /// The sandbox context as it stands, without starting the proxy (for /sandbox).
     pub fn sandbox_now(&self) -> crate::sandbox::Ctx {
-        crate::sandbox::Ctx { root: self.root.clone(), proxy: self.proxy.get().cloned().flatten() }
+        crate::sandbox::Ctx { root: self.root.clone(), proxy: self.proxy.get().cloned().flatten(), tab: self.name.clone() }
     }
 
     pub fn status(&self) -> &'static str {
@@ -386,6 +386,7 @@ session tests). Messages from other sessions start with [from <name>]. qh saves 
         };
         if let Some(m) = m {
             m.cancel.store(true, Relaxed);
+            crate::bg::kill_tab(name);
             self.release_files(name);
         }
         self.save();
@@ -694,7 +695,7 @@ session tests). Messages from other sessions start with [from <name>]. qh saves 
                 Err(_) => None, // no proxy: commands get no network
             }
         });
-        crate::sandbox::Ctx { root: m.root.clone(), proxy: proxy.clone() }
+        crate::sandbox::Ctx { root: m.root.clone(), proxy: proxy.clone(), tab: m.name.clone() }
     }
 
     /// (window, compact-at) for a session. A local model gets the configured window (what fits

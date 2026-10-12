@@ -379,6 +379,8 @@ pub struct Ctx {
     pub root: PathBuf,
     /// the session's allowlist proxy: port and, on Unix, its socket
     pub proxy: Option<(u16, Option<PathBuf>)>,
+    /// the tab the command runs for: background tasks belong to it
+    pub tab: String,
 }
 
 /// How a command was run.
@@ -462,6 +464,85 @@ pub fn run(ctx: &Ctx, cfg: &Config, script: &str, outside: bool, secs: u64, cwd:
         o.stderr.extend(format!("\nqh sandbox: put back {} (protected: it runs code later, outside the sandbox)", names.join(", ")).bytes());
     }
     Ok((o, killed, Ran::Sandboxed))
+}
+
+/// Start a background command under the same rules as `run`: the child is in its own process
+/// group with piped stdout/stderr. The snapshot (sandboxed runs) is restored when the task ends.
+pub fn spawn(ctx: &Ctx, cfg: &Config, script: &str, outside: bool, cwd: &Path)
+             -> std::io::Result<(std::process::Child, Ran, Option<Snapshot>)> {
+    let (prog, args) = crate::platform::shell_argv(script);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let go = |mut c: std::process::Command| -> std::io::Result<std::process::Child> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            c.process_group(0);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            c.creation_flags(0x0000_0200 | 0x0800_0000); // CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
+        }
+        c.current_dir(cwd).stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn()
+    };
+    let plain = |ran: Ran| -> std::io::Result<(std::process::Child, Ran, Option<Snapshot>)> {
+        let mut c = std::process::Command::new(&prog);
+        c.args(&args);
+        for k in scrubbed(cfg) {
+            c.env_remove(k);
+        }
+        Ok((go(c)?, ran, None))
+    };
+    if !enabled(cfg) || outside {
+        return plain(Ran::Unsandboxed);
+    }
+    if unavailable().is_some() {
+        return plain(Ran::Unavailable);
+    }
+    let p = policy(&ctx.root, cfg, net(ctx, cfg));
+    let mut env: Vec<(String, String)> = vec![];
+    if let Net::Proxy { port } = p.net {
+        env = proxy_env(port);
+    }
+    #[cfg(unix)]
+    {
+        let c = command_os(&p, ctx, cfg, &prog, &args, &env)?;
+        let snap = Snapshot::take(&ctx.root);
+        Ok((go(c)?, Ran::Sandboxed, Some(snap)))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (p, env, go);
+        Err(std::io::Error::other("background commands can't run in the Windows sandbox yet: run it in the foreground, or unsandboxed"))
+    }
+}
+
+#[cfg(unix)]
+fn command_os(p: &Policy, ctx: &Ctx, cfg: &Config, prog: &Path, args: &[&str], env: &[(String, String)])
+              -> std::io::Result<std::process::Command> {
+    #[cfg(target_os = "linux")]
+    let mut c = {
+        let sock = ctx.proxy.as_ref().and_then(|(_, s)| s.clone());
+        crate::sandbox_linux::command(p, sock.as_deref(), prog, args)
+            .ok_or_else(|| std::io::Error::other("the sandbox helper can't run"))?
+    };
+    #[cfg(target_os = "macos")]
+    let mut c = {
+        let _ = ctx;
+        let a: Vec<&std::ffi::OsStr> = args.iter().map(std::ffi::OsStr::new).collect();
+        crate::sandbox_macos::command(p, prog.as_os_str(), &a)
+    };
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    return { let _ = (p, ctx, prog, args); Err(std::io::Error::other("no sandbox for this operating system")) };
+    #[allow(unreachable_code)]
+    {
+        c.envs(env.iter().map(|(k, v)| (k, v)));
+        for k in scrubbed(cfg) {
+            c.env_remove(k);
+        }
+        Ok(c)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

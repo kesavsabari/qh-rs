@@ -235,6 +235,8 @@ jobs:
     <tr><td><code>/undo</code> · <code>/diff</code></td><td>Undo or show the agent's file changes</td></tr>
     <tr><td><code>/compact</code> · <code>/clear</code></td><td>Shrink the conversation, or start the tab fresh</td></tr>
     <tr><td><code>/cwd path</code></td><td>Change this tab's working folder</td></tr>
+    <tr><td><code>/new --worktree name</code> · <code>/worktree</code></td><td>Give a tab its own git worktree (<code>.qh/worktrees/name</code>, branch <code>qh/name</code>) so two agents never edit the same checkout</td></tr>
+    <tr><td><code>/merge</code> · <code>/merge --discard</code></td><td>Show the worktree's diff, then commit and merge it into its base branch (refused if the main checkout has uncommitted changes; a conflict is aborted), or remove it after a confirm</td></tr>
     <tr><td><code>/team</code></td><td>Your team: who's online, read or message their sessions</td></tr>
     <tr><td><code>/map</code></td><td>Live map of tabs and the messages between them</td></tr>
     <tr><td><code>/mcp</code> · <code>/commands</code></td><td>MCP servers, and your own commands</td></tr>

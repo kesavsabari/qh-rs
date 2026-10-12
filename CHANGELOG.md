@@ -13,6 +13,13 @@ Each version starts with a one-line summary; the website shows it once the versi
   with `-p`; prompts nobody can answer are refused and reported. `--max-turns N` caps tool rounds.
   Exit codes: 0 ok, 1 agent error, 2 bad usage, 3 permission needed but refused. The docs include
   an example GitHub Actions workflow that fixes failing tests on a PR.
+- **A git worktree per tab.** `/new --worktree [name]` (or `/worktree` on the current tab) puts
+  the tab in `.qh/worktrees/<name>` on branch `qh/<name>`, so two agents never edit the same
+  checkout; the branch shows in the pane title. `/merge` shows the diff against the base branch
+  and, once you confirm, commits the tab's work and merges it. It refuses when the main checkout
+  has uncommitted changes, and aborts a conflicting merge so both sides stay intact.
+  `/merge --discard` removes the worktree and branch after a confirm. When two plain tabs edit
+  one repo, qh suggests `/worktree` once.
 
 ## 0.1.9 — unreleased
 

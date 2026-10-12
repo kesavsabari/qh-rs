@@ -85,6 +85,57 @@ Useful keys and commands:
 
 Run one task without the UI: `qh -p "explain this repo" -y`.
 
+### Headless and CI (`--json`)
+
+`qh -p "…" --json` prints one JSON object per line instead of plain text:
+
+```
+{"type":"start","model":"…","mode":"auto","version":"…","prompts":1,"max_turns":30}
+{"type":"text","delta":"Running the tests…"}
+{"type":"tool_call","name":"bash","args":{"cmd":"cargo test"}}
+{"type":"tool_result","name":"bash","ok":true,"summary":"…"}
+{"type":"diff","path":"src/lib.rs","added":3,"removed":1}
+{"type":"permission_denied","tool":"…","message":"…"}
+{"type":"usage","input":12000,"cached":8000,"output":900,"cost":0.004,"plan":false}
+{"type":"error","message":"…"}
+{"type":"done","ok":true,"code":0,"answer":"…"}
+```
+
+`--mode ask|auto-edit|auto|plan` works with `-p`. Anything that would need a prompt is refused
+(there is nobody to ask) and reported as `permission_denied`. `--max-turns N` stops a prompt after
+N tool rounds. Exit codes: `0` success, `1` agent error (or `--max-turns` hit), `2` bad usage,
+`3` a permission was needed and refused.
+
+Example GitHub Actions workflow that lets qh fix failing tests on a pull request (the API key comes
+from a repository secret, passed as an env var):
+
+```yaml
+name: qh fix tests
+on:
+  pull_request:
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+      - run: curl -fsSL kesavsabari.github.io/qh/sh | sh
+      - name: Let qh fix failing tests
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          qh -p "Run the test suite, fix whatever fails, and rerun until it passes." \
+             --model openrouter:qwen/qwen3-coder --mode auto --max-turns 30 --json > qh.jsonl
+      - name: Commit the fix
+        run: |
+          git config user.name qh-bot
+          git config user.email qh-bot@users.noreply.github.com
+          git commit -am "qh: fix failing tests" && git push || true
+```
+
 ## Make it yours
 
 All of these are optional.

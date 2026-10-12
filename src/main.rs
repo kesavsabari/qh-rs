@@ -12,6 +12,7 @@ mod mcp;
 mod notify;
 mod hooks;
 mod hub;
+mod jsonl;
 mod image;
 mod link;
 mod prompt;
@@ -48,10 +49,12 @@ qh docs                 open the guide in your browser
 qh update               install the newest qh (qh --version shows this one)
 qh login chatgpt        use your ChatGPT plan, Go included (qh logout chatgpt)
 qh login <provider>     save an API key (openrouter, ollama-cloud, openai, groq, anthropic…)
-qh -p \"prompt\" [-p \"next turn\" ...] [-y] [--ctx N] [--stats FILE]
+qh -p \"prompt\" [-p \"next turn\" ...] [-y] [--json] [--max-turns N] [--ctx N] [--stats FILE]
     run prompts as turns of one session without the UI and print the replies
     -y approves every tool; --ctx overrides the context window (compacts at 88%);
-    --stats writes {tokens, calls, compacts} as JSON. QH_STATE_DIR isolates history.";
+    --stats writes {tokens, calls, compacts} as JSON. QH_STATE_DIR isolates history.
+    --json prints JSONL events; --max-turns stops after N tool rounds per prompt.
+    exit 0 ok, 1 agent error, 2 bad usage, 3 a permission was needed and refused";
 
 struct Args {
     resume: Option<String>,
@@ -63,10 +66,12 @@ struct Args {
     ctx: Option<usize>,
     stats: Option<String>,
     mode: Option<String>,
+    json: bool,
+    max_turns: Option<usize>,
 }
 
 fn parse() -> Args {
-    let mut a = Args { resume: None, profile: None, model: None, think: false, print: vec![], yes: false, ctx: None, stats: None, mode: None };
+    let mut a = Args { resume: None, profile: None, model: None, think: false, print: vec![], yes: false, ctx: None, stats: None, mode: None, json: false, max_turns: None };
     let mut it = std::env::args().skip(1).peekable();
     while let Some(x) = it.next() {
         match x.as_str() {
@@ -79,6 +84,14 @@ fn parse() -> Args {
             "--stats" => a.stats = it.next(),
             "-y" | "--yes" => a.yes = true,
             "--mode" => a.mode = it.next(),
+            "--json" => a.json = true,
+            "--max-turns" => match it.next().and_then(|v| v.parse().ok()).filter(|n| *n > 0) {
+                Some(n) => a.max_turns = Some(n),
+                None => {
+                    eprintln!("--max-turns needs a number above 0");
+                    std::process::exit(2);
+                }
+            },
             _ => {
                 println!("{USAGE}");
                 std::process::exit(if x == "-h" || x == "--help" { 0 } else { 2 });
@@ -180,6 +193,10 @@ fn main() {
         std::process::exit(if setup::run() { 0 } else { 1 });
     }
     let args = parse();
+    if (args.json || args.max_turns.is_some()) && args.print.is_empty() {
+        eprintln!("--json and --max-turns work with -p \"prompt\"");
+        std::process::exit(jsonl::BAD_USAGE);
+    }
     if args.print.is_empty() && setup::needed() && std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         providers::init(&config::load());
         if !setup::run() {
@@ -234,7 +251,8 @@ fn main() {
         }
     }
     if !args.print.is_empty() {
-        let code = headless(&hub, &args.print, rx, args.stats.as_deref());
+        let opts = Headless { stats: args.stats.as_deref(), json: args.json, max_turns: args.max_turns };
+        let code = headless(&hub, &args.print, rx, &opts);
         browser::shutdown();
         std::process::exit(code);
     }
@@ -246,47 +264,104 @@ fn main() {
     }
 }
 
+struct Headless<'a> {
+    stats: Option<&'a str>,
+    json: bool,
+    max_turns: Option<usize>,
+}
+
 /// Run each prompt as a turn of "main", printing replies to stdout and tool
-/// calls to stderr.
-fn headless(hub: &std::sync::Arc<Hub>, prompts: &[String], rx: std::sync::mpsc::Receiver<ui::Ui>, stats: Option<&str>) -> i32 {
+/// calls to stderr (or, with --json, every event as a JSON line on stdout).
+fn headless(hub: &std::sync::Arc<Hub>, prompts: &[String], rx: std::sync::mpsc::Receiver<ui::Ui>, o: &Headless) -> i32 {
     let main = hub.names()[0].clone();
-    let Some(m) = hub.get(&main) else { return 1 };
+    let Some(m) = hub.get(&main) else { return jsonl::AGENT_ERROR };
     let mut out = std::io::stdout();
-    let (mut code, mut calls, mut compacts, mut peak) = (0, 0, 0, 0);
+    let (mut code, mut calls, mut compacts, mut peak) = (jsonl::OK, 0, 0, 0);
+    let mut denied = false;
+    let mut last_call = None;
+    let mut answer = String::new();
+    if o.json {
+        let set = lock(&m.set);
+        let model = if set.provider.is_empty() { set.model.clone() } else { format!("{}:{}", set.provider, set.model) };
+        jsonl::write(&mut out, &serde_json::json!({"type": "start", "model": model, "mode": hub.mode_name(),
+            "version": update::VERSION, "prompts": prompts.len(), "max_turns": o.max_turns}));
+    }
     for p in prompts {
         hub.send(&main, p, "user", 0, None);
+        let (mut rounds, mut in_calls) = (0usize, false);
+        answer.clear();
         while let Ok(ui::Ui::Hub(name, ev)) = rx.recv() {
+            let is_call = matches!(ev, Event::ToolCall { .. });
+            if is_call && !in_calls && name == main {
+                rounds += 1;
+                if o.max_turns.is_some_and(|n| rounds > n) && !m.cancel.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    let msg = format!("stopped: more than {} tool rounds (--max-turns)", rounds - 1);
+                    if o.json { jsonl::write(&mut out, &serde_json::json!({"type": "error", "message": msg})) } else { eprintln!("[{name}] {msg}") }
+                    code = jsonl::AGENT_ERROR;
+                }
+            }
+            in_calls = is_call;
+            if o.json && name == main {
+                for v in jsonl::events(&ev, &mut last_call) {
+                    jsonl::write(&mut out, &v);
+                }
+            }
             match ev {
                 Event::Token(t) if name == main => {
-                    let _ = out.write_all(t.as_bytes());
-                    let _ = out.flush();
+                    answer.push_str(&t);
+                    if !o.json {
+                        let _ = out.write_all(t.as_bytes());
+                        let _ = out.flush();
+                    }
                 }
                 Event::ToolCall { name: t, args } => {
                     calls += 1;
-                    eprintln!("[{name}] tool {t} {args}");
+                    if !o.json { eprintln!("[{name}] tool {t} {args}") }
                 }
+                Event::ToolResult { .. } => answer.clear(), // the answer is the text after the last tool
                 Event::Compact { .. } => compacts += 1,
                 Event::Done { tokens, .. } => peak = peak.max(tokens),
                 Event::Notice(n) => {
-                    eprintln!("[{name}] {n}");
+                    if !o.json { eprintln!("[{name}] {n}") }
                     if n.starts_with("error") {
-                        code = 1;
+                        code = jsonl::AGENT_ERROR;
                     }
                 }
-                Event::Confirm { reply, .. } => {
+                Event::Confirm { tool, args, reply, warn, .. } => {
+                    // nobody to ask: refuse, and say so
+                    denied = true;
+                    let why = format!("{tool} needs approval in {} mode and nobody can approve headless; refused (pass -y or --mode auto)", hub.mode_name());
+                    if o.json {
+                        jsonl::write(&mut out, &serde_json::json!({"type": "permission_denied", "session": name, "tool": tool, "args": args, "warn": warn, "message": why}));
+                    } else {
+                        eprintln!("[{name}] {why}");
+                    }
                     let _ = reply.send(hub::Answer::No);
                 }
                 _ => {}
             }
             // spawned helpers report back to main, so wait for the whole hub, not just main
             if hub.quiet() {
-                println!();
+                if !o.json { println!() }
                 break;
             }
         }
+        m.cancel.store(false, std::sync::atomic::Ordering::Relaxed);
+        if o.json {
+            jsonl::write(&mut out, &jsonl::usage(&lock(&m.turn).usage));
+        }
+        if code != jsonl::OK {
+            break;
+        }
+    }
+    if code == jsonl::OK && denied {
+        code = jsonl::NEEDS_PERMISSION;
+    }
+    if o.json {
+        jsonl::write(&mut out, &serde_json::json!({"type": "done", "ok": code == jsonl::OK, "code": code, "answer": answer}));
     }
     peak = peak.max(lock(&m.turn).tokens);
-    if let Some(path) = stats {
+    if let Some(path) = o.stats {
         let _ = std::fs::write(path, serde_json::json!({"tokens": peak, "calls": calls, "compacts": compacts}).to_string());
     }
     code

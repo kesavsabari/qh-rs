@@ -111,6 +111,47 @@ what does src/engine.rs do?</code></pre>
   </ul>
 </section>
 
+<section id="headless">
+  <h2>Headless and CI</h2>
+  <p><code>qh -p "…" --json</code> prints one JSON object per line (JSONL) instead of plain text:</p>
+  <pre><code>{&quot;type&quot;:&quot;start&quot;,&quot;model&quot;:&quot;…&quot;,&quot;mode&quot;:&quot;auto&quot;,&quot;version&quot;:&quot;…&quot;,&quot;prompts&quot;:1,&quot;max_turns&quot;:30}
+{&quot;type&quot;:&quot;text&quot;,&quot;delta&quot;:&quot;Running the tests…&quot;}
+{&quot;type&quot;:&quot;tool_call&quot;,&quot;name&quot;:&quot;bash&quot;,&quot;args&quot;:{&quot;cmd&quot;:&quot;cargo test&quot;}}
+{&quot;type&quot;:&quot;tool_result&quot;,&quot;name&quot;:&quot;bash&quot;,&quot;ok&quot;:true,&quot;summary&quot;:&quot;…&quot;}
+{&quot;type&quot;:&quot;diff&quot;,&quot;path&quot;:&quot;src/lib.rs&quot;,&quot;added&quot;:3,&quot;removed&quot;:1}
+{&quot;type&quot;:&quot;permission_denied&quot;,&quot;tool&quot;:&quot;…&quot;,&quot;message&quot;:&quot;…&quot;}
+{&quot;type&quot;:&quot;usage&quot;,&quot;input&quot;:12000,&quot;cached&quot;:8000,&quot;output&quot;:900,&quot;cost&quot;:0.004,&quot;plan&quot;:false}
+{&quot;type&quot;:&quot;error&quot;,&quot;message&quot;:&quot;…&quot;}
+{&quot;type&quot;:&quot;done&quot;,&quot;ok&quot;:true,&quot;code&quot;:0,&quot;answer&quot;:&quot;…&quot;}</code></pre>
+  <p><code>--mode ask|auto-edit|auto|plan</code> works with <code>-p</code>. Anything that would need a prompt is refused, since nobody can answer, and reported as <code>permission_denied</code>. <code>--max-turns N</code> stops a prompt after N tool rounds.</p>
+  <p>Exit codes: <code>0</code> success, <code>1</code> agent error (or <code>--max-turns</code> hit), <code>2</code> bad usage, <code>3</code> a permission was needed and refused.</p>
+  <p>Example GitHub Actions workflow that lets qh fix failing tests on a pull request (the key comes from a repository secret, passed as an env var):</p>
+  <pre><code>name: qh fix tests
+on:
+  pull_request:
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+      - run: curl -fsSL kesavsabari.github.io/qh/sh | sh
+      - name: Let qh fix failing tests
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          qh -p &quot;Run the test suite, fix whatever fails, and rerun until it passes.&quot; \
+             --model openrouter:qwen/qwen3-coder --mode auto --max-turns 30 --json &gt; qh.jsonl
+      - name: Commit the fix
+        run: |
+          git config user.name qh-bot
+          git config user.email qh-bot@users.noreply.github.com
+          git commit -am &quot;qh: fix failing tests&quot; &amp;&amp; git push || true</code></pre>
+</section>
+
 <section id="local">
   <h2>Local models (Ollama)</h2>
   <p>Install <a href="https://ollama.com/download">Ollama</a> (Windows: <code>winget install Ollama.Ollama</code>), start it, and run <code>qh setup</code>. Setup offers to download <code>qwen3.5:9b</code>, the model qh is tuned on. Any other Ollama model works too: <code>ollama pull &lt;name&gt;</code> and it shows up in <code>/model</code>.</p>

@@ -839,7 +839,15 @@ pub fn risky(name: &str, a: &Value, cfg: &Config) -> bool {
 pub fn call(name: &str, a: &Value, cfg: &Config, cwd: &mut PathBuf, lim: &crate::tier::Limits, sb: &crate::sandbox::Ctx) -> String {
     OUT_CAP.with(|c| c.set(lim.out_cap));
     if browser::TOOLS.contains(&name) {
-        return browser::call(name, a, cfg.browser_headless, &cfg.browser_allow_hosts);
+        #[allow(unused_mut)]
+        let mut allow = cfg.browser_allow_hosts.clone();
+        // the tab's own dev server: a page its background task serves may be opened, nothing else local.
+        // On Linux the tab's tasks listen inside its network namespace, out of the browser's reach.
+        #[cfg(target_os = "macos")]
+        for p in crate::sandbox_macos::tab_ports(&crate::bg::pids(&sb.tab)) {
+            allow.extend([format!("localhost:{p}"), format!("127.0.0.1:{p}")]);
+        }
+        return browser::call(name, a, cfg.browser_headless, &allow);
     }
     if crate::mcp::is_mcp(name) {
         return crate::mcp::call(name, a);

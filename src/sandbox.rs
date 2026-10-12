@@ -620,9 +620,10 @@ fn run_os(p: &Policy, ctx: &Ctx, cfg: &Config, prog: &Path, args: &[&str], env: 
 /// Appended to a failed sandboxed command's output when the failure looks like the sandbox's doing.
 pub fn hint(out: &str) -> Option<&'static str> {
     static BLOCKED: LazyLock<Regex> = LazyLock::new(|| Regex::new(
-        r"(?i)permission denied|operation not permitted|read-only file system|qh sandbox|403 forbidden|could not resolve|network is unreachable|connection refused|couldn.t connect to server|econnrefused|eperm|eacces|erofs").unwrap());
+        r"(?i)permission denied|operation not permitted|read-only file system|qh sandbox|403 forbidden|could not resolve|network is unreachable|connection refused|couldn.t connect to server|econnrefused|eperm|eacces|erofs|could not read username|authentication failed|terminal prompts disabled|could not read from remote repository").unwrap());
     BLOCKED.is_match(out).then_some("[qh sandbox] Commands can write only in the project, temp and package caches, can't read \
-secrets, and reach the network only through an allowlist the user approves host by host. If this failure is the sandbox \
+secrets, and reach the network only through an allowlist the user approves host by host. git push, pull and fetch \
+can't use the user's git login (SSH keys, keychain, credential helper) in here. If this failure is the sandbox \
 and the command really needs more, call bash again with the same cmd and \"unsandboxed\": true; the user is asked first. \
 On localhost a command reaches only servers this tab started with background=true (a `cmd &` server dies when its call ends): \
 start the server that way, then curl it from a later call.")
@@ -677,6 +678,14 @@ pub fn host_listed(host: &str, extra: &[String]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_push_without_the_git_login_gets_the_retry_hint() {
+        for e in ["fatal: could not read Username for 'https://github.com': Device not configured",
+                  "git@github.com: Permission denied (publickey).\nfatal: Could not read from remote repository."] {
+            assert!(super::hint(e).is_some(), "{e}");
+        }
+    }
+
     use super::*;
     use serde_json::json;
 

@@ -316,8 +316,11 @@ fn check_url(url: &str, allow: &[String]) -> Option<String> {
     }
     let host = rest.split(['/', '?', '#']).next().unwrap_or("");
     let host = host.rsplit_once('@').map_or(host, |(_, h)| h);
+    let port = if host.starts_with('[') { host.split_once("]:").map(|(_, p)| p) } else { host.split_once(':').map(|(_, p)| p) }
+        .unwrap_or(if scheme == "https" { "443" } else { "80" }).to_string();
     let host = if host.starts_with('[') { host.trim_start_matches('[').split(']').next().unwrap_or("") } else { host.split(':').next().unwrap_or("") };
-    if !allow.iter().any(|h| h == host) && private(host) {
+    // an entry is a host, or host:port for one port only (the tab's own dev server)
+    if !allow.iter().any(|h| h == host || *h == format!("{host}:{port}")) && private(host) {
         return Some(format!("error: {host} is on the local network; add it to browser_allow_hosts to allow"));
     }
     None
@@ -540,4 +543,19 @@ pub fn schemas() -> Vec<Value> {
         schema("back", "Go back one page.", &[], &[]),
         schema("screenshot", "See the page as an image.", &[], &[]),
     ]
+}
+
+#[cfg(test)]
+mod url_tests {
+    use super::check_url;
+
+    #[test]
+    fn a_port_entry_opens_that_port_only() {
+        let allow = ["localhost:3001".to_string()];
+        assert!(check_url("http://localhost:3001/", &allow).is_none());
+        assert!(check_url("http://localhost:3002/", &allow).is_some(), "another local port stays blocked");
+        assert!(check_url("http://localhost/", &allow).is_some(), "port 80 is not 3001");
+        assert!(check_url("http://localhost:3001/", &[]).is_some());
+        assert!(check_url("http://localhost:9/", &["localhost".to_string()]).is_none(), "a bare host allows every port");
+    }
 }

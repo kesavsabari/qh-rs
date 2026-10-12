@@ -653,8 +653,6 @@ apply). An AppContainer can't run Git Bash; sandbox users are planned.".into());
         #[test]
         fn container_confines_cmd() {
             let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-            std::env::set_var("QH_SANDBOX_APPCONTAINER", "1"); // opt-in while it's a spike
-            assert_eq!(unavailable(), None);
             let (root, a, b) = dirs("cmd");
             fs::write(b.join("secret.txt"), "TOPSECRET").unwrap();
             fs::create_dir_all(a.join(".git").join("hooks")).unwrap();

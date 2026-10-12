@@ -462,7 +462,8 @@ fn call(hub: &Arc<Hub>, m: &Arc<Member>, msgs: &[Value], schemas: &[Value], quie
 fn call_locked(hub: &Arc<Hub>, m: &Arc<Member>, msgs: &[Value], schemas: &[Value], quiet: bool) -> Result<Value, Error> {
     let (think, model, provider) = {
         let s = lock(&m.set);
-        (s.think, s.model.clone(), s.provider.clone())
+        let think = if !s.think { String::new() } else if s.effort.is_empty() { "on".into() } else { s.effort.clone() };
+        (think, s.model.clone(), s.provider.clone())
     };
     let Some(prov) = crate::providers::resolve(&provider) else {
         return Err(Error::Other(format!("no provider {provider}; /provider lists them")));
@@ -479,6 +480,7 @@ fn call_locked(hub: &Arc<Hub>, m: &Arc<Member>, msgs: &[Value], schemas: &[Value
             }
             first.get_or_insert_with(|| t0.elapsed().as_secs_f64());
             if !quiet {
+                m.thinking.store(thinking, Relaxed);
                 lock(&m.turn).streamed += 1;
                 if !thinking {
                     hub.emit(&m.name, Event::Token(text.to_string()));
@@ -486,7 +488,11 @@ fn call_locked(hub: &Arc<Hub>, m: &Arc<Member>, msgs: &[Value], schemas: &[Value
             }
             true
         };
-        let r = backend::chat(&prov, &model, msgs, schemas, think, ctx, &cfg.keep_alive, &mut on);
+        // with thinking on, the wait before the first answer token is the model reasoning; some
+        // providers (the ChatGPT plan) only send their reasoning summary after it's done
+        if !quiet { m.thinking.store(!think.is_empty(), Relaxed) }
+        let r = backend::chat(&prov, &model, msgs, schemas, &think, ctx, &cfg.keep_alive, &mut on);
+        m.thinking.store(false, Relaxed);
         match r {
             // a server that is loading, overloaded or briefly down: retry, but only before any
             // output, so nothing is shown twice

@@ -525,7 +525,7 @@ fn to_input(messages: &[Value]) -> (String, Vec<Value>) {
 }
 
 /// One streamed Responses call on the user's ChatGPT plan.
-pub fn chat(model: &str, messages: &[Value], tools: &[Value], think: bool,
+pub fn chat(model: &str, messages: &[Value], tools: &[Value], think: &str,
             on: &mut dyn FnMut(bool, &str) -> bool) -> Result<Reply, Error> {
     let a = auth().map_err(Error::Other)?;
     let codex = a.account.is_some();
@@ -542,8 +542,11 @@ pub fn chat(model: &str, messages: &[Value], tools: &[Value], think: bool,
         }).collect();
         body["tools"] = if codex { fns.into() } else { json!([{"type": "namespace", "name": NAMESPACE, "description": "qh agent tools", "tools": fns}]) };
     }
-    if think {
+    if !think.is_empty() {
         body["reasoning"] = json!({"summary": "auto"});
+        if matches!(think, "low" | "medium" | "high") {
+            body["reasoning"]["effort"] = json!(think);
+        }
     }
     let r = a.sign(http().post(&format!("{}/responses", a.base()))).set("Content-Type", "application/json")
         .set("Accept", "text/event-stream").send_string(&body.to_string()).map_err(|e| match e {
@@ -574,6 +577,10 @@ pub fn chat(model: &str, messages: &[Value], tools: &[Value], think: bool,
                 let d = ev["delta"].as_str().unwrap_or("");
                 content.push_str(d);
                 if !on(false, d) { return Err(Error::Cancelled) }
+            }
+            // reasoning starts long before (or without) any summary text: say so right away
+            "response.output_item.added" if ev["item"]["type"] == "reasoning" => {
+                if !on(true, "") { return Err(Error::Cancelled) }
             }
             "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
                 if !on(true, ev["delta"].as_str().unwrap_or("")) { return Err(Error::Cancelled) }

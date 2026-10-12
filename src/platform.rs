@@ -9,24 +9,33 @@ pub fn home() -> PathBuf {
     std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from).unwrap_or_default()
 }
 
-/// Config folder: ~/.config/qwen-harness, or %APPDATA%\qwen-harness on Windows.
+/// Config folder: ~/.config/qh, or %APPDATA%\qh on Windows.
 pub fn config_base() -> PathBuf {
-    if cfg!(windows) {
-        if let Some(a) = std::env::var_os("APPDATA") {
-            return PathBuf::from(a).join("qwen-harness");
-        }
-    }
-    home().join(".config/qwen-harness")
+    static P: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    P.get_or_init(|| {
+        let base = if cfg!(windows) { std::env::var_os("APPDATA").map(PathBuf::from) } else { None };
+        moved(&base.unwrap_or_else(|| home().join(".config")))
+    }).clone()
 }
 
-/// State folder: ~/.local/state/qwen-harness, or %LOCALAPPDATA%\qwen-harness on Windows.
+/// State folder: ~/.local/state/qh, or %LOCALAPPDATA%\qh on Windows.
 pub fn state_base() -> PathBuf {
-    if cfg!(windows) {
-        if let Some(a) = std::env::var_os("LOCALAPPDATA") {
-            return PathBuf::from(a).join("qwen-harness");
-        }
+    static P: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    P.get_or_init(|| {
+        let base = if cfg!(windows) { std::env::var_os("LOCALAPPDATA").map(PathBuf::from) } else { None };
+        moved(&base.unwrap_or_else(|| home().join(".local/state")))
+    }).clone()
+}
+
+/// `parent/qh`, first moving a `parent/qwen-harness` folder from before the rename over to it.
+/// While the old folder can't be moved (the move fails, or a `qh` folder is already there),
+/// it keeps being used, so no logins or sessions go missing and nothing is overwritten.
+fn moved(parent: &Path) -> PathBuf {
+    let (old, new) = (parent.join("qwen-harness"), parent.join("qh"));
+    if old.is_dir() && (new.exists() || std::fs::rename(&old, &new).is_err()) {
+        return old;
     }
-    home().join(".local/state/qwen-harness")
+    new
 }
 
 pub fn on_path(exe: &str) -> bool {
@@ -336,6 +345,27 @@ pub fn diff(label: &str, before: Option<&str>, after: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_old_qwen_harness_folder_moves_to_qh_once() {
+        let dir = std::env::temp_dir().join(format!("qh-move-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("qwen-harness")).unwrap();
+        std::fs::write(dir.join("qwen-harness/config.toml"), "model = \"a\"\n").unwrap();
+        assert_eq!(moved(&dir), dir.join("qh"));
+        assert_eq!(std::fs::read_to_string(dir.join("qh/config.toml")).unwrap(), "model = \"a\"\n");
+        assert!(!dir.join("qwen-harness").exists());
+        // a later start finds qh/
+        assert_eq!(moved(&dir), dir.join("qh"));
+        // both there (a stray qh/ from elsewhere): the old one stays in use, nothing is overwritten
+        std::fs::create_dir_all(dir.join("qwen-harness")).unwrap();
+        assert_eq!(moved(&dir), dir.join("qwen-harness"));
+        assert!(dir.join("qh/config.toml").exists());
+        // nothing to move: a fresh qh/
+        let fresh = dir.join("fresh");
+        assert_eq!(moved(&fresh), fresh.join("qh"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn stamp_shape_and_diff() {

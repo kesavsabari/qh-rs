@@ -1,7 +1,7 @@
 //! Skills: a folder with SKILL.md whose front matter has `name` and
 //! `description`. Only the one-line descriptions sit in the system prompt; the model loads a
 //! body with the `skill` tool when a task calls for it. Searched in .qh/skills (project,
-//! walking up), then ~/.config/qwen-harness/skills.
+//! walking up), then ~/.config/qh/skills.
 use std::path::{Path, PathBuf};
 
 pub struct Skill {

@@ -95,7 +95,7 @@ pub fn cli(args: &[String]) -> i32 {
     let _ = sock.set_read_timeout(Some(Duration::from_secs(1)));
     let key = secret.map(|k| format!("#{}", crate::oauth::b64url(&k))).unwrap_or_default();
     println!("qh relay on UDP port {port} ({})", if public { "public: anyone may use it" } else { "private" });
-    println!("each teammate puts this in ~/.config/qwen-harness/config.toml (use this server's public IP or name):");
+    println!("each teammate puts this in ~/.config/qh/config.toml (use this server's public IP or name):");
     println!("  relay = \"<server-ip>:{port}{key}\"");
     println!("open UDP {port} in the server's firewall; packets are sealed, the relay can't read them");
     serve(&sock, secret, None);

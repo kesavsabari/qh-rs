@@ -325,8 +325,8 @@ trusted = false   <span class="c"># true: run its tools without asking</span></c
   <h2>Config reference</h2>
   <p>The config file is <code>config.toml</code> in:</p>
   <ul>
-    <li>Windows: <code>%APPDATA%\qwen-harness\</code></li>
-    <li>Linux and macOS: <code>~/.config/qwen-harness/</code></li>
+    <li>Windows: <code>%APPDATA%\qh\</code></li>
+    <li>Linux and macOS: <code>~/.config/qh/</code></li>
   </ul>
   <p><code>qh setup</code> writes it for you; edit it for anything else.</p>
   <table>
@@ -334,7 +334,7 @@ trusted = false   <span class="c"># true: run its tools without asking</span></c
     <tr><td><code>model</code></td><td>Default model, e.g. <code>"qwen3.5:9b"</code></td></tr>
     <tr><td><code>host</code></td><td>Where Ollama runs (default <code>http://127.0.0.1:11434</code>)</td></tr>
     <tr><td><code>ctx</code></td><td>Context window for local models; leave out to size it to your GPU</td></tr>
-    <tr><td><code>cloud_ctx</code></td><td>Cap on cloud models' window (default 65536); every request resends it all</td></tr>
+    <tr><td><code>cloud_ctx</code></td><td>Cap on cloud models' window (default 0 = the model's whole window). Every request resends the conversation, so a cap saves plan usage on long sessions</td></tr>
     <tr><td><code>mode</code></td><td>Start mode: <code>ask</code>, <code>auto-edit</code>, <code>auto</code> or <code>plan</code></td></tr>
     <tr><td><code>profile</code></td><td>Tool set: <code>coding</code>, <code>general</code>, <code>browser</code> or <code>all</code></td></tr>
     <tr><td><code>allow</code></td><td>Commands that never need approval, e.g. <code>["cargo*", "npm test"]</code></td></tr>

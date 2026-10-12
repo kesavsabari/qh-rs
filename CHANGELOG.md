@@ -2,6 +2,29 @@
 
 Each version starts with a one-line summary; the website shows it once the version is no longer recent.
 
+## 0.1.8 — 2026-10-12
+
+Teammates connect from any network, cloud models get their full window, and edits show as diffs.
+
+- **Teammates connect from any network.** When two machines can't reach each other directly
+  (a phone hotspot, a strict home router), qh-link now goes through qh's own relay instead of
+  falling back to git. Everything stays end-to-end encrypted; the relay only forwards packets.
+  Set `relay` to use your own instead.
+- **Settings live in `~/.config/qh`** (`%APPDATA%\qh` on Windows), and sessions in
+  `~/.local/state/qh`. qh moves your old `qwen-harness` folders over on first start; logins,
+  sessions and settings come along.
+- **Cloud models get their whole window.** A cloud model runs on the provider's machines, so qh no
+  longer caps it at 64k: it uses the model's full context window and still compacts at 88%. qh
+  asks the provider for the window when it isn't known yet. Every request resends the
+  conversation, so long sessions use more of your plan; set `cloud_ctx` to cap it again.
+- **Edits show as diffs.** File edits appear in red and green as they happen, like Claude Code;
+  Ctrl+O folds or unfolds the latest one. Other tool calls stay folded to one line.
+- **See when it's thinking, and how hard.** The input box says `✻ thinking…` or `… working`.
+  `/think low|medium|high` sets the effort on ChatGPT, OpenAI, OpenRouter, Anthropic and gpt-oss.
+- **A cleaner screen.** The chat and input sit in bordered panes like the grid view; your
+  messages have a bar down the side and long pastes fold after 6 lines; `/compact` updates the
+  token count straight away.
+
 ## 0.1.7 — 2026-10-12
 
 The safety update: secrets and anything outside the project ask first, and commands run in a sandbox on Linux and macOS.

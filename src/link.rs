@@ -75,7 +75,7 @@ const HELLOS_PER_IP: u32 = 50;
 const STRANGER_HELLOS: u32 = 500;
 pub const RELAY_PORT: u16 = 47232;
 /// The relay used when the config says relay = "default". Empty until the project runs one.
-pub const DEFAULT_RELAY: Option<&str> = None;
+pub const DEFAULT_RELAY: Option<&str> = Some("15.235.127.134:47232");
 const RELAY_BYTES_PER_MIN: usize = 2 * 1024 * 1024;
 // A teammate who left: keep saying hello where they last were, a little more often than an
 // unanswered UDP flow is forgotten (30 s on Linux), so our side of the hole stays open for them.
@@ -1665,6 +1665,24 @@ mod tests {
         b.stop();
     }
 
+    /// Talks to the real default relay: `cargo test -- --ignored the_default_relay`.
+    #[test]
+    #[ignore]
+    fn the_default_relay_carries_a_pair() {
+        let spec = DEFAULT_RELAY.unwrap().to_string();
+        let ((a, ra), (b, rb)) = (with_relay(spec.clone()), with_relay(spec.clone()));
+        a.block(&b.me());
+        b.block(&a.me());
+        std::thread::sleep(Duration::from_millis(300));
+        meet(&a, &b);
+        let up = wait(&ra, 15, |e| matches!(e, Event::Up { peer, .. } if *peer == b.me())).expect("through the relay");
+        assert_eq!(up, Event::Up { peer: b.me(), path: format!("relay {spec}") });
+        a.send(&b.me(), b"via the default relay").unwrap();
+        assert!(wait(&rb, 10, |e| matches!(e, Event::Msg { data, .. } if data == b"via the default relay")).is_some());
+        a.stop();
+        b.stop();
+    }
+
     #[test]
     fn a_public_relay_wont_bounce_traffic_or_hand_a_pairs_place_to_an_onlooker() {
         let port = relay_server(None, 25);
@@ -1806,7 +1824,14 @@ mod tests {
         drop(b);
         drop(rb);
         // Same member key, same port, new process: a's old keys no longer open its packets.
-        let (b2, rb2) = Link::start(StaticSecret::from(key), Options { port, stun: false, upnp: false, relay: true, beacon: false, remember: None, relays: vec![] }).unwrap();
+        // its threads may hold the socket a moment longer on a busy machine
+        let mut tries = 0;
+        let (b2, rb2) = loop {
+            match Link::start(StaticSecret::from(key), Options { port, stun: false, upnp: false, relay: true, beacon: false, remember: None, relays: vec![] }) {
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && tries < 30 => { tries += 1; std::thread::sleep(Duration::from_millis(100)) }
+                r => break r.unwrap(),
+            }
+        };
         let (k, ad) = card(&a);
         b2.peer(&k, &ad, 0);
         b2.send(&a.me(), b"back").unwrap();

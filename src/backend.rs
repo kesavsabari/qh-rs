@@ -95,9 +95,15 @@ fn s<'a>(v: &'a Value, k: &str) -> &'a str {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn ollama(host: &str, key: Option<&str>, model: &str, messages: &[Value], tools: &[Value], think: bool, ctx: usize,
+pub fn ollama(host: &str, key: Option<&str>, model: &str, messages: &[Value], tools: &[Value], think: &str, ctx: usize,
               keep_alive: &str, on: &mut dyn FnMut(bool, &str) -> bool) -> Result<Reply, Error> {
-    let mut body = json!({"model": model, "messages": messages, "stream": true, "think": think,
+    // gpt-oss takes a level; the other thinking models only on/off
+    let flag = match think {
+        "" => json!(false),
+        "low" | "medium" | "high" if model.starts_with("gpt-oss") => json!(think),
+        _ => json!(true),
+    };
+    let mut body = json!({"model": model, "messages": messages, "stream": true, "think": flag,
                           "keep_alive": keep_alive, "options": {"num_ctx": ctx}});
     if !tools.is_empty() {
         body["tools"] = Value::from(tools.to_vec());
@@ -185,15 +191,22 @@ fn image_parts(text: &str, imgs: &[Value]) -> Value {
 
 /// Any OpenAI-compatible /chat/completions server: OpenRouter, OpenAI, Groq, DeepSeek,
 /// LM Studio, llama.cpp, vLLM…
-pub fn openai(base: &str, key: &str, model: &str, messages: &[Value], tools: &[Value], think: bool,
+pub fn openai(base: &str, key: &str, model: &str, messages: &[Value], tools: &[Value], think: &str,
               on: &mut dyn FnMut(bool, &str) -> bool) -> Result<Reply, Error> {
     let mut body = json!({"model": model, "messages": to_openai(messages), "stream": true,
                           "stream_options": {"include_usage": true}});
     if !tools.is_empty() {
         body["tools"] = Value::from(tools.to_vec());
     }
-    if base.contains("openrouter.ai") && !think {
-        body["reasoning"] = json!({"enabled": false});
+    let level = matches!(think, "low" | "medium" | "high");
+    if base.contains("openrouter.ai") {
+        if think.is_empty() {
+            body["reasoning"] = json!({"enabled": false});
+        } else if level {
+            body["reasoning"] = json!({"effort": think});
+        }
+    } else if level && base.contains("api.openai.com") {
+        body["reasoning_effort"] = json!(think);
     }
     let key = Some(key).filter(|k| !k.is_empty());
     let r = post(&format!("{}/chat/completions", base.trim_end_matches('/')), &body, key)?;
@@ -297,7 +310,7 @@ fn to_anthropic(messages: &[Value]) -> (String, Vec<Value>) {
 }
 
 /// Anthropic Messages API with an API key (console.anthropic.com).
-pub fn anthropic(base: &str, key: &str, model: &str, messages: &[Value], tools: &[Value], think: bool,
+pub fn anthropic(base: &str, key: &str, model: &str, messages: &[Value], tools: &[Value], think: &str,
                  on: &mut dyn FnMut(bool, &str) -> bool) -> Result<Reply, Error> {
     let (system, msgs) = to_anthropic(messages);
     let mut body = json!({"model": model, "max_tokens": 16000, "messages": msgs, "stream": true});
@@ -308,8 +321,9 @@ pub fn anthropic(base: &str, key: &str, model: &str, messages: &[Value], tools: 
         body["tools"] = tools.iter().map(|t| json!({"name": t["function"]["name"],
             "description": t["function"]["description"], "input_schema": t["function"]["parameters"]})).collect();
     }
-    if think {
-        body["thinking"] = json!({"type": "enabled", "budget_tokens": 8000});
+    if !think.is_empty() {
+        let budget = match think { "low" => 4000, "high" => 14000, _ => 8000 }; // under max_tokens
+        body["thinking"] = json!({"type": "enabled", "budget_tokens": budget});
     }
     let url = format!("{}/v1/messages", base.trim_end_matches('/'));
     let r = http().post(&url).set("Content-Type", "application/json").set("x-api-key", key)
@@ -372,7 +386,8 @@ pub fn anthropic(base: &str, key: &str, model: &str, messages: &[Value], tools: 
 
 /// One streamed chat call to whichever provider runs the model.
 #[allow(clippy::too_many_arguments)]
-pub fn chat(p: &Provider, model: &str, messages: &[Value], tools: &[Value], think: bool, ctx: usize,
+/// `think`: "" off, "on" the model's default, or an effort level "low" | "medium" | "high".
+pub fn chat(p: &Provider, model: &str, messages: &[Value], tools: &[Value], think: &str, ctx: usize,
             keep_alive: &str, on: &mut dyn FnMut(bool, &str) -> bool) -> Result<Reply, Error> {
     chat_raw(p, model, messages, tools, think, ctx, keep_alive, on).map_err(|e| explain(p, e))
 }
@@ -395,7 +410,7 @@ fn explain(p: &Provider, e: Error) -> Error {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn chat_raw(p: &Provider, model: &str, messages: &[Value], tools: &[Value], think: bool, ctx: usize,
+fn chat_raw(p: &Provider, model: &str, messages: &[Value], tools: &[Value], think: &str, ctx: usize,
             keep_alive: &str, on: &mut dyn FnMut(bool, &str) -> bool) -> Result<Reply, Error> {
     if p.kind == Kind::ChatGPT {
         return crate::chatgpt::chat(model, messages, tools, think, on);
@@ -407,7 +422,7 @@ fn chat_raw(p: &Provider, model: &str, messages: &[Value], tools: &[Value], thin
         Kind::Ollama => {
             let key = Some(p.key.as_str()).filter(|k| !k.is_empty());
             let caps = crate::tier::caps(&p.base, model);
-            let think = think && caps.thinking; // a model without thinking rejects the flag
+            let think = if caps.thinking { think } else { "" }; // a model without thinking rejects the flag
             if !tools.is_empty() && !caps.tools {
                 let wrapped = crate::textcall::wrap(messages, tools);
                 let mut r = ollama(&p.base, key, model, &wrapped, &[], think, ctx, keep_alive, on)?;

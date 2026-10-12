@@ -57,6 +57,7 @@ pub fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 
 pub struct Settings {
     pub think: bool,
+    pub effort: String, // with think on: "" = the model's default, else low | medium | high
     pub model: String,
     pub provider: String, // "" = the local Ollama in config; else a [providers.x] name
     pub profile: String,
@@ -116,13 +117,22 @@ pub struct Member {
     pub status: Mutex<&'static str>,
     pub ctl: Mutex<Ctl>,
     pub cancel: AtomicBool,
+    pub thinking: AtomicBool, // the model is streaming its reasoning right now
     chars: AtomicUsize, // size of msgs, refreshed on every change so the UI never re-measures
 }
 
 impl Member {
     /// Call after changing msgs.
     pub fn touched(&self, msgs: &[Value]) {
-        self.chars.store(crate::context::chars(msgs), Relaxed);
+        let now = crate::context::chars(msgs);
+        self.chars.store(now, Relaxed);
+        // shrunk (compact, /clear): the last request's count is stale, so re-estimate from the
+        // size now, or the status bar keeps showing the old total until the next reply
+        let mut t = lock(&self.turn);
+        if now < t.chars_at {
+            t.tokens = (now as f64 / t.ratio) as u64;
+            (t.chars_at, t.streamed) = (now, 0);
+        }
     }
 
     /// Add a message and append it to the transcript right away, so a long turn survives
@@ -327,6 +337,7 @@ session tests). Messages from other sessions start with [from <name>]. qh saves 
             cwd: Mutex::new(cwd),
             msgs: Mutex::new(msgs),
             set: Mutex::new(Settings {
+                effort: String::new(),
                 think, model: default.1, provider: default.0, tools: self.tools_for(&profile, !spawner.is_empty()), profile,
                 allow: self.cfg.allow.clone(),
             }),
@@ -334,6 +345,7 @@ session tests). Messages from other sessions start with [from <name>]. qh saves 
             status: Mutex::new("idle"),
             ctl: Mutex::new(Ctl::default()),
             cancel: AtomicBool::new(false),
+            thinking: AtomicBool::new(false),
             chars: AtomicUsize::new(0),
             named: AtomicBool::new(false),
         });
@@ -681,18 +693,27 @@ session tests). Messages from other sessions start with [from <name>]. qh saves 
     }
 
     /// (window, compact-at) for a session. A local model gets the configured window (what fits
-    /// in VRAM); a cloud model its own, capped by `cloud_ctx` since every request resends it all.
+    /// in VRAM); a cloud model its whole own window, since it runs on the provider's machines.
+    /// `cloud_ctx` (0 = no cap) still caps it for anyone saving plan usage.
     pub fn ctx_for(&self, m: &Member, fetch: bool) -> (usize, usize) {
         let (provider, model) = { let s = lock(&m.set); (s.provider.clone(), s.model.clone()) };
         if crate::providers::is_local(&provider, &model) {
             return (self.cfg.ctx, self.cfg.compact_at);
+        }
+        // with fetch, list the provider's models once so the window comes from it, not the fallback
+        // (once per provider per run: a failed list isn't cached, and this runs every turn)
+        if fetch && crate::providers::info(&provider, &model).is_none() {
+            static TRIED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+            let first = { let mut t = lock(&TRIED); !t.contains(&provider) && { t.push(provider.clone()); true } };
+            if first { if let Some(p) = crate::providers::resolve(&provider) { let _ = crate::providers::models(&p); } }
         }
         let known = crate::providers::info(&provider, &model).and_then(|i| i.ctx).or_else(|| {
             let p = crate::providers::resolve(&provider)?;
             (p.kind == crate::providers::Kind::Ollama && p.local)
                 .then(|| crate::backend::cloud_ctx(&self.cfg.host, &model, fetch)).flatten()
         });
-        let c = known.unwrap_or(32768).min(self.cfg.cloud_ctx).max(8192);
+        let cap = if self.cfg.cloud_ctx == 0 { usize::MAX } else { self.cfg.cloud_ctx };
+        let c = known.unwrap_or(32768).min(cap).max(8192);
         (c, c * 88 / 100)
     }
 

@@ -95,8 +95,8 @@ All of these are optional.
   is replaced by whatever you type after the command.
 - **Skills:** `.qh/skills/<name>/SKILL.md` holds instructions the agent loads only when a task
   needs them. Start the file with front matter containing `name:` and `description:`.
-- **Config:** `config.toml` lives in `%APPDATA%\qwen-harness\` on Windows and
-  `~/.config/qwen-harness/` elsewhere. Some examples:
+- **Config:** `config.toml` lives in `%APPDATA%\qh\` on Windows and
+  `~/.config/qh/` elsewhere. Some examples:
 
 ```toml
 mode = "auto-edit"

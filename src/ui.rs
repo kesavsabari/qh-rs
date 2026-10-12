@@ -57,7 +57,7 @@ const COMMANDS: [(&str, &str); 37] = [
     ("/model", "pick this tab's model"), ("/provider", "connect providers: sign in, keys"),
     ("/new", "new session tab"), ("/close", "close this tab"), ("/mode", "ask · auto-edit · auto · plan"),
     ("/compact", "shrink the conversation"), ("/clear", "start this tab fresh"), ("/undo", "undo the agent's file changes"),
-    ("/diff", "show the agent's file changes"), ("/cwd", "this tab's working folder"), ("/think", "toggle thinking"),
+    ("/diff", "show the agent's file changes"), ("/cwd", "this tab's working folder"), ("/think", "thinking on/off, or an effort level"),
     ("/tokens", "context use"), ("/tier", "this tab's context window"), ("/profile", "tool set: coding, general, browser, all"),
     ("/role", "give this tab a role"), ("/map", "map of sessions and messages"), ("/layout", "tabs or grid"),
     ("/msg", "message another tab"), ("/sessions", "saved sessions"), ("/allow", "auto-approve rules"), ("/sandbox", "what commands and tools may touch"),
@@ -72,6 +72,11 @@ const COMMANDS: [(&str, &str); 37] = [
 /// What each command can take, shown under it in the autocomplete. `<…>` marks something you
 /// type; picking such an entry fills the box instead of running it.
 const SUBCOMMANDS: &[(&str, &str)] = &[
+    ("/think on", "the model thinks, at its default effort"),
+    ("/think off", "no thinking: fastest"),
+    ("/think low", "think briefly"),
+    ("/think medium", "think at medium effort"),
+    ("/think high", "think hard: slower, uses more of the plan"),
     ("/provider add <name>", "save an API key (hidden while you paste)"),
     ("/provider connect <name>", "sign in, test, replace or remove"),
     ("/provider signin chatgpt", "use your ChatGPT plan: sign in in the browser"),
@@ -713,7 +718,9 @@ impl App {
                 }
                 let v = self.view(&name);
                 v.streaming = false;
-                v.push(Item::Tool { title: tool_title(&tool, &args), args: a, result: String::new(), open: false });
+                // edits show their diff straight away (Ctrl+O folds it); other tools start folded
+                let open = matches!(tool.as_str(), "edit_file" | "write_file");
+                v.push(Item::Tool { title: tool_title(&tool, &args), args: a, result: String::new(), open });
             }
             Event::ToolResult { result, .. } => {
                 // a turn's calls are listed together and their results arrive in the same order,
@@ -1086,10 +1093,20 @@ impl App {
             }
             "/think" => {
                 let mut s = lock(&m.set);
-                s.think = !s.think;
-                let t = s.think;
+                match arg {
+                    "" => s.think = !s.think,
+                    "on" => (s.think, s.effort) = (true, String::new()),
+                    "off" => s.think = false,
+                    "low" | "medium" | "high" => (s.think, s.effort) = (true, arg.to_string()),
+                    _ => { drop(s); self.err(&a, "usage: /think [on|off|low|medium|high]"); return; }
+                }
+                let msg = match (s.think, s.effort.as_str()) {
+                    (false, _) => "thinking off".to_string(),
+                    (true, "") => "thinking on (the model's default effort)".to_string(),
+                    (true, e) => format!("thinking on, {e} effort (models without levels just think)"),
+                };
                 drop(s);
-                self.note(&a, format!("think {}", if t { "on" } else { "off" }));
+                self.note(&a, msg);
             }
             "/tokens" => {
                 let (t, r) = { let t = lock(&m.turn); (t.tokens, t.ratio) };
@@ -1267,12 +1284,12 @@ impl App {
                     };
                     self.note(&a, format!("{shown}: {}k window (tier {}, {src})\nright now: {live}", ctx / 1024, crate::tier::tier(ctx)));
                 } else {
-                    // a cloud model: its own window, capped since every request resends the whole conversation
+                    // a cloud model: its own window, unless cloud_ctx caps it
                     let (ctx, _) = self.hub.ctx_for(&m, true);
                     let cap = self.hub.cfg.cloud_ctx;
                     let why = match crate::providers::info(&provider, &model).and_then(|i| i.ctx) {
-                        Some(k) if k > cap => format!("{shown} takes {}k; qh keeps {}k (cloud_ctx in config.toml), since every request resends the whole conversation", k / 1024, cap / 1024),
-                        Some(_) => format!("{shown}'s own window"),
+                        Some(k) if cap > 0 && k > cap => format!("{shown} takes {}k; qh keeps {}k (cloud_ctx in config.toml), since every request resends the whole conversation", k / 1024, cap / 1024),
+                        Some(_) => format!("{shown}'s whole window; every request resends the conversation, so long sessions use more of your plan (cap it with cloud_ctx)"),
                         None => format!("{} doesn't publish {shown}'s window, so qh assumes 32k", provider),
                     };
                     self.note(&a, format!("{shown}: {}k window (tier {}), a cloud model: no GPU needed\n{why}", ctx / 1024, crate::tier::tier(ctx)));
@@ -1673,7 +1690,7 @@ Type /team create to put it on GitHub (private) and invite friends by their GitH
             "/commands" => {
                 let list = custom_commands(&m.cwd());
                 self.note(&a, if list.is_empty() {
-                    "no custom commands: add <name>.md to .qh/commands/ (project) or ~/.config/qwen-harness/commands/; \
+                    "no custom commands: add <name>.md to .qh/commands/ (project) or ~/.config/qh/commands/; \
 $ARGUMENTS is replaced by what you type after the command".into()
                 } else {
                     list.iter().map(|(n, p)| format!("/{n}  {}", p.display())).collect::<Vec<_>>().join("\n")
@@ -1733,8 +1750,8 @@ $ARGUMENTS is replaced by what you type after the command".into()
     }
 
     fn draw(&mut self, f: &mut Frame) {
-        let [tabs, body, status, input, foot] = Layout::vertical([
-            Constraint::Length(1), Constraint::Min(1), Constraint::Length(1), Constraint::Length(1), Constraint::Length(1),
+        let [tabs, body, input_box, status, foot] = Layout::vertical([
+            Constraint::Length(1), Constraint::Min(1), Constraint::Length(3), Constraint::Length(1), Constraint::Length(1),
         ]).areas(f.area());
         self.tab_hits = self.draw_tabs(f, tabs);
         self.body = body;
@@ -1766,26 +1783,26 @@ $ARGUMENTS is replaced by what you type after the command".into()
                 let in_row = if rows == 2 { if i / 2 == 0 { 2 } else { shown.len() - 2 } } else { shown.len() };
                 let cells = Layout::horizontal(vec![Constraint::Fill(1); in_row]).split(r);
                 let cell = cells[if rows == 2 { i % 2 } else { i }];
-                let m = self.hub.get(name);
-                let title = m.map(|m| {
-                    let role = lock(&m.purpose).clone();
-                    let role = if role.is_empty() { String::new() } else { format!(" · {role}") };
-                    let model = { let s = lock(&m.set); crate::providers::display(&s.provider, &s.model) };
-                    format!(" {}{}{role} · {} · {model} ", name, icon(m.status()), m.status())
-                }).unwrap_or_default();
-                let color = if *name == self.active { ACCENT } else { DIM };
-                let block = Block::bordered().title(title).border_style(Style::new().fg(color));
-                let inner = block.inner(cell);
-                f.render_widget(block, cell);
-                self.draw_chat(f, name, inner);
+                self.draw_pane(f, name, cell);
             }
         } else {
             let a = self.active.clone();
-            self.draw_chat(f, &a, panes);
+            self.draw_pane(f, &a, panes);
         }
         f.render_widget(Paragraph::new(self.status_line()).style(Style::new().fg(DIM)), status);
         let prompt = "› ";
         let pc = if self.in_team_space() { TEAM } else { ACCENT };
+        // what the active session is doing, on the input box where the eye already is
+        let doing = self.hub.get(&self.active).and_then(|m| match m.status() {
+            "working" if m.thinking.load(std::sync::atomic::Ordering::Relaxed) => Some(" ✻ thinking… "),
+            "working" | "waiting-model" => Some(" … working "),
+            _ => None,
+        });
+        let mut input_block = Block::bordered().border_style(Style::new().fg(DIM));
+        if let Some(d) = doing {
+            input_block = input_block.title(Span::styled(d, Style::new().fg(ACCENT)));
+        }
+        let input = input_block.inner(input_box);
         // an API key being typed is never drawn
         let text: String = if self.secret.is_some() { "•".repeat(self.input.len()) } else { self.input.iter().collect() };
         let before: usize = self.input[..self.cur].iter().map(|c| c.width().unwrap_or(0)).sum();
@@ -1807,6 +1824,7 @@ $ARGUMENTS is replaced by what you type after the command".into()
             Line::from(vec![Span::styled(prompt, Style::new().fg(pc)), Span::raw(shown_text)])
         };
         f.render_widget(Paragraph::new(line), input);
+        f.render_widget(input_block, input_box);
         f.set_cursor_position((input.x + 2 + cx as u16, input.y));
         // macOS writes the control key as ⌃, the way its own menus show it
         let c = if cfg!(target_os = "macos") { "⌃" } else { "^" };
@@ -2175,7 +2193,11 @@ then it's `git push -u origin {branch}` and `gh pr create --fill`.");
     fn status_line(&self) -> String {
         let Some(m) = self.hub.get(&self.active) else { return String::new() };
         let s = lock(&m.set);
-        let (model, profile, think) = (crate::providers::display(&s.provider, &s.model), s.profile.clone(), s.think);
+        let (profile, think) = (s.profile.clone(), match (s.think, s.effort.as_str()) {
+            (false, _) => String::new(),
+            (true, "") => " · think".to_string(),
+            (true, e) => format!(" · think:{e}"),
+        });
         drop(s);
         let live = m.live_tokens();
         let ctx = self.hub.ctx_for(&m, false).0 as u64;
@@ -2184,8 +2206,6 @@ then it's `git push -u origin {branch}` and `gh pr create --fill`.");
         let busy = self.hub.names().iter().filter(|n| **n != self.active)
             .filter(|n| self.hub.get(n).is_some_and(|m| m.status() != "idle")).count();
         let holder = lock(&self.hub.holder).clone();
-        let role = lock(&m.purpose).clone();
-        let role = if role.is_empty() { String::new() } else { format!(" ({role})") };
         let mode = self.hub.mode_name();
         let cwd = m.cwd();
         let home = crate::config::home();
@@ -2195,8 +2215,8 @@ then it's `git push -u origin {branch}` and `gh pr create --fill`.");
             format!("…/{}/{}", parts.get(1).unwrap_or(&""), parts[0])
         } else { dir };
         let profile = if profile == self.hub.cfg.profile { String::new() } else { format!(" · {profile}") };
-        let think = if think { " · think" } else { "" };
-        let mut out = format!("▸ {}{role} · {dir} · [{mode}] · {model}{profile}{think} · [{}{}] {live}/{ctx}", self.active,
+        // name, role and model are in the pane's title
+        let mut out = format!(" {dir} · [{mode}]{profile}{think} · [{}{}] {live}/{ctx}",
                               "█".repeat(bar), "░".repeat(20 - bar));
         let cost = lock(&m.turn).cost;
         if cost > 0.0 { out += &if cost < 0.01 { format!(" · ${cost:.4}") } else { format!(" · ${cost:.2}") } }
@@ -2210,6 +2230,23 @@ then it's `git push -u origin {branch}` and `gh pr create --fill`.");
     }
 
     /// Wrap only as many items as fit, walking up from the newest.
+    /// A session's chat in a bordered pane titled with its name, role, status and model;
+    /// the active one's border is the accent colour.
+    fn draw_pane(&mut self, f: &mut Frame, name: &str, area: Rect) {
+        let title = self.hub.get(name).map(|m| {
+            let role = lock(&m.purpose).clone();
+            let role = if role.is_empty() { String::new() } else { format!(" · {role}") };
+            let model = { let s = lock(&m.set); crate::providers::display(&s.provider, &s.model) };
+            let status = if m.status() == "working" && m.thinking.load(std::sync::atomic::Ordering::Relaxed) { "thinking" } else { m.status() };
+            format!(" {}{}{role} · {status} · {model} ", name, icon(m.status()))
+        }).unwrap_or_default();
+        let color = if name == self.active { ACCENT } else { DIM };
+        let block = Block::bordered().title(title).border_style(Style::new().fg(color));
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+        self.draw_chat(f, name, inner);
+    }
+
     fn draw_chat(&mut self, f: &mut Frame, name: &str, area: Rect) {
         // long lines are hard to read on a wide screen
         let width = area.width.saturating_sub(2).clamp(10, MAX_LINE) as usize;
@@ -2239,6 +2276,8 @@ then it's `git push -u origin {branch}` and `gh pr create --fill`.");
     }
 }
 
+const USER_ROWS: usize = 6; // a longer message of yours shows this many rows, then "… N more"
+
 /// Rows for an item; a long reply is wrapped from its end and stops after `need` rows.
 fn item_lines(it: &Item, w: usize, need: usize) -> Vec<Line<'static>> {
     let styled = |text: &str, st: Style, indent: usize| -> Vec<Line<'static>> {
@@ -2246,9 +2285,17 @@ fn item_lines(it: &Item, w: usize, need: usize) -> Vec<Line<'static>> {
             .map(|l| Line::from(Span::styled(" ".repeat(indent) + &l, st))).collect()
     };
     match it {
+        // your turn: a bar down the left, plain text, a long paste folded to its first rows
         Item::User(s) => {
+            let rows = wrap(s, w.saturating_sub(2));
+            let shown = if rows.len() > USER_ROWS + 2 { USER_ROWS } else { rows.len() };
+            let bar = || Span::styled("▌ ", Style::new().fg(ACCENT));
             let mut v = vec![Line::raw("")];
-            v.extend(styled(&format!("› {s}"), Style::new().fg(ACCENT).add_modifier(Modifier::BOLD), 0));
+            v.extend(rows[..shown].iter().map(|l| Line::from(vec![bar(), Span::styled(l.clone(), Style::new().add_modifier(Modifier::BOLD))])));
+            if shown < rows.len() {
+                v.push(Line::from(vec![bar(), Span::styled(format!("… {} more lines", rows.len() - shown), Style::new().fg(DIM))]));
+            }
+            v.push(Line::raw(""));
             v
         }
         Item::Reply(s) => {
@@ -2284,15 +2331,50 @@ fn item_lines(it: &Item, w: usize, need: usize) -> Vec<Line<'static>> {
         Item::Cmd(s) => styled(&format!("› {s}"), Style::new().fg(ACCENT), 0),
         Item::Err(s) => styled(s, Style::new().fg(Color::Red), 0),
         Item::Tool { title, args, result, open } => {
-            let mut v = styled(&format!("{} {title}", if *open { "▾" } else { "▸" }), Style::new().fg(DIM), 0);
+            let n = result.lines().count();
+            let size = if *open || n < 2 { String::new() } else { format!(" · {n} lines") };
+            let mut v = styled(&format!("{} {title}{size}", if *open { "▾" } else { "▸" }), Style::new().fg(DIM), 0);
             if *open {
-                v.extend(styled(args, Style::new().fg(Color::Magenta), 2));
-                let body: Vec<&str> = result.lines().take(40).collect();
-                v.extend(styled(&body.join("\n"), Style::new(), 2));
+                let a: Value = serde_json::from_str(args).unwrap_or_default();
+                if let (Some(old), Some(new)) = (a["old"].as_str(), a["new"].as_str()) {
+                    v.extend(diff_lines(old, new, w));
+                } else if let (Some(_), Some(c)) = (a["path"].as_str(), a["content"].as_str()) {
+                    v.extend(diff_lines("", c, w));
+                } else {
+                    v.extend(styled(args, Style::new().fg(Color::Magenta), 2));
+                    let body: Vec<&str> = result.lines().take(40).collect();
+                    v.extend(styled(&body.join("\n"), Style::new(), 2));
+                }
             }
             v
         }
     }
+}
+
+const DIFF_ROWS: usize = 40; // an edit longer than this shows its start, then "… N more"
+
+/// An edit as Claude Code shows it: unchanged lines around it dim, removed red, added green.
+/// A plain line diff: the common start and end are context, the middle is what changed.
+fn diff_lines(old: &str, new: &str, w: usize) -> Vec<Line<'static>> {
+    let (o, n): (Vec<&str>, Vec<&str>) = (old.lines().collect(), new.lines().collect());
+    let pre = o.iter().zip(&n).take_while(|(a, b)| a == b).count();
+    let suf = o[pre..].iter().rev().zip(n[pre..].iter().rev()).take_while(|(a, b)| a == b).count();
+    let row = |mark: &str, l: &str, st: Style| {
+        let text: String = format!("  {mark} {l}").chars().take(w.max(4)).collect();
+        Line::from(Span::styled(text, st))
+    };
+    let (dim, red, green) = (Style::new().fg(DIM), Style::new().fg(Color::Red), Style::new().fg(Color::Green));
+    let mut v: Vec<Line<'static>> = vec![];
+    v.extend(o[pre.saturating_sub(2)..pre].iter().map(|l| row(" ", l, dim)));
+    v.extend(o[pre..o.len() - suf].iter().map(|l| row("-", l, red)));
+    v.extend(n[pre..n.len() - suf].iter().map(|l| row("+", l, green)));
+    v.extend(o[o.len() - suf..].iter().take(2).map(|l| row(" ", l, dim)));
+    if v.len() > DIFF_ROWS {
+        let more = v.len() - DIFF_ROWS;
+        v.truncate(DIFF_ROWS);
+        v.push(row(" ", &format!("… {more} more lines"), dim));
+    }
+    v
 }
 
 /// The start of the word before `cur`, for Alt+b (Option+← in macOS Terminal).
@@ -2432,4 +2514,27 @@ fn draw_confirm(f: &mut Frame, c: &Confirm, queued: usize) {
 
 pub fn channel_pair() -> (Sender<Ui>, Receiver<Ui>) {
     channel()
+}
+
+#[cfg(test)]
+mod diff_tests {
+    use super::diff_lines;
+
+    fn text(old: &str, new: &str) -> Vec<String> {
+        diff_lines(old, new, 80).iter().map(|l| l.to_string()).collect()
+    }
+
+    #[test]
+    fn only_the_changed_middle_is_marked() {
+        assert_eq!(text("a\nb\nc\nd", "a\nb\nX\nd"), ["    a", "    b", "  - c", "  + X", "    d"]);
+    }
+
+    #[test]
+    fn a_new_file_is_all_added_and_long_ones_are_cut() {
+        let big: String = (0..100).map(|i| format!("{i}\n")).collect();
+        let v = text("", &big);
+        assert!(v[0].starts_with("  + 0"));
+        assert_eq!(v.len(), super::DIFF_ROWS + 1);
+        assert!(v.last().unwrap().contains("60 more lines"));
+    }
 }

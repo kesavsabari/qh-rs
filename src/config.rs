@@ -136,7 +136,7 @@ pub fn load_defaults() -> Config {
         model: "qwen3.5:9b".into(),
         ctx: 32768,
         compact_at: 11000,
-        cloud_ctx: 65536,
+        cloud_ctx: 0, // no cap: a cloud model uses its whole window
         profile: "coding".into(),
         keep_alive: "30m".into(),
         fallback_model: String::new(),

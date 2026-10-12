@@ -526,7 +526,7 @@ fn html_text(html: &str) -> String {
 }
 
 fn web_fetch(a: &Value) -> Result<String, String> {
-    let r = http().get(sa(a, "url")).set("User-Agent", "qwen-harness").timeout(std::time::Duration::from_secs(20)).call();
+    let r = http().get(sa(a, "url")).set("User-Agent", "qh").timeout(std::time::Duration::from_secs(20)).call();
     let r = match r {
         Ok(r) => r,
         Err(ureq::Error::Status(_, r)) => r,

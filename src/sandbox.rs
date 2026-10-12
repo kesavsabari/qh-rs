@@ -189,7 +189,7 @@ fn hard_linked(_: &Path) -> bool {
 static CMD_SECRET: LazyLock<Regex> = LazyLock::new(|| Regex::new(
     r#"(?i)(^|[\s'"=/~:@<])(\.ssh|\.aws|\.gnupg|\.kube|\.netrc|\.git-credentials|\.pypirc|\.password-store|credentials\.toml|chatgpt\.json|team-identity\.key|id_(rsa|dsa|ecdsa|ed25519)\b|\.env\b(\.[\w-]+)?)"#).unwrap());
 static CMD_PROTECT: LazyLock<Regex> = LazyLock::new(|| Regex::new(
-    r#"(?i)(\.git/hooks|\.git/config|\bgit\s+config\b|core\.hookspath|\.(bash|zsh)rc\b|\.bash_profile|\.zprofile|\.zshenv|(^|[\s'"/~])\.profile\b|\.config/(autostart|systemd|fish|qwen-harness)|\.envrc\b|crontab|systemctl\s+--user)"#).unwrap());
+    r#"(?i)(\.git/hooks|\.git/config|\bgit\s+config\b|core\.hookspath|\.(bash|zsh)rc\b|\.bash_profile|\.zprofile|\.zshenv|(^|[\s'"/~])\.profile\b|\.config/(autostart|systemd|fish|qh|qwen-harness)|\.envrc\b|crontab|systemctl\s+--user)"#).unwrap());
 
 fn cmd_check(cmd: &str) -> Option<String> {
     if let Some(m) = CMD_SECRET.find_iter(cmd).find(|m| !NOT_SECRET.is_match(m.as_str().trim_start_matches(|c: char| !c.is_alphanumeric() && c != '.'))) {

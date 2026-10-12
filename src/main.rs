@@ -385,22 +385,46 @@ fn tool_once(args: &[String]) -> i32 {
         }
         return 0;
     }
-    let (Some(name), Some(a)) = (args.first(), args.get(1).and_then(|a| serde_json::from_str::<serde_json::Value>(a).ok())) else {
-        eprintln!("usage: qh __tool <name> '<json args>'");
-        return 2;
+    // `qh __tool --seq '[[tab, name, args], …]'`: several calls in one qh, in order, each for its tab
+    // (background tasks and the sandbox network are per tab); outputs separated by SEQ_MARK
+    let calls: Vec<(String, String, serde_json::Value)> = if args.first().map(String::as_str) == Some("--seq") {
+        match args.get(1).and_then(|a| serde_json::from_str(a).ok()) {
+            Some(v) => v,
+            None => { eprintln!("usage: qh __tool --seq '[[tab, name, args], …]'"); return 2 }
+        }
+    } else {
+        let (Some(name), Some(a)) = (args.first(), args.get(1).and_then(|a| serde_json::from_str::<serde_json::Value>(a).ok())) else {
+            eprintln!("usage: qh __tool <name> '<json args>'");
+            return 2;
+        };
+        vec![(String::new(), name.clone(), a)]
     };
     let mut cwd = std::env::current_dir().unwrap_or_default();
-    if let Some(why) = sandbox::guard(name, &a, &cwd, &cwd, &cfg) {
-        println!("refused: it {why}");
-        return 3;
-    }
     let hosts = cfg.sandbox_hosts.clone();
-    let proxy = proxy::start(std::sync::Arc::new(move |h: &str, _| sandbox::host_listed(h, &hosts))).ok();
-    #[cfg(unix)]
-    let proxy = proxy.map(|p| (p.port, p.sock));
-    #[cfg(not(unix))]
-    let proxy = proxy.map(|p| (p.port, None));
-    let sb = sandbox::Ctx { root: cwd.clone(), proxy: if cfg!(windows) { None } else { proxy }, tab: String::new() };
-    println!("{}", tools::call(name, &a, &cfg, &mut cwd, &tier::Limits::for_ctx(32768), &sb));
-    0
+    let mut proxy = None;
+    let mut code = 0;
+    for (i, (tab, name, a)) in calls.iter().enumerate() {
+        if i > 0 {
+            println!("--qh-seq--");
+        }
+        if let Some(why) = sandbox::guard(name, a, &cwd, &cwd, &cfg) {
+            println!("refused: it {why}");
+            code = 3;
+            continue;
+        }
+        if proxy.is_none() {
+            let hosts = hosts.clone();
+            let p = proxy::start(std::sync::Arc::new(move |h: &str, _| sandbox::host_listed(h, &hosts))).ok();
+            #[cfg(unix)]
+            let p = p.map(|p| (p.port, p.sock));
+            #[cfg(not(unix))]
+            let p = p.map(|p| (p.port, None));
+            proxy = Some(p);
+        }
+        let px = proxy.clone().flatten();
+        let sb = sandbox::Ctx { root: cwd.clone(), proxy: if cfg!(windows) { None } else { px }, tab: tab.clone() };
+        println!("{}", tools::call(name, a, &cfg, &mut cwd, &tier::Limits::for_ctx(32768), &sb));
+    }
+    bg::kill_all();
+    code
 }

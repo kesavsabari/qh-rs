@@ -19,6 +19,9 @@ pub struct Policy {
     /// paths inside `write` that stay read-only: .git/hooks, .git/config, .qh, shell rc files, qh's own config
     pub protect: Vec<PathBuf>,
     pub net: Net,
+    /// localhost ports commands may connect to beyond the proxy's: servers the same tab's own
+    /// background tasks listen on (macOS; on Linux a tab's commands share a network namespace instead)
+    pub local_ports: Vec<u16>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -286,7 +289,7 @@ pub fn policy(root: &Path, cfg: &Config, net: Net) -> Policy {
         .chain([crate::config::state_dir().join("browser")]).filter(|p| p.exists()).map(|p| canon(&p)).collect();
     deny_read.dedup();
     let protect = protect_candidates(root).into_iter().filter(|p| p.exists()).collect();
-    Policy { write, deny_read, protect, net }
+    Policy { write, deny_read, protect, net, local_ports: vec![] }
 }
 
 /// git settings that run a program: one appearing in .git/config during a command is taken out again.
@@ -429,6 +432,31 @@ fn proxy_env(port: u16) -> Vec<(String, String)> {
     v
 }
 
+/// The policy for one command of a tab. On macOS it also opens the localhost ports the tab's own
+/// background tasks listen on, looked up now (a server may have taken a while to start).
+fn tab_policy(ctx: &Ctx, cfg: &Config) -> Policy {
+    #[allow(unused_mut)]
+    let mut p = policy(&ctx.root, cfg, net(ctx, cfg));
+    #[cfg(target_os = "macos")]
+    if matches!(p.net, Net::Proxy { .. }) {
+        p.local_ports = crate::sandbox_macos::tab_ports(&crate::bg::pids(&ctx.tab));
+    }
+    p
+}
+
+/// The tab closed: its commands' shared network namespace (Linux) goes too.
+pub fn close_tab(tab: &str) {
+    #[cfg(target_os = "linux")]
+    crate::sandbox_linux::close_tab(tab);
+    let _ = tab;
+}
+
+/// qh is exiting.
+pub fn close_all() {
+    #[cfg(target_os = "linux")]
+    crate::sandbox_linux::close_all();
+}
+
 /// Run `script` in the platform shell, sandboxed unless `outside` or the sandbox is off, with
 /// secrets scrubbed from the environment. Like platform::run_timeout, plus how it ran.
 pub fn run(ctx: &Ctx, cfg: &Config, script: &str, outside: bool, secs: u64, cwd: &Path)
@@ -450,7 +478,7 @@ pub fn run(ctx: &Ctx, cfg: &Config, script: &str, outside: bool, secs: u64, cwd:
     if unavailable().is_some() {
         return plain(Ran::Unavailable);
     }
-    let p = policy(&ctx.root, cfg, net(ctx, cfg));
+    let p = tab_policy(ctx, cfg);
     let mut env: Vec<(String, String)> = vec![];
     if let Net::Proxy { port } = p.net {
         env = proxy_env(port);
@@ -499,7 +527,7 @@ pub fn spawn(ctx: &Ctx, cfg: &Config, script: &str, outside: bool, cwd: &Path)
     if unavailable().is_some() {
         return plain(Ran::Unavailable);
     }
-    let p = policy(&ctx.root, cfg, net(ctx, cfg));
+    let p = tab_policy(ctx, cfg);
     let mut env: Vec<(String, String)> = vec![];
     if let Net::Proxy { port } = p.net {
         env = proxy_env(port);
@@ -523,7 +551,8 @@ fn command_os(p: &Policy, ctx: &Ctx, cfg: &Config, prog: &Path, args: &[&str], e
     #[cfg(target_os = "linux")]
     let mut c = {
         let sock = ctx.proxy.as_ref().and_then(|(_, s)| s.clone());
-        crate::sandbox_linux::command(p, sock.as_deref(), prog, args)
+        let join = crate::sandbox_linux::tab_netns(&ctx.tab, &p.net, sock.as_deref());
+        crate::sandbox_linux::command(p, sock.as_deref(), join, prog, args)
             .ok_or_else(|| std::io::Error::other("the sandbox helper can't run"))?
     };
     #[cfg(target_os = "macos")]
@@ -550,7 +579,8 @@ fn run_os(p: &Policy, ctx: &Ctx, cfg: &Config, prog: &Path, args: &[&str], env: 
     #[cfg(target_os = "linux")]
     {
         let sock = ctx.proxy.as_ref().and_then(|(_, s)| s.clone());
-        let Some(mut c) = crate::sandbox_linux::command(p, sock.as_deref(), prog, args) else {
+        let join = crate::sandbox_linux::tab_netns(&ctx.tab, &p.net, sock.as_deref());
+        let Some(mut c) = crate::sandbox_linux::command(p, sock.as_deref(), join, prog, args) else {
             return Err(std::io::Error::other("the sandbox helper can't run"));
         };
         c.envs(env.iter().map(|(k, v)| (k, v)));
@@ -590,10 +620,12 @@ fn run_os(p: &Policy, ctx: &Ctx, cfg: &Config, prog: &Path, args: &[&str], env: 
 /// Appended to a failed sandboxed command's output when the failure looks like the sandbox's doing.
 pub fn hint(out: &str) -> Option<&'static str> {
     static BLOCKED: LazyLock<Regex> = LazyLock::new(|| Regex::new(
-        r"(?i)permission denied|operation not permitted|read-only file system|qh sandbox|403 forbidden|could not resolve|network is unreachable|connection refused|eperm|eacces|erofs").unwrap());
+        r"(?i)permission denied|operation not permitted|read-only file system|qh sandbox|403 forbidden|could not resolve|network is unreachable|connection refused|couldn.t connect to server|econnrefused|eperm|eacces|erofs").unwrap());
     BLOCKED.is_match(out).then_some("[qh sandbox] Commands can write only in the project, temp and package caches, can't read \
 secrets, and reach the network only through an allowlist the user approves host by host. If this failure is the sandbox \
-and the command really needs more, call bash again with the same cmd and \"unsandboxed\": true; the user is asked first.")
+and the command really needs more, call bash again with the same cmd and \"unsandboxed\": true; the user is asked first. \
+On localhost a command reaches only servers this tab started with background=true (a `cmd &` server dies when its call ends): \
+start the server that way, then curl it from a later call.")
 }
 
 /// For /sandbox: the policy in force for a session.

@@ -6,6 +6,11 @@
 //!    a seccomp filter: no new Unix sockets, which reach daemons that run things unsandboxed
 //!    (systemd, tmux, docker); no io_uring, which would bypass the filter.
 //!
+//! A tab's commands share one network namespace, held open by a small `qh __sandbox --holder`
+//! process: a server one command starts (in the background) is reachable from the tab's later
+//! commands, while other tabs and the host's own localhost services stay out of reach. The holder
+//! runs the proxy bridge; commands join its user and network namespaces with setns.
+//!
 //! Without namespaces the network is held to the proxy's port by Landlock (kernel 6.7+) and UDP is
 //! refused, and qh puts protected paths back after the command (sandbox::Snapshot).
 use crate::sandbox::{Net, Policy};
@@ -89,8 +94,75 @@ pub fn helper() -> Option<PathBuf> {
     (!cfg!(test)).then(|| PathBuf::from("/proc/self/exe"))
 }
 
-/// `qh __sandbox <policy> -- program args…`, or None when the helper can't run here.
-pub fn command(p: &Policy, sock: Option<&Path>, program: &Path, args: &[&str]) -> Option<Command> {
+/// A tab's network-namespace holder: lives until the tab closes, or qh exits (its stdin closes).
+struct Holder {
+    /// the network it was made for: the proxy's port and socket, or "off"
+    key: String,
+    child: std::process::Child,
+}
+
+impl Drop for Holder {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+static HOLDERS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, Holder>>> = std::sync::LazyLock::new(Default::default);
+
+fn holders() -> std::sync::MutexGuard<'static, std::collections::HashMap<String, Holder>> {
+    HOLDERS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The pid of the process holding `tab`'s network namespace, started on first use. None (each
+/// command gets a namespace of its own, as before) without unprivileged namespaces, with an open
+/// network (no namespace at all), or if the holder can't start.
+pub fn tab_netns(tab: &str, net: &Net, sock: Option<&Path>) -> Option<u32> {
+    if *net == Net::Open || !caps().userns || std::env::var("QH_SANDBOX_NO_NS").as_deref() == Ok("1") {
+        return None;
+    }
+    let (key, spec) = match net {
+        Net::Proxy { port } => (format!("{port} {}", sock.map(|s| s.display().to_string()).unwrap_or_default()),
+                                json!({"port": port, "sock": sock.map(|s| s.display().to_string())})),
+        _ => ("off".to_string(), json!({})),
+    };
+    let mut hs = holders();
+    if let Some(h) = hs.get_mut(tab) {
+        if h.key == key && matches!(h.child.try_wait(), Ok(None)) {
+            return Some(h.child.id());
+        }
+    }
+    hs.remove(tab); // the network changed, or the holder died: a new one
+    let mut c = Command::new(helper()?);
+    c.args(["__sandbox", "--holder", &spec.to_string()]).current_dir("/")
+        .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null())
+        .process_group(0); // not killed with a command's process group
+    let mut child = c.spawn().ok()?;
+    let mut line = String::new();
+    let ready = child.stdout.take().map(|o| std::io::BufRead::read_line(&mut std::io::BufReader::new(o), &mut line).is_ok()).unwrap_or(false);
+    let h = Holder { key, child };
+    if !ready || line.trim() != "ready" {
+        return None; // dropped: killed
+    }
+    let pid = h.child.id();
+    hs.insert(tab.to_string(), h);
+    Some(pid)
+}
+
+/// The tab closed: its namespace goes (its background tasks were already stopped).
+pub fn close_tab(tab: &str) {
+    let h = holders().remove(tab);
+    drop(h);
+}
+
+pub fn close_all() {
+    let all = std::mem::take(&mut *holders());
+    drop(all);
+}
+
+/// `qh __sandbox <policy> -- program args…`, or None when the helper can't run here. With `join`
+/// (a holder's pid) the command enters that tab's network namespace instead of making its own.
+pub fn command(p: &Policy, sock: Option<&Path>, join: Option<u32>, program: &Path, args: &[&str]) -> Option<Command> {
     let h = helper()?;
     let net = match &p.net {
         Net::Off => json!("off"),
@@ -101,7 +173,7 @@ pub fn command(p: &Policy, sock: Option<&Path>, program: &Path, args: &[&str]) -
     // namespaces only where the probe saw them work end to end: on Ubuntu 24.04 AppArmor lets the
     // unshare itself through and then refuses what follows, leaving the helper unable to run anything
     let spec = json!({"write": paths(&p.write), "deny_read": paths(&p.deny_read), "protect": paths(&p.protect), "net": net,
-                      "ns": caps().userns});
+                      "ns": caps().userns, "join": join});
     let mut c = Command::new(h);
     c.arg("__sandbox").arg(spec.to_string()).arg("--").arg(program).args(args);
     Some(c)
@@ -141,6 +213,24 @@ fn unshare(net: bool) -> std::io::Result<()> {
     }
     if net {
         lo_up()?;
+    }
+    Ok(())
+}
+
+/// Enter the user and network namespaces of the holder `pid`, then a mount namespace of our own.
+/// setns into a user namespace needs a single-threaded caller: the helper is, at this point.
+fn enter(pid: u32) -> std::io::Result<()> {
+    for (ns, flag) in [("user", libc::CLONE_NEWUSER), ("net", libc::CLONE_NEWNET)] {
+        let f = std::fs::File::open(format!("/proc/{pid}/ns/{ns}"))?;
+        if unsafe { libc::setns(f.as_raw_fd(), flag) } != 0 {
+            return Err(errno());
+        }
+    }
+    if unsafe { libc::unshare(libc::CLONE_NEWNS) } != 0 {
+        return Err(errno());
+    }
+    if unsafe { libc::mount(std::ptr::null(), c"/".as_ptr(), std::ptr::null(), libc::MS_REC | libc::MS_PRIVATE, std::ptr::null()) } != 0 {
+        return Err(errno());
     }
     Ok(())
 }
@@ -302,7 +392,7 @@ fn seccomp_filter(udp: bool) -> Vec<libc::sock_filter> {
 }
 
 /// What the helper was asked to do, parsed from its argument.
-fn parse(spec: &str) -> Option<(Policy, Option<PathBuf>, bool)> {
+fn parse(spec: &str) -> Option<(Policy, Option<PathBuf>, bool, Option<u32>)> {
     let v: Value = serde_json::from_str(spec).ok()?;
     let paths = |k: &str| v[k].as_array().into_iter().flatten().filter_map(|x| x.as_str().map(PathBuf::from)).collect::<Vec<_>>();
     let (net, sock) = match &v["net"] {
@@ -310,7 +400,8 @@ fn parse(spec: &str) -> Option<(Policy, Option<PathBuf>, bool)> {
         Value::Object(o) => (Net::Proxy { port: o.get("port")?.as_u64()? as u16 }, o.get("sock").and_then(|s| s.as_str()).map(PathBuf::from)),
         _ => (Net::Off, None),
     };
-    Some((Policy { write: paths("write"), deny_read: paths("deny_read"), protect: paths("protect"), net }, sock, v["ns"] == true))
+    let join = v["join"].as_u64().and_then(|p| u32::try_from(p).ok());
+    Some((Policy { write: paths("write"), deny_read: paths("deny_read"), protect: paths("protect"), net, local_ports: vec![] }, sock, v["ns"] == true, join))
 }
 
 /// `qh __sandbox --probe` or `qh __sandbox <policy> -- program args…`. Fails closed: if the
@@ -323,8 +414,11 @@ pub fn helper_main(args: &[String]) -> i32 {
         println!("abi={abi} userns={}", ns as i32);
         return 0;
     }
+    if args.first().map(String::as_str) == Some("--holder") {
+        return holder_main(args.get(1).map(String::as_str).unwrap_or("{}"));
+    }
     let (Some(spec), Some(dash)) = (args.first(), args.iter().position(|a| a == "--")) else { return fail("usage".into()) };
-    let Some((p, sock, try_ns)) = parse(spec) else { return fail("bad policy".into()) };
+    let Some((p, sock, try_ns, join)) = parse(spec) else { return fail("bad policy".into()) };
     let Some(prog) = args.get(dash + 1) else { return fail("no command".into()) };
     let abi = landlock_abi();
     if abi < 1 {
@@ -333,7 +427,11 @@ pub fn helper_main(args: &[String]) -> i32 {
     // QH_SANDBOX_NO_NS=1: behave as on a system without unprivileged namespaces (tests, CI)
     let ns = try_ns && std::env::var("QH_SANDBOX_NO_NS").as_deref() != Ok("1");
     if ns {
-        if let Err(e) = unshare(p.net != Net::Open) {
+        let made = match join {
+            Some(pid) if p.net != Net::Open => enter(pid),
+            _ => unshare(p.net != Net::Open),
+        };
+        if let Err(e) = made {
             return fail(format!("namespaces: {e}")); // half set up: don't run anything
         }
     }
@@ -343,7 +441,8 @@ pub fn helper_main(args: &[String]) -> i32 {
                 return fail(format!("can't protect {}: {e}", x.display()));
             }
         }
-        if let (Net::Proxy { port }, Some(sock)) = (&p.net, sock) {
+        // a joined namespace already has the holder's bridge
+        if let (Net::Proxy { port }, Some(sock), None) = (&p.net, sock, join) {
             if let Err(e) = bridge(*port, sock) {
                 return fail(format!("network bridge: {e}"));
             }
@@ -390,12 +489,35 @@ pub fn helper_main(args: &[String]) -> i32 {
     }
 }
 
+/// `qh __sandbox --holder <{port, sock}>`: make a tab's namespaces (loopback up, the proxy bridge
+/// when there's a proxy), say "ready", and keep them until stdin closes (qh exited) or it's killed.
+/// It runs no command: only qh's own bridge code lives here.
+fn holder_main(spec: &str) -> i32 {
+    let v: Value = serde_json::from_str(spec).unwrap_or_default();
+    if let Err(e) = unshare(true) {
+        eprintln!("qh sandbox holder: {e}");
+        return 126;
+    }
+    if let (Some(port), Some(sock)) = (v["port"].as_u64(), v["sock"].as_str()) {
+        if let Err(e) = bridge(port as u16, sock.into()) {
+            eprintln!("qh sandbox holder: network bridge: {e}");
+            return 126;
+        }
+    }
+    println!("ready");
+    let _ = std::io::stdout().flush();
+    let mut buf = [0u8; 64];
+    while matches!(std::io::Read::read(&mut std::io::stdin(), &mut buf), Ok(n) if n > 0) {}
+    0
+}
+
 /// For /sandbox: what's enforced on this machine.
 pub fn describe() -> String {
     let c = caps();
     match (c.abi, c.userns) {
         (0, _) => "not enforced: this kernel has no Landlock (needs Linux 5.13+ with landlock in the lsm= list)".into(),
-        (a, true) => format!("Landlock ABI {a} + own network and mount namespaces + seccomp"),
+        (a, true) => format!("Landlock ABI {a} + own network and mount namespaces + seccomp; a tab's commands share one network \
+namespace, so they reach servers the tab started in the background, and nothing else on localhost"),
         (a, false) if a >= 4 => format!("Landlock ABI {a} + seccomp; no unprivileged namespaces, so the network is held to the proxy's port and protected paths are restored after each command"),
         (a, false) => format!("Landlock ABI {a} + seccomp; no unprivileged namespaces and Landlock before ABI 4, so TCP isn't confined (only UDP is blocked)"),
     }
@@ -407,11 +529,12 @@ mod tests {
 
     #[test]
     fn policy_round_trips_through_the_helper_argument() {
-        let p = Policy { write: vec!["/w".into()], deny_read: vec!["/h/.ssh".into()], protect: vec!["/w/.git/hooks".into()], net: Net::Proxy { port: 4321 } };
+        let p = Policy { write: vec!["/w".into()], deny_read: vec!["/h/.ssh".into()], protect: vec!["/w/.git/hooks".into()], net: Net::Proxy { port: 4321 }, local_ports: vec![] };
         std::env::set_var("QH_SANDBOX_HELPER", "/bin/true");
-        let c = command(&p, Some(Path::new("/tmp/s.sock")), Path::new("bash"), &["-c", "ls"]).unwrap();
+        let c = command(&p, Some(Path::new("/tmp/s.sock")), Some(4242), Path::new("bash"), &["-c", "ls"]).unwrap();
         let args: Vec<String> = c.get_args().map(|a| a.to_string_lossy().to_string()).collect();
-        let (q, sock, _) = parse(&args[1]).unwrap();
+        let (q, sock, _, join) = parse(&args[1]).unwrap();
+        assert_eq!(join, Some(4242));
         assert_eq!((q.write, q.deny_read, q.protect, q.net), (p.write, p.deny_read, p.protect, p.net));
         assert_eq!(sock, Some(PathBuf::from("/tmp/s.sock")));
         assert_eq!(&args[2..], ["--", "bash", "-c", "ls"]);

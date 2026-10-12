@@ -154,6 +154,68 @@ fn real_work_still_runs_in_the_sandbox() {
     eprintln!("allowlisted host: {out}");
 }
 
+#[cfg(target_os = "linux")]
+impl Lab {
+    /// Several calls in one qh, each for a tab: `qh __tool --seq`. One output per call.
+    fn seq(&self, calls: serde_json::Value) -> Vec<String> {
+        let o = Command::new(env!("CARGO_BIN_EXE_qh")).args(["__tool", "--seq", &calls.to_string()])
+            .current_dir(&self.proj)
+            .env("HOME", &self.home).env("QH_STATE_DIR", self.home.join("state")).env_remove("QH_CONFIG").env_remove("QH_SANDBOX")
+            .env("QH_SANDBOX_HELPER", env!("CARGO_BIN_EXE_qh"))
+            .output().unwrap();
+        String::from_utf8_lossy(&o.stdout).split("--qh-seq--\n").map(String::from).collect()
+    }
+}
+
+/// A tab's later commands reach the server its own background task started; another tab can't,
+/// and a server on the host's localhost stays out of reach.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_tab_reaches_its_own_background_server_only() {
+    if !sandboxed() {
+        eprintln!("SKIPPED: this machine can't sandbox commands");
+        return;
+    }
+    let probe = Command::new(env!("CARGO_BIN_EXE_qh")).args(["__sandbox", "--probe"]).output().unwrap();
+    if !String::from_utf8_lossy(&probe.stdout).contains("userns=1") {
+        eprintln!("SKIPPED: no unprivileged namespaces here (commands keep a network of their own)");
+        return;
+    }
+    let l = lab("tabnet");
+    // a server on the host, outside any sandbox
+    let host = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let hp = host.local_addr().unwrap().port();
+    std::thread::spawn(move || for s in host.incoming().flatten() {
+        use std::io::{Read, Write};
+        let mut s = s;
+        let mut b = [0u8; 1024];
+        let _ = s.read(&mut b);
+        let _ = s.write_all(b"HTTP/1.0 200 OK\r\nContent-Length: 4\r\n\r\nhost");
+    });
+    let port = 20000 + std::process::id() % 20000;
+    let server = if Command::new("python3").arg("--version").output().is_ok_and(|o| o.status.success()) {
+        format!("python3 -m http.server {port} --bind 127.0.0.1")
+    } else {
+        format!("while true; do printf 'HTTP/1.0 200 OK\\r\\nContent-Length: 2\\r\\n\\r\\nok' | nc -l 127.0.0.1 {port}; done")
+    };
+    let bash = |tab: &str, cmd: String, bg: bool| serde_json::json!([tab, "bash", {"cmd": cmd, "background": bg}]);
+    let url = format!("http://127.0.0.1:{port}/");
+    let out = l.seq(serde_json::json!([
+        bash("A", server, true),
+        bash("A", format!("for i in $(seq 50); do curl -s -o /dev/null -m 1 {url} && break; sleep 0.1; done; curl -s -o /dev/null -w 'A=%{{http_code}}' -m 3 {url}"), false),
+        bash("B", format!("curl -s -o /dev/null -w 'B=%{{http_code}}' -m 3 {url}"), false),
+        bash("A", format!("curl -s -w '=%{{http_code}}' -m 3 http://127.0.0.1:{hp}/"), false),
+        bash("A", format!("curl -s -o /dev/null -w 'again=%{{http_code}}' -m 3 {url}"), false),
+    ]));
+    eprintln!("{out:#?}");
+    assert_eq!(out.len(), 5, "{out:?}");
+    assert!(out[0].contains("started bg"), "background server: {}", out[0]);
+    assert!(out[1].contains("A=200"), "same tab reaches its server: {}", out[1]);
+    assert!(out[2].contains("B=000"), "another tab reached it: {}", out[2]);
+    assert!(!out[3].contains("host") && out[3].contains("=000"), "host localhost reached: {}", out[3]);
+    assert!(out[4].contains("again=200"), "still reachable on a later call: {}", out[4]);
+}
+
 /// The real toolchains in the sandbox with the real HOME (its caches): cargo build with a fresh
 /// dependency, npm install, pytest, git commit. Needs internet; set QH_REALWORK=1 to run.
 #[test]

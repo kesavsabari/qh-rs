@@ -212,6 +212,7 @@ jobs:
     <li><strong>Writes stay in the project.</strong> The file tools write freely in the project and temp; anywhere else asks, even in <code>auto</code>. So do files that run code later: <code>.git/hooks</code>, shell rc files, <code>.envrc</code>, <code>.qh/</code> and qh's config.</li>
     <li><strong>Commands run sandboxed.</strong> They can write only in the project, temp and package caches, and can't read secrets. Variables holding tokens and keys (<code>*_TOKEN</code>, <code>*_KEY</code>, passwords in URLs) are withheld from them.</li>
     <li><strong>The network goes through an allowlist.</strong> Package registries and git hosts (crates.io, npm, PyPI, GitHub…) just work. Any other host asks you first, even in <code>auto</code>; "always" allows that host for the session.</li>
+    <li><strong>Local servers stay per tab.</strong> A dev server the agent starts in the background can be reached from that tab's later commands (<code>curl localhost:3000</code>), but not from other tabs, and commands can't reach other services on your machine's localhost.</li>
     <li><strong>Blocked by mistake?</strong> The agent can ask to rerun one command outside the sandbox. You're asked every time.</li>
   </ul>
   <table>

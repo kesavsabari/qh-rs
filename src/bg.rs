@@ -237,16 +237,26 @@ pub fn list(tab: &str) -> String {
     }).collect::<Vec<_>>().join("\n")
 }
 
-/// The tab closed: kill its tasks.
+/// Process ids of the tab's running tasks: each leads its own process group (the sandbox looks
+/// up the ports they listen on).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn pids(tab: &str) -> Vec<u32> {
+    let mut all = lock(&TASKS);
+    all.get_mut(tab).map(|v| v.iter_mut().filter_map(|t| { t.poll(); t.exit.is_none().then(|| t.child.id()) }).collect()).unwrap_or_default()
+}
+
+/// The tab closed: kill its tasks, then drop its sandbox network.
 pub fn kill_tab(tab: &str) {
     let v = lock(&TASKS).remove(tab);
     drop(v); // Drop kills each
+    crate::sandbox::close_tab(tab);
 }
 
 /// qh is exiting: kill every task.
 pub fn kill_all() {
     let all = std::mem::take(&mut *lock(&TASKS));
     drop(all);
+    crate::sandbox::close_all();
 }
 
 #[cfg(test)]

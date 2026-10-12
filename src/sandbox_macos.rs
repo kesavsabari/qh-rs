@@ -67,8 +67,8 @@ const BASE: &str = r##"(version 1)
 // A command may listen (bind/inbound use *:* because a dual-stack socket sees 127.0.0.1 as
 // ::ffff:127.0.0.1, which "localhost" misses), but connects only to the proxy's port: other local
 // services are ways out (qh's own Chrome debug port reads any file; Ollama's API reads paths it is
-// given). macOS has no network namespace to give a command a loopback of its own, so tests that talk
-// to their own local server need an approved unsandboxed run here.
+// given). macOS has no network namespace to give a tab a loopback of its own, so instead the ports
+// its own background tasks listen on are opened, one by one (tab_ports).
 const LOOPBACK: &str = r##"(allow network-bind (local ip "*:*"))
 (allow network-inbound (local ip "*:*"))
 "##;
@@ -98,6 +98,44 @@ const TAIL: &str = r##"(deny mach-lookup (xpc-service-name-prefix ""))
 (deny system-fcntl (fcntl-command 80 110))
 "##;
 
+/// Local services a command never reaches, even when the tab's own task listens on the same port
+/// too (a `*:port` socket with SO_REUSEADDR beside the real one): Ollama's API reads files it is
+/// given. qh's Chrome debug port is added at run time (it is picked fresh each launch).
+const NEVER: [u16; 1] = [11434];
+
+/// From `lsof -nP -iTCP -sTCP:LISTEN -Fpgn` output: the ports that processes in the `ours`
+/// process groups listen on and no other process does, minus `never`.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn own_ports(lsof: &str, ours: &[u32], never: &[u16]) -> Vec<u16> {
+    let (mut mine, mut theirs) = (std::collections::BTreeSet::new(), std::collections::BTreeSet::new());
+    let mut pgid = None::<u32>;
+    for l in lsof.lines() {
+        match l.split_at_checked(1) {
+            Some(("p", _)) => pgid = None,
+            Some(("g", g)) => pgid = g.parse().ok(),
+            Some(("n", name)) => {
+                let Some(port) = name.rsplit(':').next().and_then(|p| p.parse::<u16>().ok()) else { continue };
+                if pgid.is_some_and(|g| ours.contains(&g)) { mine.insert(port) } else { theirs.insert(port) };
+            }
+            _ => {}
+        }
+    }
+    mine.into_iter().filter(|p| !theirs.contains(p) && !never.contains(p) && !NEVER.contains(p)).collect()
+}
+
+/// The localhost ports the tab's running background tasks (process-group leaders `pgids`) listen
+/// on now, for its next command's profile.
+#[cfg(target_os = "macos")]
+pub fn tab_ports(pgids: &[u32]) -> Vec<u16> {
+    if pgids.is_empty() {
+        return vec![];
+    }
+    let Ok(o) = std::process::Command::new("/usr/sbin/lsof").args(["-nP", "-iTCP", "-sTCP:LISTEN", "-Fpgn"])
+        .stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output() else { return vec![] };
+    let never: Vec<u16> = crate::browser::devtools_port().into_iter().collect();
+    own_ports(&String::from_utf8_lossy(&o.stdout), pgids, &never)
+}
+
 /// Directories whose rename would carry a protected or secret path out from under its rule:
 /// every ancestor inside a write root, plus the write roots themselves.
 fn anchors(p: &Policy) -> Vec<PathBuf> {
@@ -126,7 +164,11 @@ pub fn profile(p: &Policy) -> String {
         Net::Off => {}
         Net::Proxy { port } => {
             s += LOOPBACK;
-            s += &format!("(allow network-outbound (remote ip \"localhost:{port}\"))\n{NET_SERVICES}");
+            s += &format!("(allow network-outbound (remote ip \"localhost:{port}\"))\n");
+            for lp in p.local_ports.iter().filter(|lp| **lp != port && !NEVER.contains(*lp)) {
+                s += &format!("(allow network-outbound (remote ip \"localhost:{lp}\"))\n");
+            }
+            s += NET_SERVICES;
         }
         Net::Open => { s += OPEN; s += NET_SERVICES; }
     }
@@ -184,6 +226,7 @@ mod tests {
             deny_read: vec!["/Users/u/.ssh".into(), "/p/.env".into()],
             protect: vec!["/p/.git/hooks".into(), "/p/.git/config".into()],
             net,
+            local_ports: vec![],
         }
     }
     fn at(s: &str, needle: &str) -> usize { s.find(needle).unwrap_or_else(|| panic!("missing {needle}\n{s}")) }
@@ -249,10 +292,38 @@ mod tests {
         for n in [Net::Proxy { port: 1 }, Net::Open] { well_formed(&pol(n)) }
     }
 
+    /// Only ports the tab's own process groups listen on are opened; never Ollama's, qh's Chrome
+    /// debug port, or a port another process listens on as well.
+    #[test]
+    fn tab_ports_are_the_tabs_own_only() {
+        let (chrome, ollama) = (9333u16, 11434u16);
+        let lsof = "p100\ng100\nf5\nn127.0.0.1:3000\nf6\nn*:5173\nf7\nn*:11434\nf8\nn*:9333\nf9\nn*:8080\n\
+                    p101\ng100\nf3\nn[::1]:4000\n\
+                    p200\ng200\nf4\nn127.0.0.1:11434\n\
+                    p300\ng300\nf5\nn127.0.0.1:8080\nf6\nn127.0.0.1:7777\n";
+        let got = own_ports(lsof, &[100], &[chrome]);
+        assert_eq!(got, vec![3000, 4000, 5173]);
+        assert!(own_ports(lsof, &[], &[]).is_empty(), "no tasks, no ports");
+        // even asked for directly, the profile leaves Ollama's port out
+        let mut p = pol(Net::Proxy { port: 18080 });
+        p.local_ports = vec![3000, ollama, 18080];
+        let s = profile(&p);
+        assert!(s.contains("(remote ip \"localhost:3000\")") && s.contains("(remote ip \"localhost:18080\")"));
+        assert!(!s.contains(&format!("localhost:{ollama}")) && !s.contains("localhost:7777") && !s.contains("localhost:9333"));
+        assert_eq!(s.matches("localhost:18080").count(), 1);
+        let allowed: Vec<&str> = s.lines().filter(|l| l.starts_with("(allow network-outbound (remote ip")).collect();
+        assert_eq!(allowed.len(), 2, "{allowed:?}");
+        // no network: no local ports either
+        let mut off = pol(Net::Off);
+        off.local_ports = vec![3000];
+        assert!(!profile(&off).contains("localhost:3000"));
+        well_formed(&p);
+    }
+
     #[test]
     fn odd_paths_stay_out_of_the_profile() {
         let odd = PathBuf::from("/Users/u/my \"proj\" \\x (1);");
-        let p = Policy { write: vec![odd.clone()], deny_read: vec![], protect: vec![odd.join(".qh")], net: Net::Off };
+        let p = Policy { write: vec![odd.clone()], deny_read: vec![], protect: vec![odd.join(".qh")], net: Net::Off, local_ports: vec![] };
         let (s, ps) = (profile(&p), params(&p));
         assert!(!s.contains("proj"));
         assert_eq!(ps[0], ("W0".into(), odd.clone()));
@@ -300,7 +371,7 @@ mod mac_tests {
     }
 
     fn pol(f: &Fx, net: Net) -> Policy {
-        Policy { write: vec![f.w.clone()], deny_read: vec![f.secret.clone()], protect: vec![f.hooks.clone()], net }
+        Policy { write: vec![f.w.clone()], deny_read: vec![f.secret.clone()], protect: vec![f.hooks.clone()], net, local_ports: vec![] }
     }
 
     /// `/bin/sh -c script` in the sandbox, killed after 30s so a hung tool can't stall CI.

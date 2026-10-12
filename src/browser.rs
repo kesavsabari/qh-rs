@@ -252,6 +252,13 @@ fn launch(headless: bool) -> Result<Browser, String> {
     connect(port, Some(child))
 }
 
+/// The DevTools port qh's browser profile last wrote, without checking it answers: the sandbox
+/// keeps commands away from it.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn devtools_port() -> Option<u16> {
+    std::fs::read_to_string(state_dir().join("browser").join("DevToolsActivePort")).ok()?.lines().next()?.trim().parse().ok()
+}
+
 /// The DevTools port of a browser already running on qh's profile, if it still answers.
 fn live_port(port_file: &std::path::Path) -> Option<u16> {
     let port = std::fs::read_to_string(port_file).ok()?.lines().next()?.trim().parse::<u16>().ok()?;

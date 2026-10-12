@@ -745,9 +745,10 @@ pub fn builtin_schema(name: &str) -> Option<Value> {
             let what = if crate::platform::shell() == crate::platform::Shell::PowerShell { "Run a PowerShell command (Windows)." } else { "Run a shell command." };
             let sandbox = if !crate::sandbox::enabled(crate::config::load_cached()) || crate::sandbox::unavailable().is_some() { "" } else {
                 " It runs in a sandbox: writes only in the project, temp and package caches; secrets unreadable; network only via an \
-allowlist the user approves per host. unsandboxed=true reruns it outside (the user is asked); use it only after the sandbox blocked something needed." };
+allowlist the user approves per host; on localhost only servers this tab started with background=true. unsandboxed=true reruns it outside (the user is asked); use it only after the sandbox blocked something needed." };
             let mut s = schema(name, &format!("{what} Stopped after 120 s; long output is cut, and says so; a cd carries over to the next call. \
-background=true starts it in the background (servers, watchers, long builds) and returns a task id with its first 2 s of output; \
+background=true starts it in the background (servers, watchers, long builds; a `cmd &` dies when the call ends, so start servers this way, \
+then curl them from later calls) and returns a task id with its first 2 s of output; \
 read more with task_output, stop it with task_stop.{sandbox}"),
                                &[("cmd", "string"), ("background", "boolean")], &["cmd"]);
             if !sandbox.is_empty() {

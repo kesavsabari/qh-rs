@@ -45,6 +45,14 @@ Each version starts with a one-line summary; the website shows it once the versi
   `task_stop(id)`. Each task keeps its last 2000 lines; up to 8 per tab; the whole process group
   is killed when the tab closes or qh exits. The status bar shows `· 2 bg`; `/tasks` lists them,
   `/tasks stop <id>` stops one.
+- **Test your own dev server.** A server started with `background=true` is reachable from the
+  same tab's later sandboxed commands (`curl localhost:PORT` works), and nothing else on localhost
+  is. On Linux a tab's commands share one network namespace (loopback plus the proxy bridge),
+  held by a small process that goes when the tab closes or qh exits; other tabs and the host's own
+  local services stay out of reach. On macOS the sandbox profile opens exactly the ports the tab's
+  own background tasks listen on, never one another process also listens on, Ollama's 11434 or
+  qh's Chrome debug port. The bash tool and the sandbox hint tell the model to start servers this
+  way (a `cmd &` dies when its call ends).
 
 ## 0.1.9 — unreleased
 

@@ -7,6 +7,15 @@ Each version starts with a one-line summary; the website shows it once the versi
 - **Mention teammates.** `@login` in a message tells the model that's another person on the
   team, what they're on, and that their part is theirs. A new `tell_team` tool hands their agent
   the work (it asks you first, outside auto mode). `send_message` to a teammate says to use it.
+- **Read a teammate's working copy.** Each teammate has their own clone, so files they haven't
+  pushed aren't in yours. New `read_team_file(to, path, start_line?, end_line?)` and
+  `list_team_files(to)` tools ask their qh over the encrypted direct line (about 10 s at most):
+  live, read-only, uncommitted changes included. Their qh answers on its own, but only for joined
+  members (not view-only or removed), only plain files inside the repo (symlinks resolved), never
+  secrets, git's own files or git-ignored files, at most 2,000 lines / 200 KB a reply; each read
+  shows in their team Activity. `team_share_files = "off"` turns it off. Tool descriptions and
+  the `@login` note now say there's no shared workspace: hand off work by pushing a branch
+  `qh/<login>/<topic>` and telling them its name.
 - **Ctrl+]** also flips team ⇄ personal, since input methods often take Ctrl+Space.
 - **Web search.** A `web_search(query, max_results?)` tool (coding, general and all profiles)
   queries DuckDuckGo's HTML page and returns numbered titles, links and snippets, marked as

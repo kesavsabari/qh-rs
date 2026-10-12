@@ -537,7 +537,7 @@ fn expand_mentions(line: &str) -> String {
                 out += &format!("\n\n<teammate login=\"{who}\" role=\"{role}\" status=\"{seen}\" sessions=\"{}\">\n\
 {who} is another person on this team, with their own qh agent on their own machine. Work the user gives to {who} is theirs: \
 don't do it yourself. Agree the shared parts first (API routes, data shapes, file layout), then send {who} their part with \
-tell_team, and use ask_team for questions about what they own.\n</teammate>", sessions.join(","));
+tell_team, and use ask_team for questions about what they own. {}\n</teammate>", sessions.join(","), crate::hub::TEAM_FILES);
             }
             continue;
         }
@@ -599,6 +599,8 @@ fn tool_title(tool: &str, a: &Value) -> String {
         "back" | "screenshot" | "snapshot" | "list_sessions" => format!("· {tool}"),
         "send_message" => format!("→ {}: {}", s("to"), one(s("text"), 90)),
         "tell_team" => format!("→ @{}: {}", s("to").trim_start_matches('@'), one(s("text"), 90)),
+        "read_team_file" => format!("▤ @{}:{}", s("to").trim_start_matches('@'), s("path")),
+        "list_team_files" => format!("▤ @{} changed files", s("to").trim_start_matches('@')),
         "ask" => format!("? {}: {}", s("to"), one(s("question"), 90)),
         "spawn" => format!("+ spawn {}: {}", s("name"), one(s("task"), 80)),
         "read_session" => format!("▤ read session {}", s("name")),

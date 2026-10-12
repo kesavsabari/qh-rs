@@ -348,6 +348,8 @@ pub fn answer_question(hub: &Arc<Hub>, m: &Arc<Member>, who: &str, question: &st
 Answer from what you know about your own work in this session. If you need to, look at the code with the read-only tools \
 (at most {LOOKS} calls); you can't change anything now and nothing you do here enters your own session. Be short and concrete: names, \
 signatures, what's changing and when. If you don't know, or someone else owns it, say so and name them if you can. \
+The asker has their own clone: your uncommitted files aren't in it (they can read them with read_team_file, or get them once you push), \
+so never say they're in a shared workspace. \
 End with one line 'RELIED ON: <comma-separated function, type or field names your answer promises>' or 'RELIED ON: none'.")}));
     let schemas: Vec<Value> = lock(&m.set).tools.iter()
         .filter(|t| matches!(t["function"]["name"].as_str(), Some("read_file" | "grep" | "find_references"))).cloned().collect();
@@ -624,6 +626,13 @@ fn dispatch(hub: &Arc<Hub>, m: &Arc<Member>, name: &str, args: &Value) -> String
             Ok(m) => m,
             Err(e) => format!("error: {e}"),
         };
+    }
+    if name == "read_team_file" {
+        return crate::team::read_team_file(&m.cwd(), args["to"].as_str().unwrap_or(""), args["path"].as_str().unwrap_or(""),
+                                           args["start_line"].as_u64(), args["end_line"].as_u64());
+    }
+    if name == "list_team_files" {
+        return crate::team::list_team_files(&m.cwd(), args["to"].as_str().unwrap_or(""));
     }
     if name == "ask_team" {
         return crate::team::ask_team(&m.name, &m.cwd(), args["question"].as_str().unwrap_or(""),

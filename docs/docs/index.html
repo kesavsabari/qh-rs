@@ -294,6 +294,7 @@ jobs:
   </ul>
   <p>Or type directly: <code>/team open alex api</code> and <code>/team send alex api add rate limiting to login</code>.</p>
   <p>When a teammate writes into one of your sessions, you're asked first: <b>allow once</b>, <b>always allow</b> that person, or <b>deny</b>. The message waits until you answer, and waits for you if you're offline.</p>
+  <p>Each of you works in your own clone: there's no shared folder, and nothing you write reaches a teammate by itself. While you're both online, their agent can read a file from your working copy over the encrypted direct line (<code>read_team_file</code>), uncommitted changes included, and see which files you've changed (<code>list_team_files</code>). It's read-only, answered in seconds without asking you, and every read shows in your team Activity, like <code>alex's agent read server.js</code>. To hand over finished work, the agent commits it to a branch <code>qh/&lt;login&gt;/&lt;topic&gt;</code>, pushes it (you're asked first) and tells the teammate the branch name.</p>
 </section>
 
 <section id="team-safety">
@@ -303,6 +304,7 @@ jobs:
     <li>Everything qh shares (sessions, conversations, messages, file names) is encrypted with a key only the team has, so even on a public repo outsiders see noise. They can see team members' GitHub usernames and when each was last online.</li>
     <li>A new member gets the key from a teammate who's already in, the next time that teammate is online.</li>
     <li>Each agent runs on its owner's computer, with the owner's model and keys. A teammate's message never runs without the owner allowing it, and the owner approves every file change and command it leads to.</li>
+    <li>A teammate's agent can read only plain files inside the project, and only while you're online: never secret files (<code>.env</code>, keys, anything under <code>~/.ssh</code>), git's own files, or anything your <code>.gitignore</code> leaves out. Links pointing out of the project are refused, replies stop at 2,000 lines or 200&nbsp;KB, and people you have as view only or removed get nothing. <code>team_share_files = "off"</code> in your config turns it off.</li>
     <li><code>/team off</code> stops sharing; your teammates see you go offline.</li>
   </ul>
   <div class="note">Team mode needs the project on GitHub today. GitLab and Gitea support is planned.</div>
@@ -387,6 +389,7 @@ trusted = false   <span class="c"># true: run its tools without asking</span></c
     <tr><td><code>notify</code></td><td>When a turn over 10&nbsp;s ends or a permission waits while the terminal is in the background: <code>"auto"</code> (default) rings the bell and sends a terminal notification; <code>"desktop"</code> also uses <code>notify-send</code> or <code>osascript</code>; <code>"off"</code> stays quiet</td></tr>
     <tr><td><code>lsp</code></td><td><code>"auto"</code> (default) starts a language server found on <code>PATH</code> the first time a file needs it (<code>rust-analyzer</code>, <code>typescript-language-server</code>, <code>pyright-langserver</code> or <code>pylsp</code>, <code>gopls</code>): edits report new errors and warnings, and the model gets <code>goto_definition</code> and <code>hover</code>; <code>"off"</code> never starts one</td></tr>
     <tr><td><code>lsp_wait_ms</code></td><td>How long an edit waits for the language server's diagnostics (default <code>3000</code>); nothing is added if it's slower</td></tr>
+    <tr><td><code>team_share_files</code></td><td><code>"auto"</code> (default): in team mode, teammates' agents may read files from your working copy over the encrypted line, without asking, within the <a href="#team-safety">rules</a>; each read shows in the team Activity. <code>"off"</code> refuses them</td></tr>
     <tr><td><code>mouse</code></td><td><code>true</code> enables clicks and scrolling</td></tr>
     <tr><td><code>[[hooks]]</code>, <code>[mcp.name]</code></td><td>See <a href="#hooks">hooks</a> and <a href="#mcp">MCP</a></td></tr>
     <tr><td><code>[sandbox]</code></td><td>See <a href="#sandbox">sandbox</a>. <code>writable = ["~/other"]</code> adds folders; <code>allow_hosts = ["*.example.com"]</code> adds hosts; <code>env_keep = ["DATABASE_URL"]</code> keeps variables; <code>network = "off"</code> or <code>"open"</code>; <code>mode = "off"</code> turns it all off (or <code>QH_SANDBOX=off</code>)</td></tr>

@@ -177,7 +177,7 @@ what does src/engine.rs do?</code></pre>
     <tr><th>System</th><th>How commands are confined</th></tr>
     <tr><td>Linux</td><td>Landlock (kernel 5.13+) and seccomp, plus private network and mount namespaces where the kernel allows them. Nothing to install.</td></tr>
     <tr><td>macOS</td><td>Seatbelt (<code>sandbox-exec</code>), built in.</td></tr>
-    <tr><td>Windows</td><td>An AppContainer (early: it grants the container access to your project and toolchain folders; <code>qh sandbox reset</code> takes that back). The network is off inside it.</td></tr>
+    <tr><td>Windows</td><td>Not yet: commands run with your access. The secret and write guards and the withheld variables still apply. A Windows sandbox is in the works.</td></tr>
   </table>
   <div class="note">Where the system can't sandbox commands (an old Linux kernel, say), <code>/sandbox</code> says so. The secret and write guards still apply.</div>
 </section>

@@ -4,7 +4,7 @@ Each version starts with a one-line summary; the website shows it once the versi
 
 ## 0.1.7 — unreleased
 
-The safety update: secrets and anything outside the project ask first, and commands run in a sandbox on Linux, macOS and Windows.
+The safety update: secrets and anything outside the project ask first, and commands run in a sandbox on Linux and macOS.
 
 - **Secrets ask first, in every mode.** Reading `~/.ssh`, `~/.aws`, `.env` files, keys, cloud and
   git credentials, browser profiles or qh's own logins asks you, even in `auto`. `grep` and the
@@ -14,14 +14,15 @@ The safety update: secrets and anything outside the project ask first, and comma
   shell rc files, `.envrc`, `.qh/` and qh's config. Symlinks and hard links can't get around it.
 - **Commands run in a sandbox.** They can write only in the project, temp and package caches, can't
   read secrets, and don't get variables holding tokens and keys. Linux uses Landlock and seccomp
-  (plus private network and mount namespaces where the kernel allows them), macOS uses Seatbelt,
-  and Windows an AppContainer (early). Nothing to install.
+  (plus private network and mount namespaces where the kernel allows them) and macOS uses Seatbelt.
+  Nothing to install. On Windows commands aren't sandboxed yet (the guards above still apply);
+  `/sandbox` says so.
 - **Network through an allowlist.** Package registries and git hosts just work; any other host
   asks first, even in `auto`.
 - When the sandbox blocks something a command really needs, the agent can ask to rerun it outside.
   You're asked every time.
 - `/sandbox` shows what's in force. `[sandbox]` in the config adds folders, hosts or variables, or
-  turns it off. On Windows, `qh sandbox reset` removes the folder permissions the sandbox added.
+  turns it off.
 - A helper's answer that arrives mid-turn is taken in by that turn, not answered twice; a hang when
   two sessions waited on each other is fixed; and a missing file's error says where it looked.
 - `/mode auto` autocompletes; Python is found on macOS (`python3`); build folders (any marked with

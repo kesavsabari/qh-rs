@@ -140,6 +140,17 @@ fn read_head(c: &mut dyn Stream) -> Option<(Vec<u8>, usize)> {
         }
     }
     reply(c, "400 Bad Request", "qh sandbox: incomplete or oversized proxy request");
+    // read what the client is still sending before closing: closing on unread data sends a reset,
+    // which (macOS especially) throws the 400 away before the client reads it
+    c.shut(Shutdown::Write);
+    c.timeout(Some(Duration::from_secs(1)));
+    let mut left: usize = 1 << 20;
+    while left > 0 {
+        match c.read(&mut chunk) {
+            Ok(n) if n > 0 => left = left.saturating_sub(n),
+            _ => break,
+        }
+    }
     None
 }
 

@@ -29,7 +29,7 @@ pub fn state_base() -> PathBuf {
     home().join(".local/state/qwen-harness")
 }
 
-fn on_path(exe: &str) -> bool {
+pub fn on_path(exe: &str) -> bool {
     let names: Vec<String> = if cfg!(windows) { vec![format!("{exe}.exe"), exe.into()] } else { vec![exe.into()] };
     std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| names.iter().any(|n| d.join(n).is_file())))
 }

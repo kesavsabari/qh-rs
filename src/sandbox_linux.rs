@@ -98,7 +98,10 @@ pub fn command(p: &Policy, sock: Option<&Path>, program: &Path, args: &[&str]) -
         Net::Proxy { port } => json!({"port": port, "sock": sock.map(|s| s.display().to_string())}),
     };
     let paths = |v: &[PathBuf]| v.iter().map(|x| x.display().to_string()).collect::<Vec<_>>();
-    let spec = json!({"write": paths(&p.write), "deny_read": paths(&p.deny_read), "protect": paths(&p.protect), "net": net});
+    // namespaces only where the probe saw them work end to end: on Ubuntu 24.04 AppArmor lets the
+    // unshare itself through and then refuses what follows, leaving the helper unable to run anything
+    let spec = json!({"write": paths(&p.write), "deny_read": paths(&p.deny_read), "protect": paths(&p.protect), "net": net,
+                      "ns": caps().userns});
     let mut c = Command::new(h);
     c.arg("__sandbox").arg(spec.to_string()).arg("--").arg(program).args(args);
     Some(c)
@@ -299,7 +302,7 @@ fn seccomp_filter(udp: bool) -> Vec<libc::sock_filter> {
 }
 
 /// What the helper was asked to do, parsed from its argument.
-fn parse(spec: &str) -> Option<(Policy, Option<PathBuf>)> {
+fn parse(spec: &str) -> Option<(Policy, Option<PathBuf>, bool)> {
     let v: Value = serde_json::from_str(spec).ok()?;
     let paths = |k: &str| v[k].as_array().into_iter().flatten().filter_map(|x| x.as_str().map(PathBuf::from)).collect::<Vec<_>>();
     let (net, sock) = match &v["net"] {
@@ -307,7 +310,7 @@ fn parse(spec: &str) -> Option<(Policy, Option<PathBuf>)> {
         Value::Object(o) => (Net::Proxy { port: o.get("port")?.as_u64()? as u16 }, o.get("sock").and_then(|s| s.as_str()).map(PathBuf::from)),
         _ => (Net::Off, None),
     };
-    Some((Policy { write: paths("write"), deny_read: paths("deny_read"), protect: paths("protect"), net }, sock))
+    Some((Policy { write: paths("write"), deny_read: paths("deny_read"), protect: paths("protect"), net }, sock, v["ns"] == true))
 }
 
 /// `qh __sandbox --probe` or `qh __sandbox <policy> -- program args…`. Fails closed: if the
@@ -321,14 +324,19 @@ pub fn helper_main(args: &[String]) -> i32 {
         return 0;
     }
     let (Some(spec), Some(dash)) = (args.first(), args.iter().position(|a| a == "--")) else { return fail("usage".into()) };
-    let Some((p, sock)) = parse(spec) else { return fail("bad policy".into()) };
+    let Some((p, sock, try_ns)) = parse(spec) else { return fail("bad policy".into()) };
     let Some(prog) = args.get(dash + 1) else { return fail("no command".into()) };
     let abi = landlock_abi();
     if abi < 1 {
         return fail("this kernel has no Landlock (5.13+ with landlock in lsm=)".into());
     }
     // QH_SANDBOX_NO_NS=1: behave as on a system without unprivileged namespaces (tests, CI)
-    let ns = std::env::var("QH_SANDBOX_NO_NS").as_deref() != Ok("1") && unshare(p.net != Net::Open).is_ok();
+    let ns = try_ns && std::env::var("QH_SANDBOX_NO_NS").as_deref() != Ok("1");
+    if ns {
+        if let Err(e) = unshare(p.net != Net::Open) {
+            return fail(format!("namespaces: {e}")); // half set up: don't run anything
+        }
+    }
     if ns {
         for x in p.protect.iter().filter(|x| x.exists()) {
             if let Err(e) = ro_bind(x) {
@@ -403,7 +411,7 @@ mod tests {
         std::env::set_var("QH_SANDBOX_HELPER", "/bin/true");
         let c = command(&p, Some(Path::new("/tmp/s.sock")), Path::new("bash"), &["-c", "ls"]).unwrap();
         let args: Vec<String> = c.get_args().map(|a| a.to_string_lossy().to_string()).collect();
-        let (q, sock) = parse(&args[1]).unwrap();
+        let (q, sock, _) = parse(&args[1]).unwrap();
         assert_eq!((q.write, q.deny_read, q.protect, q.net), (p.write, p.deny_read, p.protect, p.net));
         assert_eq!(sock, Some(PathBuf::from("/tmp/s.sock")));
         assert_eq!(&args[2..], ["--", "bash", "-c", "ls"]);

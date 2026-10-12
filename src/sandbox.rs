@@ -245,9 +245,12 @@ pub fn scrubbed(cfg: &Config) -> Vec<String> {
 
 /// Package-manager caches under home that builds write to (cargo, npm, pip, go, gradle…). A known
 /// gap: a command could plant code in one that a later, unsandboxed build runs.
-const CACHES: [&str; 14] = [".cache", ".cargo/registry", ".cargo/git", ".npm", ".yarn", ".pnpm-store", ".local/share/pnpm",
-    "go/pkg/mod", ".gradle/caches", ".m2/repository", ".bun/install/cache", "Library/Caches", "AppData/Local/npm-cache",
-    "AppData/Local/pip/cache"];
+/// With the tool that uses each: a missing cache is made when its tool is installed, since a sandboxed
+/// tool couldn't create it under home itself.
+const CACHES: [(&str, &str); 14] = [(".cache", ""), (".cargo/registry", "cargo"), (".cargo/git", "cargo"), (".npm", "npm"),
+    (".yarn", "yarn"), (".pnpm-store", "pnpm"), (".local/share/pnpm", "pnpm"), ("go/pkg/mod", "go"), (".gradle/caches", "gradle"),
+    (".m2/repository", "mvn"), (".bun/install/cache", "bun"), ("Library/Caches", ""), ("AppData/Local/npm-cache", "npm"),
+    ("AppData/Local/pip/cache", "pip")];
 
 /// Inside the project, paths a command must not change (they run code later, outside the sandbox).
 fn protect_candidates(root: &Path) -> Vec<PathBuf> {
@@ -266,7 +269,15 @@ fn protect_candidates(root: &Path) -> Vec<PathBuf> {
 pub fn policy(root: &Path, cfg: &Config, net: Net) -> Policy {
     let h = canon(&crate::config::home());
     let mut write = writable(root, cfg);
-    write.extend(CACHES.iter().map(|c| h.join(c)).filter(|p| p.is_dir()).map(|p| canon(&p)));
+    for (c, tool) in CACHES {
+        let p = h.join(c);
+        if !p.is_dir() && !tool.is_empty() && crate::platform::on_path(tool) {
+            let _ = std::fs::create_dir_all(&p);
+        }
+        if p.is_dir() {
+            write.push(canon(&p));
+        }
+    }
     if Path::new("/dev/shm").is_dir() {
         write.push("/dev/shm".into());
     }
@@ -516,7 +527,7 @@ protected paths aren't guarded, and commands run with your full access.".into();
     #[cfg(target_os = "linux")]
     let os = crate::sandbox_linux::describe();
     #[cfg(not(target_os = "linux"))]
-    let os = match unavailable() { Some(why) => format!("not enforced: {why}"), None => if cfg!(windows) { "AppContainer".into() } else { "Seatbelt (sandbox-exec)".into() } };
+    let os = match unavailable() { Some(why) => format!("not enforced: {why}"), None => if cfg!(windows) { "AppContainer (QH_SANDBOX_APPCONTAINER=1, experimental)".into() } else { "Seatbelt (sandbox-exec)".into() } };
     let net = match p.net {
         Net::Open => "open ([sandbox] network = \"open\")".to_string(),
         Net::Proxy { port } => format!("through the allowlist proxy on 127.0.0.1:{port}: package registries and git hosts, \

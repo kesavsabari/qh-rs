@@ -437,7 +437,8 @@ mod mac_tests {
         // unsandboxed, `open -g -a Finder` just pokes the running Finder; sandboxed it can't reach LaunchServices
         let o = sh(&p, "/usr/bin/open -g -a Finder");
         assert!(!o.status.success(), "open escaped the sandbox: {o:?}");
-        let o = sh(&p, "/usr/bin/osascript -e 'tell application \"Finder\" to get name'");
-        assert!(!o.status.success() && !out(&o).contains("Finder"), "AppleEvent sent: {o:?}");
+        // not `get name`: AppleScript answers an application's name from its bundle without an event
+        let o = sh(&p, "/usr/bin/osascript -e 'tell application \"Finder\" to count windows'");
+        assert!(!o.status.success(), "AppleEvent sent: {o:?}");
     }
 }

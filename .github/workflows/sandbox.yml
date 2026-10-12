@@ -20,7 +20,8 @@ jobs:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     env:
-      QH_REQUIRE_SANDBOX: "1"
+      # Windows commands run unsandboxed for now (an AppContainer can't run Git Bash): its suite checks the guards
+      QH_REQUIRE_SANDBOX: ${{ matrix.os == 'windows-latest' && '0' || '1' }}
       QH_REALWORK: "1"
     steps:
       - uses: actions/checkout@v4

@@ -157,7 +157,7 @@ fn write_file(cwd: &Path, a: &Value) -> Result<String, String> {
         std::fs::create_dir_all(d).map_err(|e| ferr(cwd, path, e))?;
     }
     std::fs::write(path, content).map_err(|e| ferr(cwd, path, e))?;
-    Ok(format!("wrote {} chars to {path}{}", content.chars().count(), check_syntax(path)))
+    Ok(format!("wrote {} chars to {path}{}{}", content.chars().count(), check_syntax(path), crate::lsp::after_write(path)))
 }
 
 fn indent(l: &str) -> usize {
@@ -265,7 +265,7 @@ fn edit_file(cwd: &Path, a: &Value) -> Result<String, String> {
         Err(msg) => Ok(msg),
         Ok((out, how)) => {
             std::fs::write(path, out).map_err(|e| e.to_string())?;
-            Ok(format!("edited {path}{how}{}", check_syntax(path)))
+            Ok(format!("edited {path}{how}{}{}", check_syntax(path), crate::lsp::after_write(path)))
         }
     }
 }
@@ -344,6 +344,12 @@ fn word(name: &str) -> Result<Regex, String> {
 }
 
 fn find_references(cwd: &Path, a: &Value) -> Result<String, String> {
+    // with a position, ask the language server; the whole-word search is the fallback
+    if a.get("line").is_some() && Path::new(sa(a, "path")).extension().is_some() {
+        if let Ok(r) = crate::lsp::tool("find_references", cwd, a) {
+            return Ok(r);
+        }
+    }
     let pat = word(sa(a, "name"))?;
     let mut hits = vec![];
     for (f, t) in source_files(cwd, sa(a, "path")) {
@@ -565,7 +571,9 @@ pub fn builtin_schema(name: &str) -> Option<Value> {
         "read_file" => schema(name, "Read a file with line numbers. Files over 300 lines give an outline unless you pass start/end; long output is cut, and says so.", &[("path", "string"), ("start", "integer"), ("end", "integer")], &["path"]),
         "write_file" => schema(name, "Create or overwrite a file.", &[("path", "string"), ("content", "string")], &["path", "content"]),
         "edit_file" => schema(name, "Replace one exact unique string in a file. Whitespace differences still match; if `old` isn't found exactly once, nothing changes and the error says why.", &[("path", "string"), ("old", "string"), ("new", "string")], &["path", "old", "new"]),
-        "find_references" => schema(name, "List every line using a name (whole word).", &[("name", "string"), ("path", "string")], &["name"]),
+        "find_references" => schema(name, "List every line using a name (whole word). Give a file path plus 1-based line and col on the name to ask the language server instead (exact, scope-aware).", &[("name", "string"), ("path", "string"), ("line", "integer"), ("col", "integer")], &["name"]),
+        "goto_definition" => schema(name, "Where a symbol is defined, via the language server (rust-analyzer, typescript-language-server, pyright/pylsp, gopls). line and col are 1-based and must be on the name.", &[("path", "string"), ("line", "integer"), ("col", "integer")], &["path", "line", "col"]),
+        "hover" => schema(name, "Type and docs of the symbol at a position, via the language server. line and col are 1-based.", &[("path", "string"), ("line", "integer"), ("col", "integer")], &["path", "line", "col"]),
         "rename_symbol" => schema(name, "Rename a name everywhere in the project (whole word).", &[("old", "string"), ("new", "string"), ("path", "string")], &["old", "new"]),
         "remember" => schema(name, "Save a lasting project fact to NOTES.md for future sessions.", &[("fact", "string")], &["fact"]),
         "bash" => {
@@ -603,9 +611,9 @@ pub fn profile_tools(profile: &str) -> &'static [&'static str] {
     match profile {
         "general" => &["read_file", "bash", "web_fetch", "remember", "skill", "*browser", "*webhooks"],
         "browser" => &["read_file", "write_file", "remember", "*browser"],
-        "all" => &["read_file", "write_file", "edit_file", "find_references", "rename_symbol", "remember", "todo", "skill",
+        "all" => &["read_file", "write_file", "edit_file", "find_references", "goto_definition", "hover", "rename_symbol", "remember", "todo", "skill",
                    "bash", "grep", "web_fetch", "*browser", "*webhooks"],
-        _ => &["read_file", "write_file", "edit_file", "rename_symbol", "find_references", "bash", "grep", "remember", "todo", "skill", "*browser"],
+        _ => &["read_file", "write_file", "edit_file", "rename_symbol", "find_references", "goto_definition", "hover", "bash", "grep", "remember", "todo", "skill", "*browser"],
     }
 }
 
@@ -618,6 +626,9 @@ pub fn build(profile: &str, cfg: &Config) -> Vec<Value> {
             continue;
         }
         if *n == "skill" && (crate::tier::tier(cfg.ctx) == "S" || crate::skills::find(&std::env::current_dir().unwrap_or_default()).is_empty()) {
+            continue;
+        }
+        if (*n == "goto_definition" || *n == "hover") && cfg.lsp == "off" {
             continue;
         }
         if *n == "*browser" && !crate::tier::Limits::for_ctx(cfg.ctx).browser && profile != "browser" {
@@ -668,6 +679,7 @@ pub fn call(name: &str, a: &Value, cfg: &Config, cwd: &mut PathBuf, lim: &crate:
         "edit_file" => edit_file(cwd, a),
         "find_references" => find_references(cwd, a),
         "rename_symbol" => rename_symbol(cwd, a),
+        "goto_definition" | "hover" => crate::lsp::tool(name, cwd, a),
         "remember" => remember(cwd, a),
         "bash" => bash(cwd, a, cfg, sb),
         "grep" => grep(cwd, a),

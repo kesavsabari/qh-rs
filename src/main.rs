@@ -5,6 +5,7 @@ mod checkpoints;
 mod config;
 mod context;
 mod engine;
+mod lsp;
 mod map;
 mod oauth;
 mod platform;
@@ -236,11 +237,13 @@ fn main() {
     if !args.print.is_empty() {
         let code = headless(&hub, &args.print, rx, args.stats.as_deref());
         browser::shutdown();
+    lsp::shutdown();
         std::process::exit(code);
     }
     update::check_in_background(update_check);
     let r = ui::run(hub, tx, rx);
     browser::shutdown();
+    lsp::shutdown();
     if let Err(e) = r {
         eprintln!("{e}");
     }

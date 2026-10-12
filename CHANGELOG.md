@@ -2,6 +2,15 @@
 
 Each version starts with a one-line summary; the website shows it once the version is no longer recent.
 
+## 0.2.0 — unreleased
+
+- **Code intelligence from language servers.** With rust-analyzer, typescript-language-server,
+  pyright/pylsp or gopls on PATH, qh starts one on first use per project (never otherwise).
+  After each edit it reports the new errors and warnings in that file, with line numbers, so the
+  model fixes them in the same turn. New `goto_definition` and `hover` tools, and
+  `find_references` with a line and column asks the server. `lsp = "off"` turns it off;
+  `lsp_wait_ms` (default 3000) bounds the wait.
+
 ## 0.1.9 — unreleased
 
 - **Answers render as markdown.** Headings, bold, italic, `inline code`, lists that wrap under

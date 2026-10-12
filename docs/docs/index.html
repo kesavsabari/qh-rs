@@ -335,6 +335,7 @@ trusted = false   <span class="c"># true: run its tools without asking</span></c
     <tr><td><code>host</code></td><td>Where Ollama runs (default <code>http://127.0.0.1:11434</code>)</td></tr>
     <tr><td><code>ctx</code></td><td>Context window for local models; leave out to size it to your GPU</td></tr>
     <tr><td><code>cloud_ctx</code></td><td>Cap on cloud models' window (default 0 = the model's whole window). Every request resends the conversation, so a cap saves plan usage on long sessions</td></tr>
+    <tr><td><code>cost_warn</code></td><td>Warn once when a session's spend on API keys passes this many dollars (default <code>2.00</code>, <code>0</code> = off). The status bar shows the spend; <code>/tokens</code> breaks it down</td></tr>
     <tr><td><code>mode</code></td><td>Start mode: <code>ask</code>, <code>auto-edit</code>, <code>auto</code> or <code>plan</code></td></tr>
     <tr><td><code>profile</code></td><td>Tool set: <code>coding</code>, <code>general</code>, <code>browser</code> or <code>all</code></td></tr>
     <tr><td><code>allow</code></td><td>Commands that never need approval, e.g. <code>["cargo*", "npm test"]</code></td></tr>

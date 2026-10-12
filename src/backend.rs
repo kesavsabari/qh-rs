@@ -12,6 +12,10 @@ pub struct Reply {
     pub msg: Value,
     pub prompt: u64,
     pub total: u64,
+    /// this call's tokens as the provider reported them
+    pub usage: crate::usage::Calls,
+    /// ChatGPT plan: share of the current usage window used, when the backend says
+    pub plan_pct: Option<f64>,
 }
 
 pub enum Error {
@@ -110,6 +114,7 @@ pub fn ollama(host: &str, key: Option<&str>, model: &str, messages: &[Value], to
     }
     let r = post(&format!("{}/api/chat", host.trim_end_matches('/')), &body, key)?;
     let (mut content, mut calls, mut prompt, mut total) = (String::new(), Vec::new(), 0, 0);
+    let mut usage = crate::usage::Calls::default();
     for line in BufReader::new(r.into_reader()).lines() {
         let line = line.map_err(|e| Error::Other(e.to_string()))?;
         if line.is_empty() {
@@ -137,13 +142,14 @@ pub fn ollama(host: &str, key: Option<&str>, model: &str, messages: &[Value], to
         if chunk["done"].as_bool() == Some(true) {
             prompt = chunk["prompt_eval_count"].as_u64().unwrap_or(0);
             total = prompt + chunk["eval_count"].as_u64().unwrap_or(0);
+            usage = crate::usage::ollama(&chunk);
         }
     }
     let mut msg = json!({"role": "assistant", "content": content});
     if !calls.is_empty() {
         msg["tool_calls"] = Value::from(calls);
     }
-    Ok(Reply { msg, prompt, total })
+    Ok(Reply { msg, prompt, total, usage, plan_pct: None })
 }
 
 fn to_openai(messages: &[Value]) -> Vec<Value> {
@@ -211,6 +217,7 @@ pub fn openai(base: &str, key: &str, model: &str, messages: &[Value], tools: &[V
     let key = Some(key).filter(|k| !k.is_empty());
     let r = post(&format!("{}/chat/completions", base.trim_end_matches('/')), &body, key)?;
     let (mut content, mut prompt, mut total) = (String::new(), 0, 0);
+    let mut usage = crate::usage::Calls::default();
     let mut calls: BTreeMap<u64, (String, String)> = BTreeMap::new();
     for line in BufReader::new(r.into_reader()).lines() {
         let line = line.map_err(|e| Error::Other(e.to_string()))?;
@@ -222,6 +229,7 @@ pub fn openai(base: &str, key: &str, model: &str, messages: &[Value], tools: &[V
         if let Some(u) = chunk.get("usage").filter(|u| !u.is_null()) {
             prompt = u["prompt_tokens"].as_u64().unwrap_or(0);
             total = u["total_tokens"].as_u64().unwrap_or(0);
+            usage = crate::usage::openai(u);
         }
         for ch in chunk["choices"].as_array().into_iter().flatten() {
             let d = &ch["delta"];
@@ -249,7 +257,7 @@ pub fn openai(base: &str, key: &str, model: &str, messages: &[Value], tools: &[V
             .map(|(name, arguments)| json!({"function": {"name": name, "arguments": arguments}}))
             .collect();
     }
-    Ok(Reply { msg, prompt, total })
+    Ok(Reply { msg, prompt, total, usage, plan_pct: None })
 }
 
 /// Ollama-shaped history -> Anthropic Messages: system apart, tool calls as tool_use
@@ -332,6 +340,7 @@ pub fn anthropic(base: &str, key: &str, model: &str, messages: &[Value], tools: 
             ureq::Error::Transport(t) => Error::Connect(t.to_string()),
         })?;
     let (mut content, mut prompt, mut out_tokens) = (String::new(), 0u64, 0u64);
+    let mut usage = crate::usage::Calls::default();
     let mut calls: Vec<(String, String)> = vec![]; // (name, json input so far)
     let mut current_tool: Option<usize> = None;
     for line in BufReader::new(r.into_reader()).lines() {
@@ -343,6 +352,7 @@ pub fn anthropic(base: &str, key: &str, model: &str, messages: &[Value], tools: 
                 let u = &ev["message"]["usage"];
                 prompt = u["input_tokens"].as_u64().unwrap_or(0) + u["cache_read_input_tokens"].as_u64().unwrap_or(0)
                     + u["cache_creation_input_tokens"].as_u64().unwrap_or(0);
+                usage = crate::usage::anthropic(u);
             }
             "content_block_start" => {
                 let b = &ev["content_block"];
@@ -381,7 +391,8 @@ pub fn anthropic(base: &str, key: &str, model: &str, messages: &[Value], tools: 
             json!({"function": {"name": name, "arguments": args}})
         }).collect();
     }
-    Ok(Reply { msg, prompt, total: prompt + out_tokens })
+    usage.output = out_tokens;
+    Ok(Reply { msg, prompt, total: prompt + out_tokens, usage, plan_pct: None })
 }
 
 /// One streamed chat call to whichever provider runs the model.

@@ -24,6 +24,8 @@ pub struct Config {
     /// cap on a cloud model's window: every request resends the whole context, so a full
     /// 128k+ window burns plan usage fast
     pub cloud_ctx: usize,
+    /// warn once when a session's spend on API keys passes this many dollars (0 = never)
+    pub cost_warn: f64,
     pub profile: String,
     pub keep_alive: String,
     pub fallback_model: String,
@@ -139,6 +141,7 @@ pub fn load_defaults() -> Config {
         ctx: 32768,
         compact_at: 11000,
         cloud_ctx: 0, // no cap: a cloud model uses its whole window
+        cost_warn: 2.0,
         profile: "coding".into(),
         keep_alive: "30m".into(),
         fallback_model: String::new(),
@@ -196,6 +199,7 @@ pub fn load() -> Config {
         if let Some(v) = n("ctx") { c.ctx = v; c.ctx_set = true }
         if let Some(v) = n("compact_at") { c.compact_at = v }
         if let Some(v) = n("cloud_ctx") { c.cloud_ctx = v }
+        if let Some(v) = t.get("cost_warn").and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64))) { c.cost_warn = v }
         if let Some(v) = s("profile") { c.profile = v }
         if let Some(v) = s("keep_alive") { c.keep_alive = v }
         if let Some(v) = s("fallback_model") { c.fallback_model = v }

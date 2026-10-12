@@ -58,7 +58,7 @@ const COMMANDS: [(&str, &str); 37] = [
     ("/new", "new session tab"), ("/close", "close this tab"), ("/mode", "ask · auto-edit · auto · plan"),
     ("/compact", "shrink the conversation"), ("/clear", "start this tab fresh"), ("/undo", "undo the agent's file changes"),
     ("/diff", "show the agent's file changes"), ("/cwd", "this tab's working folder"), ("/think", "thinking on/off, or an effort level"),
-    ("/tokens", "context use"), ("/tier", "this tab's context window"), ("/profile", "tool set: coding, general, browser, all"),
+    ("/tokens", "context use, tokens and cost"), ("/tier", "this tab's context window"), ("/profile", "tool set: coding, general, browser, all"),
     ("/role", "give this tab a role"), ("/map", "map of sessions and messages"), ("/layout", "tabs or grid"),
     ("/msg", "message another tab"), ("/sessions", "saved sessions"), ("/allow", "auto-approve rules"), ("/sandbox", "what commands and tools may touch"),
     ("/release", "let held messages through"), ("/pause", "hold automatic messaging"), ("/resume", "resume messaging"),
@@ -1123,7 +1123,11 @@ impl App {
             "/tokens" => {
                 let (t, r) = { let t = lock(&m.turn); (t.tokens, t.ratio) };
                 let now = context::estimate(&lock(&m.msgs), r);
-                self.note(&a, { let (c, at) = self.hub.ctx_for(&m, false); format!("last request {t}/{c} · now ≈{now} · compacts at {at}") });
+                let (u, pct) = { let t = lock(&m.turn); (t.usage, t.plan_pct) };
+                let all = *lock(&self.hub.spent);
+                let plan = pct.map(|p| format!("\nChatGPT plan: {p:.0}% of the current window used")).unwrap_or_default();
+                self.note(&a, { let (c, at) = self.hub.ctx_for(&m, false);
+                    format!("last request {t}/{c} · now ≈{now} · compacts at {at}\nthis tab: {}\nsession: {}{plan}", u.line(), all.line()) });
             }
             "/compact" if busy => self.err(&a, "busy: wait for the turn to end or press Esc"),
             "/compact" => {
@@ -2230,8 +2234,9 @@ then it's `git push -u origin {branch}` and `gh pr create --fill`.");
         // name, role and model are in the pane's title
         let mut out = format!(" {dir} · [{mode}]{profile}{think} · [{}{}] {live}/{ctx}",
                               "█".repeat(bar), "░".repeat(20 - bar));
-        let cost = lock(&m.turn).cost;
-        if cost > 0.0 { out += &if cost < 0.01 { format!(" · ${cost:.4}") } else { format!(" · ${cost:.2}") } }
+        let (usage, pct) = { let t = lock(&m.turn); (t.usage, t.plan_pct) };
+        out += &usage.status();
+        if let Some(p) = pct { out += &format!(" · plan {p:.0}%") }
         if tps > 0.0 { out += &format!(" · {tps} tok/s") }
         if !holder.is_empty() { out += &format!(" · model: {holder}") }
         if busy > 0 { out += &format!(" · {busy} other busy") }

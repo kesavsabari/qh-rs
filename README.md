@@ -100,6 +100,7 @@ All of these are optional.
 
 ```toml
 mode = "auto-edit"
+cost_warn = 2.00  # warn once when API-key spend passes $2 this session (0 = off); /tokens shows it
 
 # when a long turn ends or a permission waits while you look elsewhere: bell + terminal
 # notification ("auto"), also notify-send / osascript ("desktop"), or "off"

@@ -66,7 +66,8 @@ pub struct Settings {
 }
 
 pub struct Turn {
-    pub cost: f64, // $ spent on paid models this session
+    pub usage: crate::usage::Usage, // this tab's tokens and $ this run
+    pub plan_pct: Option<f64>, // ChatGPT plan window used, when the backend says
     pub browsing: bool, // the model has opened a page: send the rest of the browser tools
     pub tokens: u64,
     pub chars_at: usize,
@@ -189,6 +190,9 @@ pub struct Hub {
     pub paused: AtomicBool,
     pub auto_yes: bool,
     mode: AtomicU8, // index into MODES
+    /// every tab's tokens and $ this run, closed tabs included
+    pub spent: Mutex<crate::usage::Usage>,
+    pub cost_warn: crate::usage::Warn,
 }
 
 fn hubs_dir() -> PathBuf {
@@ -204,6 +208,7 @@ impl Hub {
             written: Mutex::new(HashMap::new()), links: Mutex::new(VecDeque::new()),
             mode: AtomicU8::new(MODES.iter().position(|m| *m == cfg_mode).unwrap_or(0) as u8),
             paused: AtomicBool::new(false), auto_yes,
+            spent: Mutex::new(Default::default()), cost_warn: Default::default(),
         })
     }
 
@@ -1019,7 +1024,7 @@ impl Fifo {
 fn new_turn(path: &Path) -> Turn {
     let dir = path.parent().unwrap_or(Path::new(".")).join("checkpoints")
         .join(path.file_stem().unwrap_or_default());
-    Turn { cost: 0.0, browsing: false, tokens: 0, chars_at: 0, streamed: 0, ratio: 3.5, tps: 0.0, changed: BTreeSet::new(), ckpt: Checkpoints::new(dir) }
+    Turn { usage: Default::default(), plan_pct: None, browsing: false, tokens: 0, chars_at: 0, streamed: 0, ratio: 3.5, tps: 0.0, changed: BTreeSet::new(), ckpt: Checkpoints::new(dir) }
 }
 
 fn squash(s: &str, n: usize) -> String {

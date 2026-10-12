@@ -45,7 +45,7 @@ const HELP: &str = "/new <name> [profile]  new session (Ctrl+N: instant, auto-na
 /image <path> (Ctrl+V)  attach an image to your next message; Backspace on an empty line removes it
 /map (Ctrl+B)          live map of sessions, messages and shared folders
 /team (Ctrl+T)         start or join a team; in a team, the team map
-/project (Ctrl+P)      switch project: team and personal; the others keep running (Ctrl+Space flips team ⇄ personal)
+/project (Ctrl+P)      switch project: team and personal; the others keep running (Ctrl+Space or Ctrl+] flips team ⇄ personal)
 /anyway                this tab was paused because a teammate is changing the same function: go ahead anyway
 /answers [auto|ask|off] whether teammates' agents may ask yours (answered from a read-only copy, 20 an hour)
 /promise [fn what]     make a teammate's last answer (or your own words) a checked promise: edits that break it are held
@@ -829,7 +829,9 @@ impl App {
                 self.quit = true;
                 return;
             }
-            if k.code == KeyCode::Char(' ') && k.modifiers.contains(Mods::CONTROL) {
+            // Ctrl+] too: input methods (fcitx, macOS input sources) often take Ctrl+Space.
+            // Most terminals send Ctrl+] as 0x1D, which arrives as Ctrl+5.
+            if matches!(k.code, KeyCode::Char(' ' | ']' | '5')) && k.modifiers.contains(Mods::CONTROL) {
                 return self.flip_space();
             }
             // a session tab: Shift/Alt+←/→ leave the map for the sessions
@@ -951,7 +953,7 @@ impl App {
             KeyCode::Char('g') if ctrl => self.grid = !self.grid,
             KeyCode::Char('b') if ctrl => self.map = Some(crate::map::Map::default()),
             KeyCode::Char('t') if ctrl => self.open_map(),
-            KeyCode::Char(' ') if ctrl => self.flip_space(),
+            KeyCode::Char(' ' | ']' | '5') if ctrl => self.flip_space(),
             KeyCode::Char('p') if ctrl => self.command("/project"),
             KeyCode::BackTab => {
                 let m = self.hub.cycle_mode();
@@ -2250,7 +2252,7 @@ $ARGUMENTS is replaced by what you type after the command".into()
             if !ok(&self.last_personal) {
                 match recent_projects().into_iter().map(|(p, _)| p).find(|p| ok(p) && *p != self.project) {
                     Some(p) => self.last_personal = p,
-                    None => return self.note(&a, "no personal project yet: Ctrl+P opens one, then Ctrl+Space flips between them"),
+                    None => return self.note(&a, "no personal project yet: Ctrl+P opens one, then Ctrl+Space or Ctrl+] flips between them"),
                 }
             }
             let p = self.last_personal.clone();

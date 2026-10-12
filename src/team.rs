@@ -79,6 +79,9 @@ pub struct Peer {
     epoch: u64,                             // which team key generation their folder is on
     removed: Vec<String>,                   // who they say was removed from the team
     chat: Vec<(u64, u64, String)>,          // their team chat lines: id, ts, text
+    dms: Vec<(u64, u64, String)>,           // their direct messages: id, ts, box (sealed for one person; not even the team key opens it)
+    groups: Vec<(String, Vec<String>)>,     // groups they made: id, the group sealed for each member
+    gmsgs: Vec<(u64, u64, String, String)>, // their group lines: id, ts, group id, box (sealed with that group's key)
     notes: Vec<(u64, String, String, Vec<String>)>, // their change notes: id, text, file, functions/names changed
     pub claims: HashMap<String, Claims>,    // session -> what it changed lately
     pub uses: HashMap<String, HashMap<String, u64>>, // session -> names its fresh code uses -> when
@@ -105,14 +108,37 @@ pub struct Sheet {
     pub ts: u64,
 }
 
-/// A message from a teammate into one of our sessions, waiting for our answer.
-#[derive(Clone, Debug)]
+/// A message from a teammate into one of our sessions, waiting for our answer: a request for
+/// work (only ever delivered when we accept it) or, with /answers ask, a question.
+#[derive(Clone, Debug, Default)]
 pub struct Incoming {
     pub from: String,
     pub id: u64,
     pub session: String,
     pub text: String,
     pub question: Option<Question>, // a question for our agent, answered from a side copy
+    pub ts: u64,
+    pub from_session: String, // the session of theirs that sent it ("" = the person)
+    pub replied: bool,        // we wrote back but haven't accepted or declined yet
+}
+
+/// A private group: only its members hold its key.
+#[derive(Clone, Debug)]
+struct Group {
+    name: String,
+    members: Vec<String>, // logins, the owner included
+    owner: String,
+    key: Key,
+}
+
+/// One line in a direct-message or group channel.
+#[derive(Clone, Debug, PartialEq)]
+struct Msg {
+    ts: u64,
+    chan: String, // "@login" (a DM with them) or "+<group id>"
+    from: String,
+    text: String,
+    id: u64,      // the sender's id for it
 }
 
 /// A teammate's agent asking one of our sessions something.
@@ -187,6 +213,15 @@ struct State {
     promises: Vec<Promise>,           // what our sessions count on teammates keeping true, published
     last_answer: HashMap<String, (String, Vec<String>, String)>, // session -> (who, names, answer): /promise turns it into promises
     unread: usize,
+    secret: Option<x25519_dalek::StaticSecret>, // our member key: opens what teammates sealed for us alone
+    my_dms: Vec<Value>,             // direct messages, published: {id, ts, box}
+    my_groups: Vec<Value>,          // groups we made, published: {gid, boxes}
+    my_gmsgs: Vec<Value>,           // our group lines, published: {id, ts, g, box}
+    groups: HashMap<String, Group>, // group id -> group, for groups we're in
+    msgs: Vec<Msg>,                 // direct-message and group lines, oldest first
+    msg_ids: std::collections::HashSet<(String, u64)>, // (sender, id) boxes already tried
+    chan_unread: HashMap<String, usize>, // DM / group channel -> unread lines
+    pinged: Vec<String>,            // channels with an unread @mention of us
     dirty: bool,                    // something to publish now (sent message, decision)
     running: std::sync::Arc<AtomicBool>,
     finished: std::sync::Arc<AtomicBool>,
@@ -564,6 +599,12 @@ fn parse_data(p: &mut Peer, d: &Value) {
     }
     p.chat = d["chat"].as_array().into_iter().flatten().map(|c| (
         c["id"].as_u64().unwrap_or(0), c["ts"].as_u64().unwrap_or(0), c["text"].as_str().unwrap_or("").to_string())).collect();
+    p.dms = d["dms"].as_array().into_iter().flatten().map(|c| (
+        c["id"].as_u64().unwrap_or(0), c["ts"].as_u64().unwrap_or(0), c["box"].as_str().unwrap_or("").to_string())).collect();
+    p.groups = d["groups"].as_array().into_iter().flatten().map(|g| (g["gid"].as_str().unwrap_or("").to_string(),
+        g["boxes"].as_array().into_iter().flatten().filter_map(|b| b.as_str().map(String::from)).collect())).collect();
+    p.gmsgs = d["gmsgs"].as_array().into_iter().flatten().map(|c| (c["id"].as_u64().unwrap_or(0), c["ts"].as_u64().unwrap_or(0),
+        c["g"].as_str().unwrap_or("").to_string(), c["box"].as_str().unwrap_or("").to_string())).collect();
     if let Some(c) = d["claims"].as_object() {
         p.claims = c.iter().map(|(sess, files)| (sess.clone(), files.as_object().into_iter().flatten().map(|(f, fns)| (f.clone(),
             fns.as_object().into_iter().flatten().map(|(n, t)| (n.clone(), t.as_u64().unwrap_or(0))).collect())).collect())).collect();
@@ -601,7 +642,7 @@ pub const ROLES: [&str; 3] = ["viewer", "member", "trusted"];
 pub fn role_help(role: &str) -> &'static str {
     match role {
         "viewer" => "sees your sessions and who's online; can't write into them",
-        "trusted" => "sees your sessions; what they write goes straight in",
+        "trusted" => "sees your sessions; their agents' questions are answered without asking (work still waits for you to accept)",
         _ => "sees your sessions; you allow each thing they write",
     }
 }
@@ -736,8 +777,11 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks) -> Result<String, Strin
         last_answer: HashMap::new(),
         answers: std::fs::read_to_string(per_repo("team-answers", &repo)).ok().map(|s| s.trim().to_string())
             .filter(|s| ["auto", "ask", "off"].contains(&s.as_str())).unwrap_or_else(|| "auto".into()),
+        secret: Some(secret.clone()), my_dms: vec![], my_groups: vec![], my_gmsgs: vec![], groups: HashMap::new(), msgs: vec![],
+        msg_ids: Default::default(), chan_unread: HashMap::new(), pinged: vec![],
         dirty: true, running: running.clone(), finished: finished.clone(),
     });
+    with(&repo, load_private);
     set_current(&repo);
     let (repo2, me2) = (repo.clone(), me.clone());
     let (live_tx, live_rx) = std::sync::mpsc::channel();
@@ -778,6 +822,9 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks) -> Result<String, Strin
                     d["acks"] = json!(s.seen);
                     d["roles"] = json!(s.roles);
                     d["chat"] = Value::from(s.my_chat.clone());
+                    d["dms"] = Value::from(s.my_dms.clone());
+                    d["groups"] = Value::from(s.my_groups.clone());
+                    d["gmsgs"] = Value::from(s.my_gmsgs.clone());
                     d["notes"] = Value::from(s.my_notes.clone());
                     d["claims"] = json!(s.claims);
                     d["uses"] = json!(s.uses);
@@ -1083,7 +1130,294 @@ fn save_chat(repo: &str) {
     with(repo, |s| {
         let keep: Vec<_> = s.chat.iter().rev().take(300).rev().cloned().collect();
         save_json("team-chat", repo, &json!(keep));
+        save_private(s);
     });
+}
+
+// ---- direct messages and groups ----
+// The team key opens everything on the board, so private lines get a second lock inside it:
+// a direct message is sealed with the key only its two people share (X25519 between their member
+// keys, see teamcrypto::seal_for); a group has its own random key, sealed that way for each
+// member by whoever made it. A teammate who isn't in it sees only opaque boxes (and how many).
+
+/// Direct messages and group lines kept on disk (0600): the channels, our published boxes and the
+/// group keys, so a restart neither forgets them nor stops offering them to an offline teammate.
+fn save_private(s: &State) {
+    if cfg!(test) || s.secret.is_none() { return } // tests write nothing to the real state folder
+    let keep = s.msgs.len().saturating_sub(1000);
+    let msgs: Vec<Value> = s.msgs[keep..].iter().map(|m| json!([m.ts, m.chan, m.from, m.text, m.id])).collect();
+    let groups: serde_json::Map<String, Value> = s.groups.iter().map(|(id, g)| (id.clone(), json!({
+        "name": g.name, "members": g.members, "owner": g.owner, "key": crate::oauth::b64url(&g.key)}))).collect();
+    save_json("team-private", &s.repo, &json!({"msgs": msgs, "groups": groups, "dms": s.my_dms, "my_groups": s.my_groups, "gmsgs": s.my_gmsgs}));
+}
+
+fn load_private(s: &mut State) {
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(per_repo("team-private", &s.repo)).unwrap_or_default()).unwrap_or_default();
+    s.msgs = v["msgs"].as_array().into_iter().flatten().map(|m| Msg {
+        ts: m[0].as_u64().unwrap_or(0), chan: m[1].as_str().unwrap_or("").into(), from: m[2].as_str().unwrap_or("").into(),
+        text: m[3].as_str().unwrap_or("").into(), id: m[4].as_u64().unwrap_or(0),
+    }).collect();
+    for (id, g) in v["groups"].as_object().into_iter().flatten() {
+        let Some(key) = g["key"].as_str().and_then(|k| crate::oauth::b64url_decode(k).try_into().ok()) else { continue };
+        s.groups.insert(id.clone(), Group { name: g["name"].as_str().unwrap_or("").into(), owner: g["owner"].as_str().unwrap_or("").into(),
+            members: g["members"].as_array().into_iter().flatten().filter_map(|x| x.as_str().map(String::from)).collect(), key });
+    }
+    s.my_dms = v["dms"].as_array().cloned().unwrap_or_default();
+    s.my_groups = v["my_groups"].as_array().cloned().unwrap_or_default();
+    s.my_gmsgs = v["gmsgs"].as_array().cloned().unwrap_or_default();
+}
+
+/// Whether `text` mentions `me`: `@me` or `@team`, as a word of its own (an email address like
+/// `x@me.com` or `@me.com` doesn't count). GitHub logins ignore case.
+pub fn pings(text: &str, me: &str) -> bool {
+    for (i, _) in text.match_indices('@') {
+        if text[..i].chars().next_back().is_some_and(|c| c.is_alphanumeric() || "._-+%".contains(c)) { continue }
+        let rest = &text[i + 1..];
+        let name: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '-' || *c == '_').collect();
+        let after = &rest[name.len()..];
+        // "@bob.example": a domain, not bob
+        if after.strip_prefix('.').and_then(|a| a.chars().next()).is_some_and(|c| c.is_alphanumeric()) { continue }
+        if !name.is_empty() && (name.eq_ignore_ascii_case(me) || name.eq_ignore_ascii_case("team")) { return true }
+    }
+    false
+}
+
+/// A teammate's text, safe to show on one line: no control characters (newlines become spaces).
+fn plain(text: &str) -> String {
+    text.chars().map(|c| if c == '\n' || c == '\t' { ' ' } else { c }).filter(|c| !c.is_control()).collect()
+}
+
+fn clip_to(s: &str, n: usize) -> String {
+    let s = plain(s);
+    if s.chars().count() <= n { s } else { format!("{}…", s.chars().take(n.saturating_sub(1)).collect::<String>()) }
+}
+
+/// Add a line to a private channel (once); a teammate's line counts as unread, and as a ping when it mentions us.
+fn push_msg(s: &mut State, mut m: Msg) -> bool {
+    if s.msgs.iter().any(|x| x.from == m.from && x.id == m.id && x.chan == m.chan) { return false }
+    m.text = m.text.chars().filter(|c| !c.is_control() || *c == '\n').collect();
+    if m.from != s.me {
+        *s.chan_unread.entry(m.chan.clone()).or_default() += 1;
+        if pings(&m.text, &s.me) && !s.pinged.contains(&m.chan) { s.pinged.push(m.chan.clone()) }
+    }
+    let at = s.msgs.iter().rposition(|x| x.ts <= m.ts).map_or(0, |i| i + 1);
+    s.msgs.insert(at, m);
+    let n = s.msgs.len();
+    if n > 1000 { s.msgs.drain(..n - 1000); }
+    true
+}
+
+/// What `p` sealed for us alone: groups they put us in, direct messages, lines in our groups.
+/// Returns whether anything was new.
+fn take_private(s: &mut State, login: &str, p: &Peer) -> bool {
+    let Some(secret) = s.secret.clone() else { return false };
+    if p.pub_key.is_empty() || !p.joined { return false }
+    let (me, repo) = (s.me.clone(), s.repo.clone());
+    let mut new = false;
+    for (gid, boxes) in &p.groups {
+        if gid.is_empty() || s.groups.contains_key(gid) { continue }
+        // one box per member; ours is the one that opens
+        let Some(v) = boxes.iter().find_map(|b| tc::open_from(&secret, &p.pub_key, &repo, "group", login, &me, b))
+            .and_then(|x| serde_json::from_slice::<Value>(&x).ok()) else { continue };
+        let members: Vec<String> = v["members"].as_array().into_iter().flatten().filter_map(|x| x.as_str().map(String::from)).collect();
+        let key: Option<Key> = v["key"].as_str().and_then(|k| crate::oauth::b64url_decode(k).try_into().ok());
+        let (Some(key), true) = (key, v["gid"] == gid.as_str() && members.contains(&me) && members.iter().any(|m| m == login)) else { continue };
+        let name = clip_to(v["name"].as_str().unwrap_or("group"), 40);
+        log_to(&repo, &format!("{login} added you to the group {name} ({})", members.join(", ")));
+        alert(format!("qh: {login} added you to the group {name}"));
+        s.groups.insert(gid.clone(), Group { name, members, owner: login.into(), key });
+        new = true;
+    }
+    for (id, ts, b) in &p.dms {
+        if !s.msg_ids.insert((format!("dm:{login}"), *id)) { continue }
+        // most boxes are for someone else and don't open for us
+        let Some(text) = tc::open_from(&secret, &p.pub_key, &repo, "dm", login, &me, b).and_then(|x| String::from_utf8(x).ok()) else { continue };
+        if push_msg(s, Msg { ts: *ts, chan: format!("@{login}"), from: login.into(), text: text.clone(), id: *id }) {
+            new = true;
+            alert(format!("qh: {login} (private): {}", clip_to(&text, 80)));
+        }
+    }
+    for (id, ts, gid, b) in &p.gmsgs {
+        // a group we don't know yet isn't marked tried: its key may come with its owner's folder
+        let Some(g) = s.groups.get(gid).filter(|g| g.members.iter().any(|m| m == login)) else { continue };
+        let (gkey, gname) = (g.key, g.name.clone());
+        if !s.msg_ids.insert((format!("g:{login}"), *id)) { continue }
+        let Some(text) = tc::open(&gkey, &format!("gmsg:{repo}:{gid}:{login}"), b).and_then(|x| String::from_utf8(x).ok()) else { continue };
+        if push_msg(s, Msg { ts: *ts, chan: format!("+{gid}"), from: login.into(), text: text.clone(), id: *id }) {
+            new = true;
+            if pings(&text, &me) { alert(format!("qh: {login} mentioned you in {gname}: {}", clip_to(&text, 80))) }
+        }
+    }
+    new
+}
+
+fn msg_id(s: &State) -> u64 {
+    let last = s.my_dms.iter().chain(&s.my_gmsgs).filter_map(|m| m["id"].as_u64()).max().unwrap_or(0);
+    (now() * 1000).max(last + 1)
+}
+
+/// Seal `text` for `to` alone and publish it with our next write.
+fn dm_locked(s: &mut State, to: &str, text: &str) -> Result<(), String> {
+    let to = to.trim_start_matches('@');
+    let secret = s.secret.clone().ok_or("team mode is off")?;
+    let p = s.peers.get(to).filter(|p| p.joined && !p.pub_key.is_empty()).ok_or_else(|| format!("no teammate {to}"))?;
+    let sealed = tc::seal_for(&secret, &p.pub_key, &s.repo, "dm", &s.me, to, text.as_bytes()).ok_or("couldn't seal the message")?;
+    let (id, ts) = (msg_id(s), now());
+    s.my_dms.push(json!({"id": id, "ts": ts, "box": sealed}));
+    let n = s.my_dms.len();
+    if n > 100 { s.my_dms.drain(..n - 100); }
+    let me = s.me.clone();
+    push_msg(s, Msg { ts, chan: format!("@{to}"), from: me, text: text.into(), id });
+    s.dirty = true;
+    save_private(s);
+    Ok(())
+}
+
+/// Make a group of us and `logins`: a fresh key, sealed for each of them alone.
+fn group_locked(s: &mut State, name: &str, logins: &[String]) -> Result<String, String> {
+    let secret = s.secret.clone().ok_or("team mode is off")?;
+    let name = clip_to(name.trim().trim_start_matches(['#', '+']), 40);
+    if name.is_empty() || logins.is_empty() { return Err("usage: /team group <name> <login> <login>…".into()) }
+    let mut members = vec![s.me.clone()];
+    for l in logins {
+        let l = l.trim_start_matches('@');
+        if !s.peers.get(l).is_some_and(|p| p.joined && !p.pub_key.is_empty()) { return Err(format!("no teammate {l}")) }
+        if !members.iter().any(|m| m == l) { members.push(l.to_string()) }
+    }
+    if members.len() < 2 { return Err("a group needs at least one teammate besides you".into()) }
+    if s.groups.values().any(|g| g.name.eq_ignore_ascii_case(&name)) { return Err(format!("there's already a group {name}")) }
+    let gid = crate::oauth::b64url(&crate::oauth::random()[..9]);
+    let key = tc::new_team_key();
+    let def = json!({"gid": gid, "name": name, "members": members, "key": crate::oauth::b64url(&key)}).to_string();
+    let mut boxes = vec![];
+    for m in members.iter().filter(|m| **m != s.me) {
+        let pk = &s.peers[m].pub_key;
+        boxes.push(tc::seal_for(&secret, pk, &s.repo, "group", &s.me, m, def.as_bytes()).ok_or("couldn't seal the group key")?);
+    }
+    s.my_groups.push(json!({"gid": gid, "boxes": boxes}));
+    s.groups.insert(gid, Group { name: name.clone(), members: members.clone(), owner: s.me.clone(), key });
+    s.dirty = true;
+    save_private(s);
+    Ok(format!("group {name}: {} · only its members can read it", members.join(", ")))
+}
+
+fn group_send_locked(s: &mut State, gid: &str, text: &str) -> Result<(), String> {
+    let g = s.groups.get(gid).ok_or("no such group")?;
+    if !g.members.contains(&s.me) { return Err("you're not in that group".into()) }
+    let sealed = tc::seal(&g.key, &format!("gmsg:{}:{gid}:{}", s.repo, s.me), text.as_bytes());
+    let (id, ts) = (msg_id(s), now());
+    s.my_gmsgs.push(json!({"id": id, "ts": ts, "g": gid, "box": sealed}));
+    let n = s.my_gmsgs.len();
+    if n > 100 { s.my_gmsgs.drain(..n - 100); }
+    let me = s.me.clone();
+    push_msg(s, Msg { ts, chan: format!("+{gid}"), from: me, text: text.into(), id });
+    s.dirty = true;
+    save_private(s);
+    Ok(())
+}
+
+/// `/dm <login> <text>`: a private message, readable only by the two of you.
+pub fn dm_send(to: &str, text: &str) -> Result<String, String> {
+    let to = to.trim_start_matches('@').to_string();
+    cur(|s| {
+        dm_locked(s, &to, text)?;
+        let online = s.peers.get(&to).is_some_and(|p| p.online);
+        Ok(format!("→ @{to} (private){}", if online { "" } else { ": they're offline; it reaches them when they're back" }))
+    }).ok_or("team mode is off".to_string())?
+}
+
+/// `/team group <name> <login>…`
+pub fn group_create(name: &str, logins: &[String]) -> Result<String, String> {
+    cur(|s| group_locked(s, name, logins)).ok_or("team mode is off".to_string())?
+}
+
+/// Our groups: (name, members).
+pub fn groups() -> Vec<(String, Vec<String>)> {
+    let mut v: Vec<(String, Vec<String>)> = cur(|s| s.groups.values().map(|g| (g.name.clone(), g.members.clone())).collect()).unwrap_or_default();
+    v.sort();
+    v
+}
+
+/// A chat channel in the team room.
+#[derive(Clone, Debug)]
+pub struct Channel {
+    pub id: String,    // "#team", "@login" or "+<group id>"
+    pub label: String,
+    pub unread: usize,
+    pub pinged: bool,  // an unread line mentions you
+    pub online: bool,  // a DM: they're online (lines still reach them later if not)
+}
+
+fn channels_locked(s: &State) -> Vec<Channel> {
+    let mut out = vec![Channel { id: "#team".into(), label: "# team".into(), unread: s.unread, pinged: s.pinged.iter().any(|c| c == "#team"), online: true }];
+    let mut peers: Vec<&Peer> = s.peers.values().filter(|p| p.joined && p.login != s.me).collect();
+    peers.sort_by_key(|p| (!p.online, p.login.clone()));
+    for p in peers {
+        let id = format!("@{}", p.login);
+        out.push(Channel { label: id.clone(), unread: s.chan_unread.get(&id).copied().unwrap_or(0), pinged: s.pinged.contains(&id), online: p.online, id });
+    }
+    let mut gs: Vec<(&String, &Group)> = s.groups.iter().collect();
+    gs.sort_by_key(|(_, g)| g.name.to_lowercase());
+    for (gid, g) in gs {
+        let id = format!("+{gid}");
+        out.push(Channel { label: format!("+ {}", g.name), unread: s.chan_unread.get(&id).copied().unwrap_or(0), pinged: s.pinged.contains(&id), online: true, id });
+    }
+    out
+}
+
+pub fn channels() -> Vec<Channel> {
+    cur(|s| channels_locked(s)).unwrap_or_default()
+}
+
+/// A channel's lines, oldest first: (when, who, text, mentions you); "you" for your own.
+pub fn channel_msgs(chan: &str) -> Vec<(String, String, String, bool)> {
+    cur(|s| {
+        let who = |f: &String| if *f == s.me { "you".to_string() } else { f.clone() };
+        if chan == "#team" {
+            return s.chat.iter().map(|(t, f, x)| (ago(*t), who(f), plain(x), *f != s.me && pings(x, &s.me))).collect();
+        }
+        s.msgs.iter().filter(|m| m.chan == chan).map(|m| (ago(m.ts), who(&m.from), plain(&m.text), m.from != s.me && pings(&m.text, &s.me))).collect()
+    }).unwrap_or_default()
+}
+
+/// Who's in a channel, for its header: the group's members, or the DM's two people.
+pub fn channel_members(chan: &str) -> Vec<String> {
+    cur(|s| match chan.strip_prefix('+') {
+        Some(gid) => s.groups.get(gid).map(|g| g.members.clone()).unwrap_or_default(),
+        None => chan.strip_prefix('@').map(|l| vec![s.me.clone(), l.to_string()]).unwrap_or_default(),
+    }).unwrap_or_default()
+}
+
+pub fn channel_read(chan: &str) {
+    cur(|s| read_locked(s, chan));
+}
+
+fn read_locked(s: &mut State, chan: &str) {
+    if chan == "#team" { s.unread = 0 } else { s.chan_unread.remove(chan); }
+    s.pinged.retain(|c| c != chan);
+}
+
+/// Write in a channel: the team chat, a DM or a group. To people only: nothing runs.
+pub fn channel_send(chan: &str, text: &str) -> Result<String, String> {
+    if chan == "#team" { return chat_send(text).map(|_| String::new()) }
+    if let Some(login) = chan.strip_prefix('@') { return dm_send(login, text) }
+    let gid = chan.strip_prefix('+').ok_or("no such channel")?.to_string();
+    cur(|s| group_send_locked(s, &gid, text).map(|_| String::new())).ok_or("team mode is off".to_string())?
+}
+
+static ALERTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Something worth a desktop notification (the UI decides whether to show it: focus, `notify`).
+fn alert(text: String) {
+    let mut a = ALERTS.lock().unwrap();
+    a.push(text);
+    let n = a.len();
+    if n > 20 { a.drain(..n - 20); }
+}
+
+/// The notifications waiting to be shown, taken.
+pub fn take_alerts() -> Vec<String> {
+    std::mem::take(&mut *ALERTS.lock().unwrap())
 }
 
 /// One teammate's folder, read from git or sent live over the link: presence, newcomers, chat,
@@ -1136,11 +1470,20 @@ fn take_in(repo: &str, me: &String, key: Option<Key>, mut p: Peer, hooks: &Hooks
     for (id, ts, text) in fresh {
         if !s.chat.iter().any(|(t, f, x)| t == ts && f == login && x == text) {
             s.chat.push((*ts, login.clone(), text.clone()));
-            if seen_before { s.unread += 1; *new_chat = true }
+            if seen_before {
+                s.unread += 1;
+                *new_chat = true;
+                if pings(text, me) {
+                    if !s.pinged.iter().any(|c| c == "#team") { s.pinged.push("#team".into()) }
+                    alert(format!("qh: {login} mentioned you: {}", clip_to(text, 80)));
+                }
+            }
         }
         s.chat_seen.insert(login.clone(), *id);
     }
     s.chat_seen.entry(login.clone()).or_insert(0);
+    // direct messages and group lines only we (and the group) can open
+    if take_private(s, login, &p) { *new_chat = true }
     // change notes: what they changed, for our agents (the first read only catches up)
     let upto = s.notes_seen.get(login).copied();
     for (id, text, file, names) in p.notes.iter().filter(|n| upto.is_none_or(|u| n.0 > u)) {
@@ -1162,7 +1505,8 @@ fn take_in(repo: &str, me: &String, key: Option<Key>, mut p: Peer, hooks: &Hooks
             continue;
         }
         let mut inc = Incoming { from: login.clone(), id, session: m["session"].as_str().unwrap_or("main").into(),
-                                 text: m["text"].as_str().unwrap_or("").into(), question: None };
+                                 text: m["text"].as_str().unwrap_or("").into(), question: None, ts: m["ts"].as_u64().unwrap_or_else(now),
+                                 from_session: m["from_session"].as_str().unwrap_or("").into(), replied: false };
         let role = s.roles.get(login).map(String::as_str).unwrap_or("member");
         if m["kind"] == "a" {
             // an answer to one of our questions
@@ -1180,6 +1524,7 @@ fn take_in(repo: &str, me: &String, key: Option<Key>, mut p: Peer, hooks: &Hooks
                 s.last_answer.insert(q.session.clone(), (from.clone(), relied.clone(), format!("Q: {} A: {}", q.q, inc.text)));
             }
             let head = inc.text.lines().next().unwrap_or("").chars().take(100).collect::<String>();
+            alert(format!("qh: {from} answered: {}", clip_to(&head, 80)));
             if q.session.is_empty() {
                 say_locked(repo, s, hooks, format!("{from} answered you: {head}"));
             } else {
@@ -1209,7 +1554,9 @@ If this answer matters a lot, the user can make it a checked promise with /promi
             }
             if s.answers == "ask" && role != "trusted" {
                 inc.text = format!("question: {}", q.text);
+                inc.from_session = q.from_session.clone();
                 inc.question = Some(q);
+                alert(format!("qh: {who} asks your {}: {}", inc.session, clip_to(&inc.text, 80)));
                 (hooks.ask)(&inc);
                 s.pending.push(inc);
                 continue;
@@ -1221,16 +1568,16 @@ If this answer matters a lot, the user can make it a checked promise with /promi
             (hooks.answer)(q);
             continue;
         }
-        if role == "trusted" {
-            (hooks.deliver)(&inc.session, &format!("[from {} via team] {}", inc.from, inc.text));
-            s.seen.insert(login.clone(), id);
-            s.dirty = true;
-        } else if role == "viewer" {
+        // work for one of our sessions: it waits in Requests until we accept it, whatever their
+        // role and whatever mode the session runs in (a "trusted" teammate's questions skip the
+        // queue; their work never does)
+        if role == "viewer" {
             say_locked(repo, s, hooks, format!("dropped {login}'s request to your {}: they're view only", inc.session));
             s.seen.insert(login.clone(), id);
             s.dirty = true;
         } else {
             log_to(repo, &format!("{} asks your {}: {}", inc.from, inc.session, inc.text));
+            alert(format!("qh: {} asks: {}", inc.from, clip_to(bare(&inc.text), 80)));
             (hooks.ask)(&inc);
             s.pending.push(inc);
         }
@@ -1289,6 +1636,11 @@ fn save_seen(repo: &str) {
 /// Ask a teammate's agent to do something in one of their sessions; it travels with our next
 /// write and runs on their machine once they allow it.
 pub fn send(to: &str, session: &str, text: &str) -> Result<String, String> {
+    send_from(to, session, text, "")
+}
+
+/// `send` from one of our sessions (its agent used tell_team), so they see where it came from.
+pub fn send_from(to: &str, session: &str, text: &str, from_session: &str) -> Result<String, String> {
     cur(|s| {
         if s.key.is_none() {
             return Err("you're not in the team yet: waiting to be let in".to_string());
@@ -1303,10 +1655,10 @@ pub fn send(to: &str, session: &str, text: &str) -> Result<String, String> {
         let online = p.online;
         s.next_id += 1;
         let id = s.next_id;
-        s.outbox.push(json!({"id": id, "to": to, "session": session, "text": text, "ts": now()}));
+        s.outbox.push(json!({"id": id, "to": to, "session": session, "text": text, "from_session": from_session, "ts": now()}));
         s.dirty = true;
         Ok((format!("you asked {to}'s {session}: {text}"),
-            format!("asked {to}'s {session}: it runs on their machine once they allow it{}",
+            format!("asked {to}'s {session}: it waits in their Requests and runs on their machine only once they accept it{}",
                     if online { "" } else { " (they're offline, so it waits for them)" })))
     }).ok_or("team mode is off".to_string())?.map(|(log_line, msg)| { log(&log_line); msg })
 }
@@ -1330,17 +1682,13 @@ pub fn chat_send(text: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The team chat, oldest first: (when, who, text); "you" for your own lines.
-pub fn chat() -> Vec<(String, String, String)> {
-    cur(|s| s.chat.iter().map(|(t, f, x)| (ago(*t), if *f == s.me { "you".into() } else { f.clone() }, x.clone())).collect()).unwrap_or_default()
-}
-
+/// Unread lines in every channel: the team chat, DMs and groups.
 pub fn chat_unread() -> usize {
-    cur(|s| s.unread).unwrap_or(0)
+    cur(|s| unread_locked(s)).unwrap_or(0)
 }
 
-pub fn chat_read() {
-    cur(|s| s.unread = 0);
+fn unread_locked(s: &State) -> usize {
+    s.unread + s.chan_unread.values().sum::<usize>()
 }
 
 /// Newcomers waiting for "let in".
@@ -1360,37 +1708,87 @@ pub fn not_now(login: &str) {
     log(&format!("you didn't let {login} in"));
 }
 
-/// Our answer to a waiting message: "once", "deny" or "always" (trust that person from now on).
-/// Returns (session, text) to deliver unless denied.
+/// A request's text without the "[from bob's agent] " tag tell_team puts on it.
+fn bare(text: &str) -> &str {
+    text.strip_prefix('[').and_then(|t| t.split_once("] ")).map_or(text, |x| x.1)
+}
+
+/// What an accepted request says in our session.
+fn accepted_text(inc: &Incoming) -> String {
+    format!("[accepted request from {}]: {}", inc.from, inc.text)
+}
+
+/// What the requester reads when we decline.
+fn declined_text(me: &str, inc: &Incoming) -> String {
+    format!("{me} declined: \"{}\"", clip_to(bare(&inc.text), 120))
+}
+
+/// What the requester reads when we write back without starting anything.
+fn replied_text(me: &str, inc: &Incoming, text: &str) -> String {
+    format!("{me} re your request \"{}\": {text}", clip_to(bare(&inc.text), 80))
+}
+
+/// Take a waiting request off the list and mark it handled. A declined request for work tells
+/// the requester (privately); a declined question gets the usual "not answered".
+fn decide_locked(s: &mut State, from: &str, id: u64, answer: &str) -> Option<Incoming> {
+    let i = s.pending.iter().position(|x| x.from == from && x.id == id)?;
+    let inc = s.pending.remove(i);
+    let prev = s.seen.get(from).copied().unwrap_or(0);
+    s.seen.insert(from.to_string(), id.max(prev));
+    s.dirty = true;
+    if answer == "deny" {
+        match &inc.question {
+            Some(q) => reply_locked(s, q, &format!("(not answered: {} said no. Use their fact sheet, or ask them directly.)", s.me), &[]),
+            None => {
+                let t = declined_text(&s.me, &inc);
+                if let Err(e) = dm_locked(s, from, &t) { log_to(&s.repo.clone(), &format!("couldn't tell {from} you declined: {e}")) }
+            }
+        }
+    }
+    Some(inc)
+}
+
+/// Our answer to a waiting request: "once" (accept), "deny" (decline) or "always" (accept, and
+/// let that person's agents' questions in without asking from now on; their work still waits for
+/// you). Returns (session, text) to deliver for accepted work, ("", note) for a question.
 pub fn decide(from: &str, id: u64, answer: &str) -> Option<(String, String)> {
-    let (inc, repo) = cur(|s| {
-        let i = s.pending.iter().position(|x| x.from == from && x.id == id)?;
-        let inc = s.pending.remove(i);
-        let prev = s.seen.get(from).copied().unwrap_or(0);
-        s.seen.insert(from.to_string(), id.max(prev));
-        s.dirty = true;
-        Some((inc, s.repo.clone()))
-    }).flatten()?;
-    log(&format!("{} {}'s {}", match answer { "deny" => "denied", "always" => "always allow", _ => "allowed" }, inc.from,
+    let (inc, repo) = cur(|s| decide_locked(s, from, id, answer).map(|i| (i, s.repo.clone()))).flatten()?;
+    log(&format!("{} {}'s {}", match answer { "deny" => "declined", "always" => "always allow", _ => "accepted" }, inc.from,
                  if inc.question.is_some() { "question" } else { "request" }));
     if answer == "always" {
         let _ = set_role(&repo, &inc.from, "trusted");
     }
     save_seen(&repo);
+    if answer == "deny" { return None }
     if let Some(q) = inc.question {
         // a question: answered from a read-only copy, nothing runs in the session itself
-        let run = with(&repo, |s| {
-            if answer == "deny" {
-                reply_locked(s, &q, &format!("(not answered: {} said no. Use their fact sheet, or ask them directly.)", s.me), &[]);
-                return None;
-            }
-            s.answered.push(now());
-            s.answerer.clone()
-        }).flatten();
+        let run = with(&repo, |s| { s.answered.push(now()); s.answerer.clone() }).flatten();
         let session = q.session.clone();
         return run.map(|f| { f(q); (String::new(), format!("your {session} is answering {}'s question (read-only)", inc.from)) });
     }
-    (answer != "deny").then(|| (inc.session.clone(), format!("[from {} via team] {}", inc.from, inc.text)))
+    Some((inc.session.clone(), accepted_text(&inc)))
+}
+
+/// Write back to a waiting request without starting any work. A question gets our words as its
+/// answer (and is done); a request for work stays waiting, marked replied, until accepted or declined.
+pub fn reply_request(from: &str, id: u64, text: &str) -> Result<String, String> {
+    let text = text.trim();
+    if text.is_empty() { return Err("nothing to send".into()) }
+    cur(|s| reply_request_locked(s, from, id, text)).ok_or("team mode is off".to_string())?
+}
+
+fn reply_request_locked(s: &mut State, from: &str, id: u64, text: &str) -> Result<String, String> {
+    let i = s.pending.iter().position(|x| x.from == from && x.id == id).ok_or("that request isn't waiting any more")?;
+    if let Some(q) = s.pending[i].question.clone() {
+        decide_locked(s, from, id, "answered");
+        let me = s.me.clone();
+        reply_locked(s, &q, &format!("({me} answered this in person) {text}"), &[]);
+        return Ok(format!("answered {from}'s question"));
+    }
+    let t = replied_text(&s.me, &s.pending[i], text);
+    dm_locked(s, from, &t)?;
+    s.pending[i].replied = true;
+    Ok(format!("→ @{from} (private); the request still waits: a accept · d decline"))
 }
 
 // ---- behaviour contracts: promises about what a function does, checked by a model ----
@@ -1708,7 +2106,7 @@ pub fn waiting_elsewhere() -> Vec<(String, usize)> {
     let c = CURRENT.lock().unwrap().clone();
     STATES.lock().unwrap().get_or_insert_with(HashMap::new).values()
         .filter(|s| s.repo != c && s.running.load(Relaxed))
-        .map(|s| (s.repo.clone(), s.pending.len() + s.asking.len() + s.unread))
+        .map(|s| (s.repo.clone(), s.pending.len() + s.asking.len() + unread_locked(s)))
         .filter(|(_, n)| *n > 0).collect()
 }
 
@@ -2284,11 +2682,11 @@ pub fn glance(repo: &str) -> Option<(Vec<String>, usize)> {
     with(repo, |s| {
         if !s.running.load(Relaxed) { return None }
         Some((s.peers.values().filter(|p| p.online && p.joined).map(|p| p.login.clone()).collect(),
-              s.pending.len() + s.asking.len() + s.unread))
+              s.pending.len() + s.asking.len() + unread_locked(s)))
     }).flatten()
 }
 
-fn ago(ts: u64) -> String {
+pub fn ago(ts: u64) -> String {
     let d = now().saturating_sub(ts);
     match d { 0..60 => "just now".into(), 60..3600 => format!("{}m ago", d / 60), 3600..86400 => format!("{}h ago", d / 3600), _ => format!("{}d ago", d / 86400) }
 }
@@ -2304,9 +2702,11 @@ pub fn status_line() -> Option<String> {
         }
         if peers.len() > 4 { out += &format!(" · +{}", peers.len() - 4) }
         if s.key.is_none() { out += " · waiting to be let in" }
-        if s.unread > 0 { out += &format!(" · {} new message{}", s.unread, if s.unread == 1 { "" } else { "s" }) }
-        let waiting = s.pending.len() + s.asking.len();
-        if waiting > 0 { out += &format!(" · {waiting} waiting (Ctrl+T)") }
+        let unread = unread_locked(s);
+        if unread > 0 { out += &format!(" · {unread} unread{}", if s.pinged.is_empty() { "" } else { " (@you)" }) }
+        let n = s.pending.len();
+        if n > 0 { out += &format!(" · {n} request{} (Ctrl+T)", if n == 1 { "" } else { "s" }) }
+        if !s.asking.is_empty() { out += &format!(" · {} waiting to join (Ctrl+T)", s.asking.len()) }
         if !s.error.is_empty() { out += " · sync problem" }
         out
     })?;
@@ -2319,7 +2719,7 @@ pub fn status_line() -> Option<String> {
 /// Something in a connected team project waits for you: messages, join requests, asks.
 pub fn needs_you() -> bool {
     STATES.lock().unwrap().as_ref().is_some_and(|m| m.values().any(|s| s.running.load(Relaxed)
-        && (s.unread > 0 || !s.pending.is_empty() || !s.asking.is_empty())))
+        && (unread_locked(s) > 0 || !s.pending.is_empty() || !s.asking.is_empty())))
 }
 
 /// The `/team status` text.
@@ -2886,6 +3286,8 @@ mod tests {
             chat: vec![], my_chat: vec![], chat_seen: HashMap::new(), my_notes: vec![], notes_seen: HashMap::new(), claims: HashMap::new(),
             uses: HashMap::new(), waiting: vec![], sheets: HashMap::new(), asked: vec![], answered: vec![], answers: "auto".into(),
             answerer: None, promises: vec![], last_answer: HashMap::new(), unread: 0, dirty: false, running: Default::default(), finished: Default::default(),
+            secret: None, my_dms: vec![], my_groups: vec![], my_gmsgs: vec![], groups: HashMap::new(), msgs: vec![],
+            msg_ids: Default::default(), chan_unread: HashMap::new(), pinged: vec![],
         }
     }
 
@@ -3145,5 +3547,192 @@ mod tests {
         assert_eq!(assemble(&shuffled), Some(Ok(text)));
         assert_eq!(assemble(&reply_parts(7, Err("no".into()))), Some(Err("no".into())));
         assert_eq!(assemble(&reply_parts(7, Ok(String::new()))), Some(Ok(String::new())));
+    }
+
+    // ---- requests, direct messages, groups, pings ----
+
+    fn member(login: &str) -> (x25519_dalek::StaticSecret, String) {
+        let k = x25519_dalek::StaticSecret::from(crate::oauth::random());
+        let p = crate::oauth::b64url(x25519_dalek::PublicKey::from(&k).as_bytes());
+        let _ = login;
+        (k, p)
+    }
+
+    /// `login`'s state holding their own key, with `others` (login, public key) as joined teammates.
+    fn keyed(login: &str, secret: &x25519_dalek::StaticSecret, others: &[(&str, &str)]) -> State {
+        let mut s = state(login);
+        s.secret = Some(secret.clone());
+        for (l, pk) in others {
+            let mut p = peer(l, &["main"], true);
+            p.pub_key = pk.to_string();
+            s.peers.insert(l.to_string(), p);
+        }
+        s
+    }
+
+    /// What `from`'s state publishes, as a teammate reads it.
+    fn published(from: &State, pub_key: &str) -> Peer {
+        let mut p = peer(&from.me, &["main"], true);
+        p.pub_key = pub_key.into();
+        let d = json!({"dms": from.my_dms, "groups": from.my_groups, "gmsgs": from.my_gmsgs});
+        parse_data(&mut p, &d);
+        p
+    }
+
+    #[test]
+    fn work_waits_for_you_even_from_a_trusted_teammate_questions_dont() {
+        let repo = "req/route";
+        let mut st = state("alice");
+        st.repo = repo.into();
+        st.roles.insert("bob".into(), "trusted".into()); // trusted, and answers on auto: the most permissive setup
+        STATES.lock().unwrap().get_or_insert_with(HashMap::new).insert(repo.into(), st);
+        let delivered = std::sync::Arc::new(Mutex::new(vec![]));
+        let answered = std::sync::Arc::new(Mutex::new(0));
+        let (d2, a2) = (delivered.clone(), answered.clone());
+        let hooks = Hooks { deliver: Box::new(move |s, t| d2.lock().unwrap().push((s.to_string(), t.to_string()))),
+                            answer: std::sync::Arc::new(move |_| *a2.lock().unwrap() += 1), ..quiet() };
+        let mut bob = peer("bob", &["main"], true);
+        bob.outbox = vec![
+            json!({"id": 5, "to": "alice", "session": "main", "text": "[from bob's agent] build the backend", "from_session": "api", "ts": now()}),
+            json!({"id": 6, "to": "alice", "session": "main", "kind": "q", "from_session": "api", "text": "what port?", "ts": now()}),
+        ];
+        let mut nc = false;
+        take_in(repo, &"alice".to_string(), None, bob, &hooks, &mut nc);
+        let pending = with(repo, |s| s.pending.clone()).unwrap();
+        assert_eq!(pending.len(), 1, "only the work waits: {pending:?}");
+        assert_eq!((pending[0].id, pending[0].from_session.as_str()), (5, "api"));
+        assert!(pending[0].question.is_none());
+        assert!(delivered.lock().unwrap().is_empty(), "nothing reached a session without the user");
+        assert_eq!(*answered.lock().unwrap(), 1, "the question is answered from a read-only copy, as before");
+        let alerts = take_alerts();
+        assert!(alerts.iter().any(|a| a == "qh: bob asks: build the backend"), "{alerts:?}");
+        // the same folder again: no second request
+        let mut bob = peer("bob", &["main"], true);
+        bob.outbox = vec![json!({"id": 5, "to": "alice", "session": "main", "text": "build the backend", "ts": now()})];
+        take_in(repo, &"alice".to_string(), None, bob, &hooks, &mut nc);
+        assert_eq!(with(repo, |s| s.pending.len()).unwrap(), 1);
+        // with /answers ask, a question waits too
+        with(repo, |s| s.answers = "ask".into());
+        with(repo, |s| s.roles.clear());
+        let mut bob = peer("bob", &["main"], true);
+        bob.outbox = vec![json!({"id": 7, "to": "alice", "session": "main", "kind": "q", "text": "which db?", "ts": now()})];
+        take_in(repo, &"alice".to_string(), None, bob, &hooks, &mut nc);
+        let pending = with(repo, |s| s.pending.clone()).unwrap();
+        assert_eq!(pending.len(), 2);
+        assert!(pending[1].question.is_some());
+        assert_eq!(*answered.lock().unwrap(), 1);
+        STATES.lock().unwrap().as_mut().unwrap().remove(repo);
+    }
+
+    #[test]
+    fn accept_decline_and_reply_say_the_right_thing() {
+        let ((a, a_pub), (b, b_pub)) = (member("alice"), member("bob"));
+        let mut s = keyed("alice", &a, &[("bob", &b_pub)]);
+        let work = |id| Incoming { from: "bob".into(), id, session: "main".into(), text: "[from bob's agent] build the backend".into(), ts: now(), ..Default::default() };
+        s.pending = vec![work(1), work(2), work(3)];
+        let read = |s: &State| -> Vec<String> {
+            let mut bob = keyed("bob", &b, &[("alice", &a_pub)]);
+            take_private(&mut bob, "alice", &published(s, &a_pub));
+            bob.msgs.iter().map(|m| m.text.clone()).collect()
+        };
+        // accept: delivered with the tag, nothing sent back
+        let inc = decide_locked(&mut s, "bob", 1, "once").unwrap();
+        assert_eq!(accepted_text(&inc), "[accepted request from bob]: [from bob's agent] build the backend");
+        assert!(s.my_dms.is_empty());
+        // reply: a private line back; the request still waits
+        let r = reply_request_locked(&mut s, "bob", 2, "which framework?").unwrap();
+        assert!(r.contains("still waits"), "{r}");
+        assert!(s.pending.iter().any(|p| p.id == 2 && p.replied));
+        assert_eq!(read(&s), ["alice re your request \"build the backend\": which framework?"]);
+        // decline: gone, and they're told
+        assert!(decide_locked(&mut s, "bob", 3, "deny").is_some());
+        assert!(!s.pending.iter().any(|p| p.id == 3));
+        assert_eq!(read(&s).last().unwrap(), "alice declined: \"build the backend\"");
+        assert_eq!(s.seen.get("bob"), Some(&3));
+        // a waiting question: a reply is its answer, and it's done
+        let q = Question { repo: "o/r".into(), from: "bob".into(), from_session: "api".into(), id: 9, session: "main".into(), text: "port?".into() };
+        s.pending.push(Incoming { from: "bob".into(), id: 9, session: "main".into(), text: "question: port?".into(), question: Some(q), ..Default::default() });
+        reply_request_locked(&mut s, "bob", 9, "8080").unwrap();
+        assert!(!s.pending.iter().any(|p| p.id == 9), "the question is done");
+        let a = s.outbox.last().unwrap();
+        assert_eq!((a["kind"].as_str(), a["re"].as_u64(), a["session"].as_str()), (Some("a"), Some(9), Some("api")));
+        assert!(a["text"].as_str().unwrap().ends_with("8080"));
+    }
+
+    #[test]
+    fn a_dm_or_group_line_opens_only_for_its_members() {
+        let ((a, a_pub), (b, b_pub), (c, c_pub)) = (member("alice"), member("bob"), member("carol"));
+        let mut alice = keyed("alice", &a, &[("bob", &b_pub), ("carol", &c_pub)]);
+        dm_locked(&mut alice, "bob", "the deploy key is in 1password").unwrap();
+        group_locked(&mut alice, "core", &["bob".into()]).unwrap();
+        let gid = alice.groups.keys().next().unwrap().clone();
+        group_send_locked(&mut alice, &gid, "@bob can you review?").unwrap();
+        let folder = published(&alice, &a_pub);
+        // nothing in the folder is readable text, even to someone holding the team key
+        let raw = json!({"dms": alice.my_dms, "groups": alice.my_groups, "gmsgs": alice.my_gmsgs}).to_string();
+        assert!(!raw.contains("1password") && !raw.contains("review") && !raw.contains("core"), "{raw}");
+
+        let mut bob = keyed("bob", &b, &[("alice", &a_pub), ("carol", &c_pub)]);
+        assert!(take_private(&mut bob, "alice", &folder));
+        let texts: Vec<(&str, &str)> = bob.msgs.iter().map(|m| (m.chan.as_str(), m.text.as_str())).collect();
+        assert_eq!(texts, [("@alice", "the deploy key is in 1password"), (format!("+{gid}").as_str(), "@bob can you review?")]);
+        assert_eq!(bob.groups[&gid].members, ["alice", "bob"]);
+
+        let mut carol = keyed("carol", &c, &[("alice", &a_pub), ("bob", &b_pub)]);
+        assert!(!take_private(&mut carol, "alice", &folder), "carol is a teammate but not in the DM or the group");
+        assert!(carol.msgs.is_empty() && carol.groups.is_empty());
+        // and the group key itself doesn't open the line under another sender's name
+        let line = &alice.my_gmsgs[0]["box"];
+        assert!(tc::open(&bob.groups[&gid].key, &format!("gmsg:o/r:{gid}:carol"), line.as_str().unwrap()).is_none());
+        // a teammate can't post into a group they're not in, even with a box that opened
+        let mut bob2 = keyed("bob", &b, &[("alice", &a_pub), ("carol", &c_pub)]);
+        bob2.groups = bob.groups.clone();
+        let mut fake = published(&alice, &a_pub);
+        fake.login = "carol".into();
+        fake.pub_key = c_pub.clone();
+        fake.dms.clear();
+        fake.groups.clear();
+        assert!(!take_private(&mut bob2, "carol", &fake), "carol's name on alice's group line: not a member");
+    }
+
+    #[test]
+    fn unread_counts_and_pings_per_channel() {
+        let ((a, a_pub), (b, b_pub)) = (member("alice"), member("bob"));
+        let mut alice = keyed("alice", &a, &[("bob", &b_pub)]);
+        dm_locked(&mut alice, "bob", "hi").unwrap();
+        dm_locked(&mut alice, "bob", "@bob lunch?").unwrap();
+        group_locked(&mut alice, "core", &["bob".into()]).unwrap();
+        let gid = alice.groups.keys().next().unwrap().clone();
+        group_send_locked(&mut alice, &gid, "plain line").unwrap();
+        assert_eq!(unread_locked(&alice), 0, "your own lines aren't unread");
+        let mut bob = keyed("bob", &b, &[("alice", &a_pub)]);
+        let folder = published(&alice, &a_pub);
+        take_private(&mut bob, "alice", &folder);
+        take_private(&mut bob, "alice", &folder); // the same folder again: nothing new
+        assert_eq!(unread_locked(&bob), 3);
+        let ch = channels_locked(&bob);
+        let at = ch.iter().find(|c| c.id == "@alice").unwrap();
+        assert_eq!((at.unread, at.pinged), (2, true));
+        let g = ch.iter().find(|c| c.id == format!("+{gid}")).unwrap();
+        assert_eq!((g.unread, g.pinged, g.label.as_str()), (1, false, "+ core"));
+        assert_eq!(ch[0].id, "#team");
+        read_locked(&mut bob, "@alice");
+        assert_eq!(unread_locked(&bob), 1);
+        assert!(bob.pinged.is_empty());
+    }
+
+    #[test]
+    fn pings_are_words_not_email_addresses() {
+        assert!(pings("@bob can you look", "bob"));
+        assert!(pings("thanks @Bob!", "bob"), "case doesn't matter");
+        assert!(pings("over to you, @bob.", "bob"), "a full stop after the name");
+        assert!(pings("(@bob)", "bob"));
+        assert!(pings("@team standup in 5", "bob"));
+        assert!(!pings("mail bob@bob.com", "bob"), "an email address");
+        assert!(!pings("see @bob.com", "bob"), "a domain");
+        assert!(!pings("@bobby are you there", "bob"), "someone else");
+        assert!(!pings("@teams", "bob"));
+        assert!(!pings("no mention", "bob"));
+        assert!(!pings("@", "bob"));
     }
 }

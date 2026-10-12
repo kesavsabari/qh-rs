@@ -58,6 +58,28 @@ pub fn unwrap(blob: &str, mine: &StaticSecret, sender_pub: &str, repo: &str) -> 
     open(&pair_key(mine, sender_pub)?, &format!("wrap:{repo}"), blob)?.try_into().ok()
 }
 
+/// The key for direct messages between two members: the same X25519 secret as `pair_key`, but
+/// stretched with its own label, so a DM key and a key-wrap key are never the same.
+fn dm_key(mine: &StaticSecret, theirs: &str) -> Option<Key> {
+    let pk: [u8; 32] = b64url_decode(theirs).try_into().ok()?;
+    let shared = mine.diffie_hellman(&PublicKey::from(pk));
+    let salt = ring::hkdf::Salt::new(ring::hkdf::HKDF_SHA256, b"qh team dm v1");
+    let mut out = [0u8; 32];
+    salt.extract(shared.as_bytes()).expand(&[], ring::hkdf::HKDF_SHA256).ok()?.fill(&mut out).ok()?;
+    Some(out)
+}
+
+/// A private message (or a group's key) from `from` to `to` that only `to` (and `from`) can open:
+/// sealed with the two members' shared key, bound to the repo, sender, recipient and `what`.
+pub fn seal_for(mine: &StaticSecret, their_pub: &str, repo: &str, what: &str, from: &str, to: &str, plain: &[u8]) -> Option<String> {
+    Some(seal(&dm_key(mine, their_pub)?, &format!("{what}:{repo}:{from}:{to}"), plain))
+}
+
+/// Open what `from` sealed for `to` with `seal_for` (either side may open it).
+pub fn open_from(mine: &StaticSecret, their_pub: &str, repo: &str, what: &str, from: &str, to: &str, sealed: &str) -> Option<Vec<u8>> {
+    open(&dm_key(mine, their_pub)?, &format!("{what}:{repo}:{from}:{to}"), sealed)
+}
+
 /// The member's signing key, derived from their member key (so there's still one secret to keep).
 fn signer(mine: &StaticSecret) -> ring::signature::Ed25519KeyPair {
     let salt = ring::hkdf::Salt::new(ring::hkdf::HKDF_SHA256, b"qh team sign v1");
@@ -126,6 +148,21 @@ mod tests {
         assert_eq!(unwrap(&w, &b, &pub_of(&a), "o/r"), Some(team), "b opens what a wrapped for b");
         assert_eq!(unwrap(&w, &c, &pub_of(&a), "o/r"), None, "c can't");
         assert_eq!(unwrap(&w, &b, &pub_of(&a), "other/repo"), None, "bound to the repo");
+    }
+
+    #[test]
+    fn only_the_two_people_open_a_direct_message() {
+        let (a, b, c) = (StaticSecret::from(random()), StaticSecret::from(random()), StaticSecret::from(random()));
+        let pub_of = |s: &StaticSecret| b64url(PublicKey::from(s).as_bytes());
+        let m = seal_for(&a, &pub_of(&b), "o/r", "dm", "alice", "bob", b"hi bob").unwrap();
+        assert_eq!(open_from(&b, &pub_of(&a), "o/r", "dm", "alice", "bob", &m).as_deref(), Some(&b"hi bob"[..]), "bob opens it");
+        assert_eq!(open_from(&a, &pub_of(&b), "o/r", "dm", "alice", "bob", &m).as_deref(), Some(&b"hi bob"[..]), "alice can reread hers");
+        assert_eq!(open_from(&c, &pub_of(&a), "o/r", "dm", "alice", "bob", &m), None, "carol, holding the team key or not, can't");
+        assert_eq!(open_from(&c, &pub_of(&a), "o/r", "dm", "alice", "carol", &m), None, "nor by claiming it was for her");
+        assert_eq!(open_from(&b, &pub_of(&a), "o/r", "dm", "carol", "bob", &m), None, "bound to the sender");
+        // a DM key is not the key-wrap key
+        let w = wrap(&new_team_key(), &a, &pub_of(&b), "o/r").unwrap();
+        assert_eq!(open_from(&b, &pub_of(&a), "o/r", "wrap", "", "", &w), None);
     }
 
     #[test]

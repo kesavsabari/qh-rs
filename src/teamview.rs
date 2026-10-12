@@ -1,6 +1,7 @@
-//! The team room (Ctrl+T): everything about the team on one screen. Tabs for People (with the
-//! selected session shown live), Tasks (open issues), Pull requests (with CI) and Activity; a
-//! bar at the bottom for anything waiting on you, answered without leaving the room.
+//! The team room (Ctrl+T): everything about the team on one screen. Tabs for the Map / People
+//! (with the selected session shown live), Chat (team, private and group channels), Requests
+//! (work teammates asked of your sessions: nothing runs until you accept), Tasks (open issues),
+//! Pull requests (with CI) and Activity; a bar at the bottom for anything waiting on you.
 use crate::hub::{lock, Hub};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -191,7 +192,7 @@ fn gh() -> Gh {
 
 // ---- the room ----
 
-const TABS: [&str; 5] = ["Map", "Chat", "Tasks", "Pull requests", "Activity"];
+const TABS: [&str; 6] = ["Map", "Chat", "Requests", "Tasks", "Pull requests", "Activity"];
 
 struct Session {
     who: String, // "" = you
@@ -268,43 +269,78 @@ pub enum Act {
     Err(String),
 }
 
+/// What's being typed at the bottom of the room.
+#[derive(Clone)]
+enum To {
+    Chat(String),             // a channel: "#team", "@login", "+<group id>"
+    Task(String, String),     // work for a teammate's session (waits in their Requests)
+    Question(String, String), // a question for their agent (answered read-only)
+    Reply(String, u64),       // writing back to a waiting request
+}
+
+const CHAT: usize = 1;
+const REQUESTS: usize = 2;
+const ISSUES: usize = 3;
+const PRS: usize = 4;
+
 #[derive(Default)]
 pub struct TeamView {
     tab: usize,
-    sel: [usize; 5],
-    typing: Option<(String, String, String)>, // (who, session, text) asking someone's agent; who "" = team chat
+    sel: [usize; 6],
+    typing: Option<(To, String)>,
     scroll: u16,
     person: usize, // the map's selected person
     detail: bool,  // the map opened on one person
-    question: bool, // what's being typed is a question for their agent (read-only), not a task
 }
 
 impl TeamView {
     pub fn open(cwd: &Path) -> Self {
         if let Some((_, r)) = crate::team::github_repo(cwd) { gh_refresh(&r, false) }
-        Self::default()
+        // a request waiting: open on it
+        let tab = if crate::team::pending().is_empty() { 0 } else { REQUESTS };
+        Self { tab, ..Self::default() }
     }
 
     fn root(cwd: &Path) -> std::path::PathBuf {
         crate::team::github_repo(cwd).map(|(r, _)| r).unwrap_or_else(|| cwd.to_path_buf())
     }
 
+    /// The chat channel picked in the Chat tab.
+    fn channel(&self) -> crate::team::Channel {
+        let all = crate::team::channels();
+        all.get(self.sel[CHAT].min(all.len().saturating_sub(1))).cloned().unwrap_or(crate::team::Channel {
+            id: "#team".into(), label: "# team".into(), unread: 0, pinged: false, online: true })
+    }
+
+    /// Accept (or with "always", accept and trust) a waiting request: work goes into its session.
+    fn accept(hub: &std::sync::Arc<Hub>, i: &crate::team::Incoming, ans: &str) -> Act {
+        match crate::team::decide(&i.from, i.id, ans) {
+            Some((session, note)) if session.is_empty() => Act::Note(note),
+            Some((session, text)) => {
+                let to = if hub.get(&session).is_some() { session } else { hub.names().first().cloned().unwrap_or_default() };
+                hub.send(&to, &text, "user", 0, None);
+                Act::Note(format!("accepted {}'s request: it went to your {to}", i.from))
+            }
+            None => Act::Note("that request isn't waiting any more".into()),
+        }
+    }
+
     pub fn key(&mut self, k: KeyEvent, hub: &std::sync::Arc<Hub>, cwd: &Path) -> Act {
         // writing a message: the keys are the text
-        if let Some((who, s, text)) = self.typing.as_mut() {
+        if let Some((to, text)) = self.typing.as_mut() {
             match k.code {
-                KeyCode::Esc => { self.typing = None; self.question = false }
+                KeyCode::Esc => self.typing = None,
                 KeyCode::Enter => {
-                    let (who, s, text) = (who.clone(), s.clone(), text.trim().to_string());
+                    let (to, text) = (to.clone(), text.trim().to_string());
                     self.typing = None;
                     if text.is_empty() { return Act::None }
-                    if who.is_empty() {
-                        return match crate::team::chat_send(&text) { Ok(()) => Act::None, Err(e) => Act::Err(e) };
-                    }
-                    if std::mem::take(&mut self.question) {
-                        return match crate::team::ask_person_agent(&who, &s, &text) { Ok(m) => Act::Note(m), Err(e) => Act::Err(e) };
-                    }
-                    return match crate::team::send(&who, &s, &text) { Ok(m) => Act::Note(m), Err(e) => Act::Err(e) };
+                    let r = match to {
+                        To::Chat(c) => crate::team::channel_send(&c, &text),
+                        To::Question(who, s) => crate::team::ask_person_agent(&who, &s, &text),
+                        To::Task(who, s) => crate::team::send(&who, &s, &text),
+                        To::Reply(from, id) => crate::team::reply_request(&from, id, &text),
+                    };
+                    return match r { Ok(m) if m.is_empty() => Act::None, Ok(m) => Act::Note(m), Err(e) => Act::Err(e) };
                 }
                 KeyCode::Backspace => { text.pop(); }
                 KeyCode::Char(c) if !k.modifiers.contains(KeyModifiers::CONTROL) => text.push(c),
@@ -320,19 +356,24 @@ impl TeamView {
                 _ => {}
             }
         }
-        // a teammate asking your agent: a / A / d answer the first one from anywhere in the room
-        if let Some(i) = crate::team::pending().first().cloned() {
-            let ans = match k.code { KeyCode::Char('a') => Some("once"), KeyCode::Char('A') => Some("always"), KeyCode::Char('d') => Some("deny"), _ => None };
-            if let Some(ans) = ans {
-                return match crate::team::decide(&i.from, i.id, ans) {
-                    Some((session, note)) if session.is_empty() => Act::Note(note),
-                    Some((session, text)) => {
-                        let to = if hub.get(&session).is_some() { session } else { hub.names().first().cloned().unwrap_or_default() };
-                        hub.send(&to, &text, "user", 0, None);
-                        Act::Note(format!("{}'s message went to your {to}", i.from))
+        // requests are answered only in their own tab, one picked request at a time: a key
+        // pressed elsewhere in the room never accepts anything
+        if self.tab == REQUESTS {
+            let pending = crate::team::pending();
+            self.sel[REQUESTS] = self.sel[REQUESTS].min(pending.len().saturating_sub(1));
+            if let Some(i) = pending.get(self.sel[REQUESTS]).cloned() {
+                match k.code {
+                    KeyCode::Enter | KeyCode::Char('a') => return Self::accept(hub, &i, "once"),
+                    KeyCode::Char('A') if i.question.is_some() => return Self::accept(hub, &i, "always"),
+                    KeyCode::Char('d') => {
+                        let q = i.question.is_some();
+                        crate::team::decide(&i.from, i.id, "deny");
+                        return Act::Note(format!("declined {}'s {}{}", i.from, if q { "question" } else { "request" },
+                                                 if q { "" } else { "; they're told privately" }));
                     }
-                    None => Act::Note(format!("denied {}'s message", i.from)),
-                };
+                    KeyCode::Char('r') => { self.typing = Some((To::Reply(i.from.clone(), i.id), String::new())); return Act::None }
+                    _ => {}
+                }
             }
         }
         let root = Self::root(cwd);
@@ -354,9 +395,18 @@ impl TeamView {
                 KeyCode::Char('a') => {
                     if let Some(p) = ppl.get(self.person).filter(|p| !p.who.is_empty()) {
                         if let Some(s) = p.sessions.iter().find(|s| !matches!(s.status.as_str(), "idle" | "")).or(p.sessions.first()) {
-                            self.typing = Some((p.who.clone(), s.name.clone(), String::new()));
-                            self.question = true;
+                            self.typing = Some((To::Question(p.who.clone(), s.name.clone()), String::new()));
                         } else { return Act::Note(format!("{} has no sessions open", p.who)) }
+                    }
+                    return Act::None;
+                }
+                KeyCode::Char('p') => {
+                    // a private message to the picked person
+                    if let Some(p) = ppl.get(self.person).filter(|p| !p.who.is_empty()) {
+                        let at = format!("@{}", p.who);
+                        if let Some(i) = crate::team::channels().iter().position(|c| c.id == at) { self.sel[CHAT] = i }
+                        self.tab = CHAT;
+                        self.typing = Some((To::Chat(at), String::new()));
                     }
                     return Act::None;
                 }
@@ -371,15 +421,15 @@ impl TeamView {
             KeyCode::Char('t') if k.modifiers.contains(KeyModifiers::CONTROL) => return Act::Close,
             KeyCode::Right | KeyCode::Tab => { self.tab = (self.tab + 1) % TABS.len(); self.scroll = 0 }
             KeyCode::Left | KeyCode::BackTab => { self.tab = (self.tab + TABS.len() - 1) % TABS.len(); self.scroll = 0 }
-            KeyCode::Char(c @ '1'..='5') => { self.tab = c as usize - '1' as usize; self.scroll = 0 }
+            KeyCode::Char(c @ '1'..='6') => { self.tab = c as usize - '1' as usize; self.scroll = 0 }
             KeyCode::Up | KeyCode::Char('k') => { *sel = sel.checked_sub(1).unwrap_or(n.saturating_sub(1)); self.scroll = 0 }
             KeyCode::Down | KeyCode::Char('j') => { *sel = (*sel + 1) % n.max(1); self.scroll = 0 }
             KeyCode::PageUp => self.scroll = self.scroll.saturating_add(10),
             KeyCode::PageDown => self.scroll = self.scroll.saturating_sub(10),
             KeyCode::Char('r') => if let Some((_, r)) = crate::team::github_repo(cwd) { gh_refresh(&r, true) },
-            KeyCode::Char('m') | KeyCode::Char('c') if self.tab <= 1 => {
-                self.tab = 1;
-                self.typing = Some((String::new(), String::new(), String::new()));
+            KeyCode::Char('m') | KeyCode::Char('c') if self.tab <= CHAT => {
+                self.tab = CHAT;
+                self.typing = Some((To::Chat(self.channel().id), String::new()));
             }
             KeyCode::Enter => return self.enter(hub, &root),
             _ => {}
@@ -390,9 +440,10 @@ impl TeamView {
     fn rows(&self, hub: &Hub, root: &Path) -> usize {
         match self.tab {
             0 => people(hub, root).iter().map(|p| p.sessions.len()).sum(),
-            1 => crate::team::chat().len(),
-            2 => gh().issues.len(),
-            3 => gh().prs.len(),
+            CHAT => crate::team::channels().len(),
+            REQUESTS => crate::team::pending().len(),
+            ISSUES => gh().issues.len(),
+            PRS => gh().prs.len(),
             _ => crate::team::activity().len(),
         }
     }
@@ -405,15 +456,15 @@ impl TeamView {
         match self.tab {
             0 => match self.picked_session(hub, root) {
                 Some(s) if s.who.is_empty() => Act::Open(s.name),
-                Some(s) => { self.typing = Some((s.who, s.name, String::new())); Act::None }
+                Some(s) => { self.typing = Some((To::Task(s.who, s.name), String::new())); Act::None }
                 None => Act::None,
             },
-            1 => { self.typing = Some((String::new(), String::new(), String::new())); Act::None }
-            2 => match gh().issues.get(self.sel[2]) {
+            CHAT => { self.typing = Some((To::Chat(self.channel().id), String::new())); Act::None }
+            ISSUES => match gh().issues.get(self.sel[ISSUES]) {
                 Some((n, t, _)) => Act::Task(*n, t.clone()),
                 None => Act::None,
             },
-            3 => match gh().prs.get(self.sel[3]) {
+            PRS => match gh().prs.get(self.sel[PRS]) {
                 Some((n, t, who, _, _)) => Act::Work(format!("review PR #{n}"), format!(
                     "Review pull request #{n} ({t}) by {who}. Read it with `gh pr view {n}` and `gh pr diff {n}`, then list real problems \
                      (bugs, missing tests, risky changes) with file and line. Don't post anything to GitHub; tell me first.")),
@@ -449,7 +500,7 @@ impl TeamView {
 
         let pending = crate::team::pending();
         let joins = crate::team::join_requests();
-        let wait_h = if pending.is_empty() && joins.is_empty() { 0 } else { 3 };
+        let wait_h = if joins.is_empty() && (pending.is_empty() || self.tab == REQUESTS) { 0 } else { 3 };
         let input_h = if self.typing.is_some() { 1 } else { 0 };
         let [tabs, body, wait, input, hint] = Layout::vertical([
             Constraint::Length(2), Constraint::Min(3), Constraint::Length(wait_h), Constraint::Length(input_h), Constraint::Length(1),
@@ -457,13 +508,14 @@ impl TeamView {
 
         // tab strip
         let gh = gh();
-        if self.tab == 1 { crate::team::chat_read() }
-        let counts = [ppl.iter().map(|p| p.sessions.len()).sum::<usize>(), crate::team::chat_unread(), gh.issues.len(), gh.prs.len(), 0];
+        let counts = [ppl.iter().map(|p| p.sessions.len()).sum::<usize>(), crate::team::chat_unread(), pending.len(), gh.issues.len(), gh.prs.len(), 0];
         let mut spans: Vec<Span> = vec![Span::raw(" ")];
         for (i, t) in TABS.iter().enumerate() {
-            let label = if i > 0 && i < 4 && counts[i] > 0 { format!(" {} {t} ({}) ", i + 1, counts[i]) } else { format!(" {} {t} ", i + 1) };
+            let label = if i > 0 && i <= PRS && counts[i] > 0 { format!(" {} {t} ({}) ", i + 1, counts[i]) } else { format!(" {} {t} ", i + 1) };
             spans.push(if i == self.tab {
                 Span::styled(label, Style::new().fg(Color::Black).bg(accent).add_modifier(Modifier::BOLD))
+            } else if i == REQUESTS && counts[i] > 0 {
+                Span::styled(label, Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD))
             } else {
                 Span::styled(label, Style::new().fg(Color::Gray))
             });
@@ -478,10 +530,11 @@ impl TeamView {
         match self.tab {
             0 if self.detail => self.draw_people(f, body, hub, &ppl, &gh),
             0 => self.draw_map(f, body, &ppl, &root),
-            1 => self.draw_chat(f, body),
-            2 => self.draw_list(f, body, gh.issues.iter().map(|(n, t, a)| (format!("#{n}"), t.clone(), if a.is_empty() { "open".into() } else { format!("→ {a}") })).collect(),
+            CHAT => self.draw_chat(f, body),
+            REQUESTS => self.draw_requests(f, body, &pending),
+            ISSUES => self.draw_list(f, body, gh.issues.iter().map(|(n, t, a)| (format!("#{n}"), t.clone(), if a.is_empty() { "open".into() } else { format!("→ {a}") })).collect(),
                                 gh.loading, &gh.error, "no open issues"),
-            3 => self.draw_list(f, body, gh.prs.iter().map(|(n, t, who, br, ci)| (format!("#{n}"), t.clone(), format!("{who} · {br} {ci}"))).collect(),
+            PRS => self.draw_list(f, body, gh.prs.iter().map(|(n, t, who, br, ci)| (format!("#{n}"), t.clone(), format!("{who} · {br} {ci}"))).collect(),
                                 gh.loading, &gh.error, "no open pull requests"),
             _ => self.draw_list(f, body, crate::team::activity().into_iter().map(|(t, x)| (t, x, String::new())).collect(), false, "", "nothing yet this session"),
         }
@@ -492,33 +545,73 @@ impl TeamView {
                 Line::styled(format!(" {who} wants to join the team{more}"), Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
                 Line::styled("   l let them in · n not now", Style::new().fg(Color::Yellow)),
             ]).block(Block::new().borders(Borders::TOP).border_style(Style::new().fg(Color::DarkGray))), wait);
-        } else if let Some(i) = pending.first() {
-            let more = if pending.len() > 1 { format!("  (+{} more)", pending.len() - 1) } else { String::new() };
+        } else if let Some(i) = pending.first().filter(|_| self.tab != REQUESTS) {
+            let n = pending.len();
             f.render_widget(Paragraph::new(vec![
-                Line::from(vec![Span::styled(format!(" {} asks your {}: ", i.from, i.session), Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-                                Span::raw(format!("\"{}\"{more}", clip(&i.text, (wait.width as usize).saturating_sub(30))))]),
-                Line::styled("   a allow · A always allow · d deny", Style::new().fg(Color::Yellow)),
+                Line::from(vec![Span::styled(format!(" {n} request{} waiting: ", if n == 1 { "" } else { "s" }), Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                                Span::raw(format!("{} → your {}: \"{}\"", i.from, i.session, clip(&i.text, (wait.width as usize).saturating_sub(40))))]),
+                Line::styled(format!("   {} Requests to accept, reply or decline: nothing runs until you accept", REQUESTS + 1), Style::new().fg(Color::Yellow)),
             ]).block(Block::new().borders(Borders::TOP).border_style(Style::new().fg(Color::DarkGray))), wait);
         }
-        if let Some((who, s, text)) = &self.typing {
-            let to = if who.is_empty() { " team chat › ".to_string() }
-                     else if self.question { format!(" question for {who}'s {s} (answered read-only) › ") }
-                     else { format!(" task for {who}'s {s} (runs once they allow it) › ") };
+        if let Some((to, text)) = &self.typing {
+            let label = match to {
+                To::Chat(c) if c == "#team" => " # team › ".to_string(),
+                To::Chat(c) if c.starts_with('@') => format!(" {c} (private) › "),
+                To::Chat(_) => format!(" {} (group) › ", self.channel().label),
+                To::Question(who, s) => format!(" question for {who}'s {s} (answered read-only) › "),
+                To::Task(who, s) => format!(" task for {who}'s {s} (runs once they accept it) › "),
+                To::Reply(who, _) => format!(" reply to {who} (no work starts) › "),
+            };
             f.render_widget(Paragraph::new(Line::from(vec![
-                Span::styled(to, Style::new().fg(accent).add_modifier(Modifier::BOLD)),
+                Span::styled(label, Style::new().fg(accent).add_modifier(Modifier::BOLD)),
                 Span::raw(format!("{text}▏")),
             ])), input);
         }
         let keys = match (self.typing.is_some(), self.tab) {
-            (true, _) => "Enter send · Esc cancel",
-            (_, 0) if !self.detail => "↑↓ pick · Enter open · a ask their agent · m message the team · ←→ or 1-5 tabs · Esc back",
+            (true, _) => "Enter send · Esc cancel · @login pings someone, @team everyone",
+            (_, 0) if !self.detail => "↑↓ pick · Enter open · a ask their agent · p private message · m message the team · ←→ or 1-6 tabs · Esc back",
             (_, 0) => "↑↓ sessions · Enter open yours / give their agent a task · m message · Esc back to the map",
-            (_, 1) => "Enter or m write · ←→ tabs · Esc back",
-            (_, 2) => "↑↓ pick · Enter start it in its own branch and session · r refresh · ←→ tabs · Esc back",
-            (_, 3) => "↑↓ pick · Enter have your current session review it · r refresh · ←→ tabs · Esc back",
+            (_, CHAT) => "↑↓ channel · Enter or m write · /dm <login> and /team group <name> <logins> from the prompt · ←→ tabs · Esc back",
+            (_, REQUESTS) => "↑↓ pick · Enter or a accept · r reply · d decline · A always answer their questions · ←→ tabs · Esc back",
+            (_, ISSUES) => "↑↓ pick · Enter start it in its own branch and session · r refresh · ←→ tabs · Esc back",
+            (_, PRS) => "↑↓ pick · Enter have your current session review it · r refresh · ←→ tabs · Esc back",
             _ => "↑↓ scroll · ←→ tabs · Esc back",
         };
         f.render_widget(Paragraph::new(Line::styled(format!(" {keys}"), Style::new().fg(Color::DarkGray))), hint);
+    }
+
+    /// Requests: work teammates (or their agents) asked of your sessions, and questions when
+    /// /answers is "ask". Nothing in here has reached any session.
+    fn draw_requests(&mut self, f: &mut Frame, area: Rect, pending: &[crate::team::Incoming]) {
+        let area = Rect { x: area.x + 1, width: area.width.saturating_sub(2), ..area };
+        if pending.is_empty() {
+            f.render_widget(Paragraph::new("\n  No requests. When a teammate or their agent asks one of your sessions to do something, it waits here:\n  nothing runs until you accept it.")
+                .style(Style::new().fg(Color::DarkGray)).wrap(Wrap { trim: false }), area);
+            return;
+        }
+        self.sel[REQUESTS] = self.sel[REQUESTS].min(pending.len() - 1);
+        let w = area.width as usize;
+        let mut lines: Vec<Line> = vec![Line::raw("")];
+        let mut sel_line = 0;
+        for (n, i) in pending.iter().enumerate() {
+            let on = n == self.sel[REQUESTS];
+            if on { sel_line = lines.len() }
+            let from = if i.from_session.is_empty() { i.from.clone() } else { format!("{}'s {}", i.from, i.from_session) };
+            let kind = if i.question.is_some() { "question for" } else { "work for" };
+            let head = format!("{} {from} · {kind} your {} · {}{}", if on { "▸" } else { " " }, i.session, crate::team::ago(i.ts),
+                               if i.replied { " · you replied" } else { "" });
+            lines.push(Line::styled(clip(&head, w), if on { Style::new().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD) }
+                                                   else { Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD) }));
+            // the whole request on the picked one, two lines on the others
+            let text: String = i.text.chars().filter(|c| !c.is_control() || *c == '\n').collect();
+            let body: Vec<&str> = text.lines().collect();
+            let shown = if on { body.len().min(12) } else { body.len().min(2) };
+            for l in &body[..shown] { lines.push(Line::raw(format!("    {}", clip(l, w.saturating_sub(4))))) }
+            if body.len() > shown { lines.push(Line::styled(format!("    … {} more lines", body.len() - shown), Style::new().fg(Color::DarkGray))) }
+            lines.push(Line::raw(""));
+        }
+        let top = sel_line.saturating_sub((area.height as usize).saturating_sub(6)) as u16;
+        f.render_widget(Paragraph::new(lines).scroll((top, 0)), area);
     }
 
     /// The map: one line per person saying what they're on and where, the one problem worth
@@ -675,22 +768,52 @@ impl TeamView {
         f.render_widget(Paragraph::new(lines).scroll((top, 0)), area);
     }
 
+    /// Chat: channels on the left (# team, a DM per teammate, your groups), the picked one on the right.
     fn draw_chat(&mut self, f: &mut Frame, area: Rect) {
-        let rows = crate::team::chat();
-        let area = Rect { x: area.x + 1, width: area.width.saturating_sub(2), ..area };
+        let chans = crate::team::channels();
+        self.sel[CHAT] = self.sel[CHAT].min(chans.len().saturating_sub(1));
+        let [left, right] = Layout::horizontal([Constraint::Length(22.min(area.width / 3)), Constraint::Min(10)]).areas(area);
+        let lw = left.width.saturating_sub(2) as usize;
+        let list: Vec<Line> = chans.iter().enumerate().map(|(i, c)| {
+            let on = i == self.sel[CHAT];
+            let badge = match (c.unread, c.pinged) { (0, _) => String::new(), (n, true) => format!(" {n}@"), (n, false) => format!(" {n}") };
+            let name = clip(&c.label, lw.saturating_sub(badge.chars().count() + 1));
+            let pad = lw.saturating_sub(name.chars().count() + badge.chars().count() + 1);
+            let st = if on { Style::new().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD) }
+                     else if c.id.starts_with('@') && !c.online { Style::new().fg(Color::DarkGray) } else { Style::new() };
+            Line::from(vec![
+                Span::styled(format!(" {name}{}", " ".repeat(pad)), st),
+                Span::styled(badge, if on { st } else if c.pinged { Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD) } else { Style::new().fg(Color::Green) }),
+            ])
+        }).collect();
+        f.render_widget(Paragraph::new(list).block(Block::new().borders(Borders::RIGHT).border_style(Style::new().fg(Color::DarkGray))), left);
+
+        let Some(c) = chans.get(self.sel[CHAT]) else { return };
+        crate::team::channel_read(&c.id); // on screen: read
+        let right = Rect { x: right.x + 2, width: right.width.saturating_sub(3), ..right };
+        let members = crate::team::channel_members(&c.id);
+        let about = if c.id == "#team" { "everyone in the team · people only, agents never read it".to_string() }
+            else if c.id.starts_with('@') {
+                format!("private: only {} can read it{}", members.join(" and "),
+                        if c.online { String::new() } else { " · they're offline: it reaches them when they're back".into() })
+            } else { format!("group: {} · only its members can read it", members.join(", ")) };
+        let mut lines = vec![Line::styled(clip(&about, right.width as usize), Style::new().fg(Color::DarkGray)), Line::raw("")];
+        let rows = crate::team::channel_msgs(&c.id);
         if rows.is_empty() {
-            f.render_widget(Paragraph::new("\n  No messages yet. Press Enter to say something to the team: it goes to people, not agents.")
-                .style(Style::new().fg(Color::DarkGray)), area);
-            return;
+            lines.push(Line::styled("No messages yet. Press Enter to write; @login pings someone, @team everyone.", Style::new().fg(Color::DarkGray)));
         }
-        let lines: Vec<Line> = rows.iter().map(|(t, who, x)| Line::from(vec![
-            Span::styled(format!("{who:>10} "), Style::new().fg(if who == "you" { Color::Cyan } else { Color::Green }).add_modifier(Modifier::BOLD)),
-            Span::raw(x.clone()),
-            Span::styled(format!("  {t}"), Style::new().fg(Color::DarkGray)),
-        ])).collect();
+        for (t, who, x, ping) in &rows {
+            let text = if *ping { Span::styled(x.clone(), Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD)) } else { Span::raw(x.clone()) };
+            lines.push(Line::from(vec![
+                Span::styled(format!("{who:>10} "), Style::new().fg(if who == "you" { Color::Cyan } else { Color::Green }).add_modifier(Modifier::BOLD)),
+                text,
+                Span::styled(format!("  {t}"), Style::new().fg(Color::DarkGray)),
+            ]));
+        }
         let p = Paragraph::new(lines).wrap(Wrap { trim: false });
-        let h = p.line_count(area.width) as u16;
-        f.render_widget(p.scroll((h.saturating_sub(area.height), 0)), area);
+        let h = p.line_count(right.width) as u16;
+        let top = h.saturating_sub(right.height).saturating_sub(self.scroll);
+        f.render_widget(p.scroll((top, 0)), right);
     }
 
     fn draw_people(&mut self, f: &mut Frame, area: Rect, hub: &Hub, ppl: &[Person], gh: &Gh) {
@@ -829,7 +952,7 @@ impl TeamView {
         let top = sel.saturating_sub(h.saturating_sub(1));
         let kw = rows.iter().map(|r| r.0.chars().count()).max().unwrap_or(4).min(14);
         let lines: Vec<Line> = rows.iter().enumerate().skip(top).take(h).map(|(i, (k, t, side))| {
-            let on = self.tab != 4 && i == sel;
+            let on = self.tab != TABS.len() - 1 && i == sel;
             let base = if on { Style::new().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD) } else { Style::new() };
             let room = (area.width as usize).saturating_sub(kw + side.chars().count() + 6);
             let t = clip(t, room);

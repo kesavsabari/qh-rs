@@ -44,7 +44,9 @@ const HELP: &str = "/new <name> [profile]  new session (Ctrl+N: instant, auto-na
 /cwd [path]            this session's working folder
 /image <path> (Ctrl+V)  attach an image to your next message; Backspace on an empty line removes it
 /map (Ctrl+B)          live map of sessions, messages and shared folders
-/team (Ctrl+T)         start or join a team; in a team, the team map
+/team (Ctrl+T)         start or join a team; in a team, the team room: map, chat, requests, tasks, PRs
+/dm <login> <text>     private message to a teammate (only the two of you can read it); @login in chat pings
+/team group <name> <login>…  a private group chat; /team group lists yours
 /project (Ctrl+P)      switch project: team and personal; the others keep running (Ctrl+Space or Ctrl+] flips team ⇄ personal)
 /anyway                this tab was paused because a teammate is changing the same function: go ahead anyway
 /answers [auto|ask|off] whether teammates' agents may ask yours (answered from a read-only copy, 20 an hour)
@@ -57,7 +59,7 @@ Shift+←/→ (or Alt+←/→, Alt+1..9) switch tabs · Shift+↑/↓ or PgUp/Pg
 use crate::tools::DANGER;
 
 /// What the `/` autocomplete offers; custom commands are added from .qh/commands.
-const COMMANDS: [(&str, &str); 42] = [
+const COMMANDS: [(&str, &str); 43] = [
     ("/model", "pick this tab's model"), ("/provider", "connect providers: sign in, keys"),
     ("/new", "new session tab"), ("/worktree", "this tab in its own git worktree"),
     ("/merge", "merge this worktree tab back (diff first)"), ("/merge --discard", "remove this worktree and its branch"),
@@ -73,6 +75,7 @@ const COMMANDS: [(&str, &str); 42] = [
     ("/image", "attach an image to your next message (Ctrl+V pastes one)"),
     ("/anyway", "let this tab edit what a teammate is changing"),
     ("/answers", "may teammates' agents ask yours: auto · ask · off"),
+    ("/dm", "private message to a teammate: /dm <login> <text>"),
     ("/promise", "hold teammates to their last answer: edits that break it are held"),
     ("/cd", "same as /cwd"), ("/providers", "same as /provider"),
 ];
@@ -106,6 +109,9 @@ const SUBCOMMANDS: &[(&str, &str)] = &[
     ("/promise <function> <what must stay true>", "your own promise, checked when a teammate edits it"),
     ("/promise list", "the promises this tab holds"),
     ("/promise drop <function>", "stop holding a teammate to it"),
+    ("/dm <login> <text>", "a private message: only the two of you can read it"),
+    ("/team group <name> <login> <login>…", "a private group chat: only its members can read it"),
+    ("/team group", "your groups"),
     ("/answers auto", "teammates' agents ask yours; up to 20 answers an hour"),
     ("/answers ask", "you allow each question first"),
     ("/answers off", "they only see your fact sheet"),
@@ -744,6 +750,10 @@ impl App {
             Event::Done { .. } if self.notifier.done(mode, &name, now) => crate::notify::send(mode, &format!("qh: {name} finished")),
             Event::Confirm { .. } if self.notifier.confirm(mode, &name, now) => crate::notify::send(mode, &format!("qh: {name} needs your OK")),
             _ => {}
+        }
+        // team events (requests, pings, direct messages, answers): one notification each
+        for t in crate::team::take_alerts() {
+            if self.notifier.team_event(mode) { crate::notify::send(mode, &t) }
         }
         match ev {
             Event::Token(t) => {
@@ -1636,6 +1646,13 @@ impl App {
                 Ok(t) => self.note(&a, t),
                 Err(e) => self.err(&a, e),
             },
+            "/dm" => match arg.split_once(' ') {
+                Some((who, text)) if !text.trim().is_empty() => match crate::team::dm_send(who, text.trim()) {
+                    Ok(m) => self.note(&a, m),
+                    Err(e) => self.err(&a, e),
+                },
+                _ => self.err(&a, "usage: /dm <login> <text> (private: only the two of you can read it)"),
+            },
             "/answers" if arg.is_empty() => match crate::team::answers_mode() {
                 Some(mode) => self.note(&a, format!("teammates' agents asking yours: {mode} · /answers auto|ask|off")),
                 None => self.err(&a, "team mode is off"),
@@ -1817,6 +1834,22 @@ Type /team create to put it on GitHub (private) and invite friends by their GitH
                         _ => self.err(&a, "usage: /team send <who> <session> <text>"),
                     }
                 }
+                "group" => {
+                    let g = crate::team::groups();
+                    self.note(&a, if g.is_empty() { "no groups yet: /team group <name> <login> <login>…".to_string() } else {
+                        g.iter().map(|(n, m)| format!("+ {n}: {}", m.join(", "))).collect::<Vec<_>>().join("\n")
+                    });
+                }
+                _ if arg.starts_with("group ") => {
+                    let w: Vec<String> = arg[6..].split_whitespace().map(String::from).collect();
+                    match w.split_first() {
+                        Some((name, logins)) if !logins.is_empty() => match crate::team::group_create(name, logins) {
+                            Ok(m) => self.note(&a, format!("{m}. Its channel is in the team room's Chat tab (Ctrl+T)")),
+                            Err(e) => self.err(&a, e),
+                        },
+                        _ => self.err(&a, "usage: /team group <name> <login> <login>…"),
+                    }
+                }
                 _ if arg.starts_with("answer ") => {
                     let w: Vec<&str> = arg.split_whitespace().collect();
                     let (Some(from), Some(id), Some(ans)) = (w.get(1), w.get(2).and_then(|x| x.parse::<u64>().ok()), w.get(3)) else {
@@ -1827,9 +1860,9 @@ Type /team create to put it on GitHub (private) and invite friends by their GitH
                         Some((session, text)) => {
                             let to = if self.hub.get(&session).is_some() { session } else { a.clone() };
                             self.hub.send(&to, &text, "user", 0, None);
-                            self.note(&a, format!("delivered to {to}{}", if *ans == "always" { format!("; {from}'s messages now go straight in") } else { String::new() }));
+                            self.note(&a, format!("accepted: delivered to {to}"));
                         }
-                        None if *ans == "deny" => self.note(&a, format!("denied {from}'s message")),
+                        None if *ans == "deny" => self.note(&a, format!("declined {from}'s request")),
                         None => self.err(&a, "that message isn't waiting any more"),
                     }
                 }
@@ -1896,11 +1929,16 @@ Type /team create to put it on GitHub (private) and invite friends by their GitH
                         return;
                     }
                     for i in crate::team::pending() {
-                        let g = if i.question.is_some() { format!("{}'s agent asks your {}: \"{}\"", i.from, i.session, clip(&i.text, 50)) }
-                                else { format!("{} wants to send: \"{}\"", i.from, clip(&i.text, 50)) };
-                        all.push((format!("answer {} {} once", i.from, i.id), "Allow".into(), g.clone()));
-                        all.push((format!("answer {} {} always", i.from, i.id), format!("Always allow {}", i.from), g.clone()));
-                        all.push((format!("answer {} {} deny", i.from, i.id), "Deny".into(), g));
+                        if i.question.is_some() {
+                            let g = format!("{}'s agent asks your {}: \"{}\"", i.from, i.session, clip(&i.text, 50));
+                            all.push((format!("answer {} {} once", i.from, i.id), "Answer (read-only copy)".into(), g.clone()));
+                            all.push((format!("answer {} {} always", i.from, i.id), format!("Always answer {}'s questions", i.from), g.clone()));
+                            all.push((format!("answer {} {} deny", i.from, i.id), "Decline".into(), g));
+                        } else {
+                            let g = format!("{} requests work in your {}: \"{}\"", i.from, i.session, clip(&i.text, 50));
+                            all.push((format!("answer {} {} once", i.from, i.id), "Accept: it goes into your session".into(), g.clone()));
+                            all.push((format!("answer {} {} deny", i.from, i.id), "Decline (they're told)".into(), g));
+                        }
                     }
                     let team = format!("team · {}", crate::team::repo().unwrap_or_default());
                     for (who, online, seen, sessions, role) in crate::team::people() {
@@ -2423,7 +2461,9 @@ then it's `git push -u origin {branch}` and `gh pr create --fill`.");
                 h2.send(&to, text, "user", 0, None);
             }),
             ask: Box::new(move |i: &crate::team::Incoming| h3.emit(&a2, Event::Notice(format!(
-                "{} asks your {}: \"{}\" · Ctrl+T to allow or deny", i.from, i.session, i.text)))),
+                "⚑ {} {} your {}: \"{}\" · nothing runs until you accept: Ctrl+T → Requests (accept, reply or decline)",
+                i.from, if i.question.is_some() { "asks" } else { "sent a request for" }, i.session,
+                i.text.chars().filter(|c| !c.is_control()).take(200).collect::<String>())))),
             refresh: Box::new(move || h4.emit("", Event::Changed)),
         };
         crate::team::start(&cwd, summary, hooks)

@@ -49,6 +49,12 @@ impl Notifier {
         true
     }
 
+    /// A team event (a request, a ping, a direct message, an answer): one notification each,
+    /// under the same rule as the rest.
+    pub fn team_event(&self, mode: Mode) -> bool {
+        self.wanted(mode)
+    }
+
     fn wanted(&self, mode: Mode) -> bool {
         mode != Mode::Off && self.focused != Some(true)
     }
@@ -121,6 +127,14 @@ mod tests {
         assert!(!n.done(Mode::Auto, "a", t0 + Duration::from_secs(30)));
         // the next turn may notify again
         assert!(n.confirm(Mode::Auto, "a", t0));
+    }
+
+    #[test]
+    fn team_events_follow_focus_and_off() {
+        assert!(Notifier::default().team_event(Mode::Auto), "focus unknown: notify");
+        assert!(Notifier { focused: Some(false), ..Default::default() }.team_event(Mode::Desktop));
+        assert!(!Notifier { focused: Some(true), ..Default::default() }.team_event(Mode::Auto), "looking at qh: quiet");
+        assert!(!Notifier { focused: Some(false), ..Default::default() }.team_event(Mode::Off), "notify = off");
     }
 
     #[test]

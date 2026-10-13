@@ -561,11 +561,8 @@ Windows asks for admin once to add two hidden sandbox users. Until then qh asks 
         let (user, domain, pw) = (wz(USERS[i]), wz("."), wz(&c.pw[i]));
         let mut si: STARTUPINFOW = unsafe { zeroed() };
         std_handles(&mut si);
-        // TEMP diagnosis (remove): QH_WINSBX_DESK = narrow (default) | group | user | shared
-        let dv = std::env::var("QH_WINSBX_DESK").unwrap_or_default();
-        let who = if dv == "user" { lookup(USERS[i]).unwrap_or_default() } else { c.group.clone() };
-        let (_desk, mut desk_name) = match private_desktop(&who, if matches!(dv.as_str(), "group" | "user") { 0x2_01FF } else { 0x1 | 0x2 | 0x4 | 0x8 | 0x40 | 0x80 | 0x2_0000 }) { Ok(d) => d, Err(e) => return fail("can't make the sandbox's desktop", e) };
-        if dv != "shared" { si.lpDesktop = desk_name.as_mut_ptr(); }
+        // (no lpDesktop: the logon service lets the runner onto your desktop only when none is named;
+        // the runner then puts the command itself on a private one)
         let mut pi: PROCESS_INFORMATION = unsafe { zeroed() };
         // SAFETY: all pointers are to live NUL-terminated buffers. The profile is loaded: without it
         // Windows' TLS (schannel) has no credentials, so every HTTPS download fails; `remove` deletes it
@@ -665,6 +662,11 @@ Windows asks for admin once to add two hidden sandbox users. Until then qh asks 
         let envb = env_block(&env);
         let mut si: STARTUPINFOW = unsafe { zeroed() };
         std_handles(&mut si);
+        // TEMP diagnosis (remove): QH_WINSBX_DESK = narrow (default) | full | shared
+        let dv = std::env::var("QH_WINSBX_DESK").unwrap_or_default();
+        let mask = if dv == "full" { 0x2_01FF } else { 0x1 | 0x2 | 0x4 | 0x8 | 0x40 | 0x80 | 0x2_0000 };
+        let (_desk, mut desk_name) = match private_desktop(&group.to_string_lossy(), mask) { Ok(d) => d, Err(e) => return fail("can't make the command's desktop", e) };
+        if dv != "shared" { si.lpDesktop = desk_name.as_mut_ptr(); }
         let mut pi: PROCESS_INFORMATION = unsafe { zeroed() };
         // SAFETY: live NUL-terminated buffers; the token is ours; inherits only std handles (all qh has here)
         let ok = unsafe { CreateProcessAsUserW(token.as_raw_handle(), app.as_ref().map_or(null(), |a| a.as_ptr()), cmdline.as_mut_ptr(),

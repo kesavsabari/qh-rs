@@ -106,11 +106,29 @@ a:hover{color:var(--accent)}
 @keyframes waitc{0%,68%{opacity:0}70%,72%,76%{opacity:1}74%{opacity:.35}78%,100%{opacity:0}}
 @keyframes okc{0%,77%{opacity:0}79%,93%{opacity:1}96%,100%{opacity:0}}
 @keyframes capc{0%{opacity:0;transform:translateY(6px)}3%,22%{opacity:1;transform:none}25%,100%{opacity:0}}
-@media (max-width:640px){.stage{height:auto;margin-top:0}.stage>*:not(.caps){display:none}.caps{position:static;height:auto;border-top:1px solid var(--ink)}.cap{position:static;opacity:1;animation:none;transform:none;padding:14px 0;border-bottom:1px solid var(--rule)}}
-@media (prefers-reduced-motion:reduce){.pk,.chip{display:none}.caps{position:static;height:auto;border:0}.stage{height:auto;min-height:240px;padding-top:240px}.cap{position:static;opacity:1;margin-top:8px}}
+/* the team stage, upright for phones: your machine on top, Alex's below, qh-link down the middle */
+.stage-m{display:none;height:430px}
+.stage-m .vl{position:absolute;left:50%;width:0;border-left:1px solid var(--rule)}
+.stage-m .vc{position:absolute;left:50%;width:0;border-left:1px dashed var(--keyb)}
+.stage-m .pa{animation-name:mA}.stage-m .pb{animation-name:mB}.stage-m .pc{animation-name:mC}
+.stage-m .chip{left:0;top:120px;transform:none}
+.stage-m .caps{height:92px}
+@keyframes mA{0%{left:30%;top:54px;opacity:0}2%{opacity:1}9%{left:50%;top:54px}17%{left:50%;top:224px}23%{left:74%;top:224px;opacity:1}25%,100%{left:74%;top:224px;opacity:0}}
+@keyframes mB{0%,25%{left:74%;top:224px;opacity:0}27%{opacity:1}31%{left:50%;top:224px}41%{left:50%;top:54px}48%{left:30%;top:54px;opacity:1}50%,100%{left:30%;top:54px;opacity:0}}
+@keyframes mC{0%,50%{left:74%;top:274px;opacity:0}52%{opacity:1}56%{left:50%;top:274px}65%{left:50%;top:104px}68%,78%{left:30%;top:104px;opacity:1}95%{left:17%;top:104px;opacity:1}97%,100%{left:17%;top:104px;opacity:0}}
+.cmd{display:flex;align-items:center;gap:16px;padding:18px 0;border-bottom:1px solid var(--frule)}
+.cmd code{flex:1;min-width:0;overflow-wrap:anywhere}
+.cmd .copy{flex:none}
+.float.off{opacity:0!important;visibility:hidden}
+@media (prefers-reduced-motion:reduce){.pk,.chip{display:none}.caps{position:static;height:auto;border:0}.stage{height:auto;min-height:240px;padding-top:240px}.stage-m{padding-top:330px}.cap{position:static;opacity:1;margin-top:8px}}
 @media (max-width:1000px){.hero-grid{grid-template-columns:1fr!important;align-content:center}.hero-qh{font-size:clamp(110px,min(46vw,36vh),420px)}}
 @media (max-width:900px){.sec{grid-template-columns:1fr}.rail .lab{position:static;margin-bottom:28px}}
-@media (max-width:640px){.li{grid-template-columns:1fr}.navl{display:none!important}}
+@media (max-width:640px){.li{grid-template-columns:1fr}.navl{display:none!important}
+  .stage-d{display:none}.stage-m{display:block}
+  .top{gap:14px}.top nav{width:100%;justify-content:space-between;border-top:1px solid var(--rule);padding-top:14px}
+  .float{mix-blend-mode:normal;pointer-events:auto;color:var(--ink);background:var(--paper);border-bottom:1px solid var(--rule);padding:12px 20px}
+  .float a{color:var(--ink)}.float a.m{border-color:var(--ink)!important;padding:7px 14px!important}
+  .cmd{gap:12px}.cmd .copy{padding:0 14px!important}}
 @media (prefers-color-scheme:dark){html:not([data-theme=light]) .root{--paper:#0d0d0c;--ink:#ecebe6;--soft:#9c9b94;--body:#c4c3bc;--faint:#6f6e68;--rule:#2a2a27;--keyb:#3a3a36;--keybg:#161614;--accent:#ff5a2a;
   --fbg:#f1f0ea;--fink:#0e0e0d;--fsoft:#6b6b66;--fbody:#3d3d39;--frule:#d9d9d3;--frule2:#e2e2dc;--fbtn:#b9b9b2;--flink:#3d3d39}}
 </style>
@@ -127,7 +145,7 @@ a:hover{color:var(--accent)}
 <div class="wrap">
 
 <section id="top" class="hero-par" style="height: 100svh; min-height: 620px; box-sizing: border-box; display: flex; flex-direction: column; padding: 26px 0 24px">
-<header class="qh-rise lab" style="display: flex; justify-content: space-between; align-items: center; gap: 24px; flex-wrap: wrap; animation-delay: .05s">
+<header class="qh-rise lab top" style="display: flex; justify-content: space-between; align-items: center; gap: 24px; flex-wrap: wrap; animation-delay: .05s">
 <span>a coding agent for your terminal · 0.2.1</span>
 <nav style="display: flex; gap: clamp(16px, 2.4vw, 30px)">
 <span class="navl" style="display: flex; gap: clamp(16px, 2.4vw, 30px)">
@@ -169,7 +187,7 @@ a:hover{color:var(--accent)}
 <p class="lead">Friends on one project, each on their own computer. Agents ask each other's agents, hand work across, and nothing lands on your machine without your yes. It all travels over <b style="font-weight: 500; color: var(--ink)">qh-link</b>, an encrypted direct line between your machines; the project's GitHub repo is just where you find each other.</p>
 </div>
 
-<div class="stage sv" role="img" aria-label="Two machines joined by qh-link: your agent asks Alex's agent, Alex's agent answers, Alex sends work that waits for you, you allow it and it runs on your machine.">
+<div class="stage stage-d sv" role="img" aria-label="Two machines joined by qh-link: your agent asks Alex's agent, Alex's agent answers, Alex sends work that waits for you, you allow it and it runs on your machine.">
 <div class="lab" style="position: absolute; left: 0; top: 0">you · laptop</div>
 <div class="lab" style="position: absolute; left: 50%; top: 124px; transform: translateX(-50%); white-space: nowrap; color: var(--ink)"><span style="color: var(--accent)">●</span> qh-link · encrypted</div>
 <div class="lab" style="position: absolute; right: 0; top: 0">alex · mac</div>
@@ -194,6 +212,34 @@ a:hover{color:var(--accent)}
 <span class="chip wait m">waiting for you</span>
 <span class="chip ok m">allowed ✓</span>
 
+<div class="caps">
+<p class="cap" style="animation-delay: 0s"><span class="m">1</span>Your agent asks Alex's agent how the API works.</p>
+<p class="cap" style="animation-delay: 3.5s"><span class="m">2</span>Alex's agent answers from their working copy: live, read-only.</p>
+<p class="cap" style="animation-delay: 7s"><span class="m">3</span>Alex sends work to your session. It waits for you.</p>
+<p class="cap" style="animation-delay: 10.5s"><span class="m">4</span>You allow it. It runs on your machine, with your model.</p>
+</div>
+</div>
+
+<div class="stage stage-m sv" role="img" aria-label="Two machines joined by qh-link: your agent asks Alex's agent, Alex's agent answers, Alex sends work that waits for you, you allow it and it runs on your machine.">
+<div class="lab" style="position: absolute; left: 0; top: 0">you · laptop</div>
+<div class="lab tl" style="top: 46px; left: 0">main</div>
+<div class="tline" style="top: 54px; left: 17%; width: 83%"><i class="qh-dot" style="animation-duration: 9s"></i></div>
+<div class="lab tl" style="top: 96px; left: 0">tests</div>
+<div class="tline" style="top: 104px; left: 17%; width: 83%"><i class="qh-dot" style="animation-duration: 12s; animation-delay: -5s"></i></div>
+<div class="vl" style="top: 54px; height: 50px"></div>
+<div class="vc" style="top: 104px; height: 120px"></div>
+<div class="lab" style="position: absolute; left: calc(50% + 14px); top: 158px; white-space: nowrap; color: var(--ink)"><span style="color: var(--accent)">●</span> qh-link · encrypted</div>
+<div class="lab tl" style="top: 216px; left: 0">api</div>
+<div class="tline" style="top: 224px; left: 17%; width: 83%"><i class="qh-dot" style="animation-duration: 10s; animation-delay: -3s"></i></div>
+<div class="lab tl" style="top: 266px; left: 0">docs</div>
+<div class="tline" style="top: 274px; left: 17%; width: 83%"><i class="qh-dot" style="animation-duration: 13s; animation-delay: -8s"></i></div>
+<div class="vl" style="top: 224px; height: 50px"></div>
+<div class="lab" style="position: absolute; left: 0; top: 300px">alex · mac</div>
+<i class="pk pa"></i>
+<i class="pk pb"></i>
+<i class="pk pc"></i>
+<span class="chip wait m">waiting for you</span>
+<span class="chip ok m">allowed ✓</span>
 <div class="caps">
 <p class="cap" style="animation-delay: 0s"><span class="m">1</span>Your agent asks Alex's agent how the API works.</p>
 <p class="cap" style="animation-delay: 3.5s"><span class="m">2</span>Alex's agent answers from their working copy: live, read-only.</p>
@@ -282,12 +328,12 @@ a:hover{color:var(--accent)}
 <div class="reveal-in">
 <div style="font-weight: 500; font-size: clamp(56px, 10vw, 200px); line-height: .88; letter-spacing: -0.065em">Plug in your<br>first line<span class="qh-cursor" style="display: inline-block; width: 0.08em; height: 0.7em; background: var(--accent); margin-left: 0.08em"></span></div>
 <div style="margin-top: clamp(36px, 6vh, 64px); display: flex; flex-direction: column; border-top: 1px solid var(--frule)">
-<div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 16px; padding: 18px 0; border-bottom: 1px solid var(--frule)">
-<code class="m" style="font-size: clamp(14px, 1.8vw, 22px); color: var(--fink); overflow-wrap: anywhere"><span style="color: var(--accent)">$</span> curl -fsSL kesavsabari.github.io/qh/sh | sh</code>
+<div class="cmd">
+<code class="m" style="font-size: clamp(14px, 1.8vw, 22px); color: var(--fink)"><span style="color: var(--accent)">$</span> curl -fsSL kesavsabari.github.io/qh/sh | sh</code>
 <button class="copy m" type="button" data-copy="curl -fsSL kesavsabari.github.io/qh/sh | sh" style="font-size: 12px; min-height: 44px; padding: 0 18px; border: 1px solid var(--fink); background: transparent; color: var(--fink); cursor: pointer">copy</button>
 </div>
-<div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 16px; padding: 18px 0; border-bottom: 1px solid var(--frule)">
-<code class="m" style="font-size: clamp(13px, 1.4vw, 17px); color: var(--fbody); overflow-wrap: anywhere">windows: irm kesavsabari.github.io/qh | iex</code>
+<div class="cmd">
+<code class="m" style="font-size: clamp(13px, 1.4vw, 17px); color: var(--fbody)">windows: irm kesavsabari.github.io/qh | iex</code>
 <button class="copy m" type="button" data-copy="irm kesavsabari.github.io/qh | iex" style="font-size: 12px; min-height: 44px; padding: 0 18px; border: 1px solid var(--fbtn); background: transparent; color: var(--fink); cursor: pointer">copy</button>
 </div>
 </div>
@@ -360,6 +406,10 @@ document.querySelectorAll('a[href^="#"]').forEach(a => a.addEventListener('click
   glide(to);
   history.replaceState(null, '', id === 'top' ? location.pathname : '#' + id);
 }));
+// the quick-links bar steps aside once the install footer is showing: it is the install
+const fl = document.querySelector('.float'), sheet = document.querySelector('.sheet');
+const aside = () => fl.classList.toggle('off', sheet.getBoundingClientRect().bottom < innerHeight * 0.75);
+addEventListener('scroll', aside, { passive: true }); addEventListener('resize', aside); aside();
 </script>
 </body>
 </html>

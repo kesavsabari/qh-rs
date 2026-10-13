@@ -52,7 +52,7 @@ jobs:
           sleep 3
           C="$(cygpath -w "$(command -v curl)")"
           echo "host: $(curl -sk -o /dev/null -w '%{http_code}' https://127.0.0.1:47610/)"
-          for m in restricted rsid auth lua plain; do echo "== $m"; QH_WINSBX_DIAG=$m ./target/release/qh.exe __winsbx on "$C" -sk -o NUL -w "code=%{http_code} %{errormsg}" https://127.0.0.1:47610/; echo " exit=$?"; done
+          for m in restricted plain noprofile; do echo "== $m"; QH_WINSBX_DIAG=$m ./target/release/qh.exe __winsbx on "$C" -sk -o NUL -w "code=%{http_code} %{errormsg}" https://127.0.0.1:47610/; echo " exit=$?"; done
           QH_WINSBX_DIAG=restricted ./target/release/qh.exe __winsbx on "$C" -skv -o NUL https://127.0.0.1:47610/ 2>&1 | tail -8
           kill %1 || true
       - run: cargo test --release -- --nocapture

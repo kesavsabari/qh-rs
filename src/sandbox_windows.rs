@@ -645,10 +645,6 @@ Windows asks for admin once to add two hidden sandbox users. Until then qh asks 
         let (user, groups) = (token_info(tok.as_raw_handle(), TokenUser)?, token_info(tok.as_raw_handle(), TokenGroups)?);
         let (g, everyone) = (sid_from(group)?, sid_from("S-1-1-0")?);
         let mut sids = vec![g.0, everyone.0, unsafe { (*(user.as_ptr() as *const TOKEN_USER)).User.Sid }];
-        // TEMP diagnosis (remove)
-        let diag = std::env::var("QH_WINSBX_DIAG").unwrap_or_default();
-        let extra = match diag.as_str() { "rsid" => Some(sid_from("S-1-5-12")?), "auth" => Some(sid_from("S-1-5-11")?), _ => None };
-        if let Some(x) = &extra { sids.push(x.0) }
         // SAFETY: TOKEN_GROUPS with GroupCount entries, inside `groups`
         unsafe {
             let tg = groups.as_ptr() as *const TOKEN_GROUPS;
@@ -657,8 +653,7 @@ Windows asks for admin once to add two hidden sandbox users. Until then qh asks 
         }
         let mut sa: Vec<SID_AND_ATTRIBUTES> = sids.iter().map(|&s| SID_AND_ATTRIBUTES { Sid: s, Attributes: 0 }).collect();
         let mut out = null_mut();
-        let lua = if diag == "lua" { 0x04 } else { 0 };
-        if unsafe { CreateRestrictedToken(tok.as_raw_handle(), DISABLE_MAX_PRIVILEGE | WRITE_RESTRICTED | lua, 0, null(), 0, null(),
+        if unsafe { CreateRestrictedToken(tok.as_raw_handle(), DISABLE_MAX_PRIVILEGE | WRITE_RESTRICTED, 0, null(), 0, null(),
             sa.len() as u32, sa.as_mut_ptr(), &mut out) } == 0 { return Err(last_err()) }
         Ok(unsafe { OwnedHandle::from_raw_handle(out) })
     }

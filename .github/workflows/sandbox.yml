@@ -20,8 +20,7 @@ jobs:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     env:
-      # Windows commands run unsandboxed for now (an AppContainer can't run Git Bash): its suite checks the guards
-      QH_REQUIRE_SANDBOX: ${{ matrix.os == 'windows-latest' && '0' || '1' }}
+      QH_REQUIRE_SANDBOX: "1"
       QH_REALWORK: "1"
     steps:
       - uses: actions/checkout@v4
@@ -37,5 +36,24 @@ jobs:
       - name: what this runner offers
         if: runner.os == 'Linux'
         run: cat /sys/kernel/security/lsm; echo; uname -r
+      # Windows: the sandbox users need admin once (the runner is admin, so no UAC prompt)
+      - name: qh sandbox setup
+        if: runner.os == 'Windows'
+        shell: bash
+        run: cargo build --release && ./target/release/qh.exe sandbox setup && ./target/release/qh.exe __tool --status
       - run: cargo test --release -- --nocapture
         shell: bash
+      - name: qh sandbox remove
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          ./target/release/qh.exe sandbox remove
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          if (Get-LocalUser -Name 'qh-sbx-*') { throw 'sandbox users left behind' }
+          if (Get-LocalGroup -Name 'qh-sandbox' -ErrorAction SilentlyContinue) { throw 'sandbox group left behind' }
+          $f = netsh wfp show filters file=- | Select-String 'qh sandbox'
+          if ($f) { throw "firewall filters left behind: $f" }
+          if (Test-Path "$env:USERPROFILE\AppData\Local\qh\sandbox-users.dat") { throw 'stored passwords left behind' }
+          $a = icacls $env:TEMP | Select-String 'qh-sandbox'
+          if ($a) { throw "ACEs left behind on TEMP: $a" }
+          "removed cleanly"

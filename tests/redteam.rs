@@ -43,6 +43,16 @@ impl Lab {
     fn bash(&self, cmd: &str) -> (bool, String) {
         self.tool("bash", serde_json::json!({ "cmd": cmd }))
     }
+
+    /// `bash` with a config file of its own (QH_CONFIG), e.g. `[sandbox] network = "off"`.
+    #[cfg(windows)]
+    fn bash_with(&self, toml: &str, cmd: &str) -> String {
+        let cfg = self.home.join("qh-test.toml");
+        std::fs::write(&cfg, toml).unwrap();
+        let o = Command::new(env!("CARGO_BIN_EXE_qh")).args(["__tool", "bash", &serde_json::json!({ "cmd": cmd }).to_string()])
+            .current_dir(&self.proj).env("QH_CONFIG", &cfg).env_remove("QH_SANDBOX").output().unwrap();
+        format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))
+    }
 }
 
 /// Whether commands can be sandboxed here; with QH_REQUIRE_SANDBOX=1 (CI) "no" fails the test
@@ -280,8 +290,7 @@ fn real_toolchains_in_the_sandbox() {
         eprintln!("$ {cmd}\n{out}");
         out
     };
-    // Windows' AppContainer is still a spike (PLAN.md S4): there a toolchain that breaks is reported, not failed
-    let spike = |ok: bool, what: &str| if cfg!(windows) { eprintln!("SPIKE {what}: {}", if ok { "works" } else { "BROKEN" }) } else { assert!(ok, "{what}") };
+    let spike = |ok: bool, what: &str| assert!(ok, "{what}");
     let have = |tool: &str| Command::new(tool).arg("--version").output().is_ok_and(|o| o.status.success());
     if have("cargo") {
         let out = run("cargo new -q --vcs none hello && cd hello && printf 'itoa = \"1\"\\n' >> Cargo.toml && cargo build -q 2>&1 | tail -5 && ./target/debug/hello");
@@ -299,3 +308,43 @@ fn real_toolchains_in_the_sandbox() {
     spike(out.contains("exit 0"), "git commit in the sandbox");
     let _ = std::fs::remove_dir_all(&proj);
 }
+
+/// Windows' sandbox users (`qh sandbox setup` must have run; CI does it): commands run as a sandbox
+/// user, can't write where Users may, reach the network only through the proxy (online user) or
+/// not at all (offline user), and Git Bash, cmd and PowerShell all work inside.
+#[cfg(windows)]
+#[test]
+fn windows_sandbox_users() {
+    if !sandboxed() {
+        eprintln!("SKIPPED: run `qh sandbox setup` first");
+        return;
+    }
+    let l = lab("winusers");
+    let (_, out) = l.bash("whoami");
+    assert!(out.contains("qh-sbx-on"), "runs as the online sandbox user: {out}");
+    // C:\Users\Public is writable by every user: not by the write-restricted token
+    let public = format!("C:/Users/Public/qh-redteam-{}", std::process::id());
+    let (_, out) = l.bash(&format!("echo x > {public}; mkdir {public}-d; ls {public} {public}-d 2>&1"));
+    assert!(!std::path::Path::new(&public).exists() && !std::path::Path::new(&format!("{public}-d")).exists(), "wrote where Users may: {out}");
+    let (_, out) = l.bash("cmd //c \"echo cmd-ok > c.txt\" && cat c.txt && powershell -NoProfile -Command \"Set-Content p.txt ps-ok; Get-Content p.txt\"");
+    assert!(out.contains("cmd-ok") && out.contains("ps-ok"), "cmd and PowerShell inside: {out}");
+    // direct connections are blocked by the firewall filters; the allowlist proxy works (needs internet)
+    let (_, out) = l.bash("curl -s -m 8 --noproxy '*' -o /dev/null -w 'direct=%{http_code}' https://1.1.1.1; echo; \
+curl -s -m 20 -o /dev/null -w 'proxy=%{http_code}' https://index.crates.io/config.json");
+    assert!(out.contains("direct=000"), "a direct connection got out: {out}");
+    assert!(out.contains("proxy=200"), "the allowlisted host through the proxy: {out}");
+    // a server of yours on loopback (Ollama, a debug port) is out of reach: only the proxy's ports are open
+    let host = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = host.local_addr().unwrap().port();
+    std::thread::spawn(move || for s in host.incoming().flatten() {
+        use std::io::{Read, Write};
+        let mut s = s;
+        let _ = s.read(&mut [0u8; 1024]);
+        let _ = s.write_all(b"HTTP/1.0 200 OK\r\nContent-Length: 4\r\n\r\nhost");
+    });
+    let (_, out) = l.bash(&format!("curl -s -m 5 --noproxy '*' -w '=%{{http_code}}' http://127.0.0.1:{port}/"));
+    assert!(!out.contains("host") && out.contains("=000"), "reached a host loopback server: {out}");
+    let out = l.bash_with("[sandbox]\nnetwork = \"off\"\n", "whoami; curl -s -m 15 -o /dev/null -w 'off=%{http_code}' https://index.crates.io/config.json");
+    assert!(out.contains("qh-sbx-off") && out.contains("off=000"), "network off: the offline user, no proxy: {out}");
+}
+

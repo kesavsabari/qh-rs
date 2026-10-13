@@ -551,6 +551,8 @@ Windows asks for admin once to add two hidden sandbox users. Until then qh asks 
         let (user, domain, pw) = (wz(USERS[i]), wz("."), wz(&c.pw[i]));
         let mut si: STARTUPINFOW = unsafe { zeroed() };
         std_handles(&mut si);
+        let (_desk, mut desk_name) = match private_desktop(&c.group) { Ok(d) => d, Err(e) => return fail("can't make the sandbox's desktop", e) };
+        si.lpDesktop = desk_name.as_mut_ptr();
         let mut pi: PROCESS_INFORMATION = unsafe { zeroed() };
         // SAFETY: all pointers are to live NUL-terminated buffers. The profile is loaded: without it
         // Windows' TLS (schannel) has no credentials, so every HTTPS download fails; `remove` deletes it
@@ -594,6 +596,45 @@ Windows asks for admin once to add two hidden sandbox users. Until then qh asks 
             GetExitCodeProcess(process.as_raw_handle(), &mut code);
         }
         code as i32
+    }
+
+    struct Desk(windows_sys::Win32::System::StationsAndDesktops::HDESK);
+    impl Drop for Desk {
+        fn drop(&mut self) { unsafe { windows_sys::Win32::System::StationsAndDesktops::CloseDesktop(self.0) }; }
+    }
+
+    /// A desktop of its own for one command, as Codex does: on yours, a sandboxed process could send
+    /// keystrokes and window messages to your other windows (your terminal, qh itself) and so act as
+    /// you. You keep full rights; the sandbox group may make windows and read and write objects on it,
+    /// but not switch the screen to it or change it. It goes when this launcher exits. Returns
+    /// "<window station>\\<desktop>" for STARTUPINFO; the command's own children inherit it.
+    fn private_desktop(group: &str) -> io::Result<(Desk, Vec<u16>)> {
+        use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+        use windows_sys::Win32::System::StationsAndDesktops::{CreateDesktopW, GetProcessWindowStation, GetUserObjectInformationW, UOI_NAME};
+        // read objects, create windows and menus, hook control, enumerate, write objects, read control
+        const PARTICIPANT: u32 = 0x1 | 0x2 | 0x4 | 0x8 | 0x40 | 0x80 | 0x2_0000;
+        let mut tok = null_mut();
+        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut tok) } == 0 { return Err(last_err()) }
+        let tok = unsafe { OwnedHandle::from_raw_handle(tok) };
+        let user = token_info(tok.as_raw_handle(), TokenUser)?;
+        let me = sid_string(unsafe { (*(user.as_ptr() as *const TOKEN_USER)).User.Sid })?;
+        let w = wz(format!("D:P(A;;GA;;;{me})(A;;0x{PARTICIPANT:x};;;{group})"));
+        let mut sd: PSECURITY_DESCRIPTOR = null_mut();
+        if unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(w.as_ptr(), 1, &mut sd, null_mut()) } == 0 { return Err(last_err()) }
+        let _sd = Local(sd);
+        let sa = SECURITY_ATTRIBUTES { nLength: size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: sd, bInheritHandle: 0 };
+        let r = crate::oauth::random();
+        let name = format!("qh-sbx-{}", r[..8].iter().map(|b| format!("{b:02x}")).collect::<String>());
+        let h = unsafe { CreateDesktopW(wz(&name).as_ptr(), null(), null(), 0, 0x000F_01FF, &sa) };
+        if h.is_null() { return Err(last_err()) }
+        let desk = Desk(h);
+        let mut buf = vec![0u16; 256];
+        let mut n = 0u32;
+        if unsafe { GetUserObjectInformationW(GetProcessWindowStation(), UOI_NAME, buf.as_mut_ptr().cast(), (buf.len() * 2) as u32, &mut n) } == 0 {
+            return Err(last_err());
+        }
+        let ws = String::from_utf16_lossy(&buf[..buf.iter().position(|&c| c == 0).unwrap_or(0)]);
+        Ok((desk, wz(format!("{ws}\\{name}"))))
     }
 
     /// `qh __winsbx-in <group sid> program args…`, as the sandbox user: run the command under a

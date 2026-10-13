@@ -2,6 +2,39 @@
 
 Each version starts with a one-line summary; the website shows it once the version is no longer recent.
 
+## 0.2.1 — 2026-10-13
+
+A Windows sandbox; auto mode by default; a second opinion from another model.
+
+- **Windows sandbox.** `qh sandbox setup` (asks for admin once) makes two hidden users,
+  `qh-sbx-off` (no network) and `qh-sbx-on` (only qh's allowlist proxy). Commands run as them with
+  a write-restricted token, on a private desktop, in a job object: they write only in the project,
+  temp and package caches, can't read your files elsewhere, can't see your windows, and firewall
+  filters block any direct connection. `qh sandbox remove` takes it all back (users, profiles,
+  filters, folder permissions). git, cargo (through a plain-HTTP crates.io mirror inside qh,
+  allowlist checked), Python, Node and npm reach the network; tools on Windows' own TLS
+  (`curl.exe`, PowerShell's web commands, .NET, winget) can't, and the error says to ask for an
+  unsandboxed run. Over SSH, programs that need a desktop can't start, and say so.
+- **Auto mode by default** wherever commands are sandboxed (Linux, macOS, Windows after setup);
+  `ask` otherwise.
+- **No project in your home folder**, above it, or at a drive root: started there, nothing is
+  writable and `/sandbox` says why.
+- **Second opinion.** `/ask-other [model]` sends the diff, new files, the latest answer and what
+  the last turn read to another model; the read-only `ask_model` tool does the same for the agent
+  (context required). `[routing] ask_model` picks the model.
+- **Model routing.** Opt-in `[routing] fetch_model` runs read-only lookups (read_file, grep,
+  find_references, web_search) on a cheaper model; tool lines show which model handled them.
+- **Fallback chain.** `fallback_model` takes a list, tried in order on rate limits, 5xx and outages.
+- **`past_sessions` tool:** list, search and read this folder's earlier sessions.
+- **Team on restart:** started outside the team project, the last team stays connected in the
+  background; the status bar shows `team <name> · Ctrl+] to open`.
+- **Browser:** a tab opens its own dev server (Linux, macOS), waiting briefly for one it just
+  started; page output labels Title and URL.
+- **Ctrl+R** shows replies only, tool calls folded to a step count.
+- Fixes: the confirm popup always shows its keys line; `qh -p` stops its background tasks when it
+  exits; a teammate's answer shows in full; a sandboxed `git push` without the login gets the
+  unsandboxed-retry hint.
+
 ## 0.2.0 — 2026-10-12
 
 Team requests, private chat and pings; web search, LSP, background tasks and worktrees.

@@ -59,14 +59,14 @@ add a --verbose flag to main.py
 what does src/engine.rs do?
 ```
 
-The agent asks before it edits a file or runs a command. Press **Shift+Tab** to change how
-much it asks:
+The agent starts in `auto` where commands run in the sandbox (Linux, macOS, and Windows after
+`qh sandbox setup`), otherwise in `ask`. Press **Shift+Tab** to change how much it asks:
 
 | mode | what it does |
 |---|---|
-| `ask` | asks before any change (default) |
+| `ask` | asks before any change (the default where commands can't be sandboxed) |
 | `auto-edit` | edits files freely, still asks before commands |
-| `auto` | runs everything except dangerous commands (rm, sudo, git push…) |
+| `auto` | runs everything except dangerous commands (rm, sudo, git push…) (the default where commands are sandboxed) |
 | `plan` | read-only: it looks around and writes a plan, then you switch modes to let it act |
 
 Useful keys and commands:
@@ -187,4 +187,5 @@ env = { GITHUB_PERSONAL_ACCESS_TOKEN = "..." }
 - **"rejected the API key":** run `qh login <provider>` to paste a new one.
 - **Slow or forgetful:** your GPU may only fit a small context. `/tier` shows what was chosen,
   and a cloud model avoids the limit.
-- **Windows commands:** qh uses Git Bash if it's installed, otherwise PowerShell.
+- **Windows commands:** qh uses Git Bash if it's installed, otherwise PowerShell. To sandbox
+  them, run `qh sandbox setup` once (it asks for admin); `qh sandbox remove` undoes it.

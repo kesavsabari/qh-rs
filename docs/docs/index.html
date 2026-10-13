@@ -196,9 +196,9 @@ jobs:
   <p>Press <kbd>Shift</kbd>+<kbd>Tab</kbd> to cycle how much the agent asks:</p>
   <table>
     <tr><th>Mode</th><th>What happens</th></tr>
-    <tr><td><code>ask</code></td><td>Asks before anything that changes something (the default)</td></tr>
+    <tr><td><code>ask</code></td><td>Asks before anything that changes something (the default where commands can't be sandboxed)</td></tr>
     <tr><td><code>auto-edit</code></td><td>Edits files freely; still asks before running commands</td></tr>
-    <tr><td><code>auto</code></td><td>Runs everything except dangerous commands (rm, sudo, git push…) and pay or delete clicks</td></tr>
+    <tr><td><code>auto</code></td><td>Runs everything except dangerous commands (rm, sudo, git push…) and pay or delete clicks (the default where commands are sandboxed)</td></tr>
     <tr><td><code>plan</code></td><td>Read-only: it explores and writes a plan; switch mode to let it act</td></tr>
   </table>
   <p>When it asks, you can allow once, deny, or "always" allow that kind of command. <code>/allow</code> lists the rules you've added.</p>
@@ -219,7 +219,7 @@ jobs:
     <tr><th>System</th><th>How commands are confined</th></tr>
     <tr><td>Linux</td><td>Landlock (kernel 5.13+) and seccomp, plus private network and mount namespaces where the kernel allows them. Nothing to install.</td></tr>
     <tr><td>macOS</td><td>Seatbelt (<code>sandbox-exec</code>), built in.</td></tr>
-    <tr><td>Windows</td><td>Not yet: commands run with your access. The secret and write guards and the withheld variables still apply. A Windows sandbox is in the works.</td></tr>
+    <tr><td>Windows</td><td>Run <code>qh sandbox setup</code> once (it asks for admin): commands then run as hidden sandbox users with write-restricted tokens on their own desktop, and firewall filters send them only through qh's allowlist. <code>qh sandbox remove</code> undoes it all. Until then commands run with your access; the secret and write guards and the withheld variables still apply. Tools that use Windows' own TLS (<code>curl.exe</code>, PowerShell's web commands, .NET, winget) can't make HTTPS connections inside; git, cargo, Python, Node and npm can.</td></tr>
   </table>
   <div class="note">Where the system can't sandbox commands (an old Linux kernel, say), <code>/sandbox</code> says so. The secret and write guards still apply.</div>
 </section>

@@ -551,8 +551,11 @@ Windows asks for admin once to add two hidden sandbox users. Until then qh asks 
         let (user, domain, pw) = (wz(USERS[i]), wz("."), wz(&c.pw[i]));
         let mut si: STARTUPINFOW = unsafe { zeroed() };
         std_handles(&mut si);
-        let (_desk, mut desk_name) = match private_desktop(&c.group) { Ok(d) => d, Err(e) => return fail("can't make the sandbox's desktop", e) };
-        si.lpDesktop = desk_name.as_mut_ptr();
+        // TEMP diagnosis (remove): QH_WINSBX_DESK = narrow (default) | group | user | shared
+        let dv = std::env::var("QH_WINSBX_DESK").unwrap_or_default();
+        let who = if dv == "user" { lookup(USERS[i]).unwrap_or_default() } else { c.group.clone() };
+        let (_desk, mut desk_name) = match private_desktop(&who, if matches!(dv.as_str(), "group" | "user") { 0x2_01FF } else { 0x1 | 0x2 | 0x4 | 0x8 | 0x40 | 0x80 | 0x2_0000 }) { Ok(d) => d, Err(e) => return fail("can't make the sandbox's desktop", e) };
+        if dv != "shared" { si.lpDesktop = desk_name.as_mut_ptr(); }
         let mut pi: PROCESS_INFORMATION = unsafe { zeroed() };
         // SAFETY: all pointers are to live NUL-terminated buffers. The profile is loaded: without it
         // Windows' TLS (schannel) has no credentials, so every HTTPS download fails; `remove` deletes it
@@ -608,11 +611,10 @@ Windows asks for admin once to add two hidden sandbox users. Until then qh asks 
     /// you. You keep full rights; the sandbox group may make windows and read and write objects on it,
     /// but not switch the screen to it or change it. It goes when this launcher exits. Returns
     /// "<window station>\\<desktop>" for STARTUPINFO; the command's own children inherit it.
-    fn private_desktop(group: &str) -> io::Result<(Desk, Vec<u16>)> {
+    fn private_desktop(group: &str, part: u32) -> io::Result<(Desk, Vec<u16>)> {
         use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
         use windows_sys::Win32::System::StationsAndDesktops::{CreateDesktopW, GetProcessWindowStation, GetUserObjectInformationW, UOI_NAME};
-        // read objects, create windows and menus, hook control, enumerate, write objects, read control
-        const PARTICIPANT: u32 = 0x1 | 0x2 | 0x4 | 0x8 | 0x40 | 0x80 | 0x2_0000;
+        let PARTICIPANT = part;
         let mut tok = null_mut();
         if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut tok) } == 0 { return Err(last_err()) }
         let tok = unsafe { OwnedHandle::from_raw_handle(tok) };

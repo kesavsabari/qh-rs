@@ -1,0 +1,28 @@
+name: mac-app
+# builds the Mac app (apple/) on GitHub's Macs and keeps it as a downloadable zip: no Xcode needed to try it
+on:
+  workflow_dispatch:
+  push:
+    branches: [mac-app]
+    paths: [apple/**, .github/workflows/mac-app.yml]
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate the Xcode project
+        run: brew install xcodegen && cd apple && xcodegen
+      - name: Build (Apple Silicon and Intel, ad-hoc signed)
+        run: |
+          cd apple
+          xcodebuild -project qh.xcodeproj -scheme qh -configuration Release -derivedDataPath build \
+            ARCHS="arm64 x86_64" ONLY_ACTIVE_ARCH=NO CODE_SIGN_IDENTITY="-" CODE_SIGNING_REQUIRED=NO build | tail -40
+          test -d build/Build/Products/Release/qh.app
+      - name: Zip
+        run: cd apple/build/Build/Products/Release && ditto -c -k --keepParent qh.app qh-mac.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qh-mac
+          path: apple/build/Build/Products/Release/qh-mac.zip
+          retention-days: 7

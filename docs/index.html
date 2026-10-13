@@ -105,7 +105,7 @@ a:hover{color:var(--accent)}
 @keyframes waitc{0%,68%{opacity:0}70%,72%,76%{opacity:1}74%{opacity:.35}78%,100%{opacity:0}}
 @keyframes okc{0%,77%{opacity:0}79%,93%{opacity:1}96%,100%{opacity:0}}
 @keyframes capc{0%{opacity:0;transform:translateY(6px)}3%,22%{opacity:1;transform:none}25%,100%{opacity:0}}
-@media (max-width:640px){.tl{display:none}.stage{height:380px}.caps{height:80px}}
+@media (max-width:640px){.stage{height:auto;margin-top:0}.stage>*:not(.caps){display:none}.caps{position:static;height:auto;border-top:1px solid var(--ink)}.cap{position:static;opacity:1;animation:none;transform:none;padding:14px 0;border-bottom:1px solid var(--rule)}}
 @media (prefers-reduced-motion:reduce){.pk,.chip{display:none}.caps{position:static;height:auto;border:0}.stage{height:auto;min-height:240px;padding-top:240px}.cap{position:static;opacity:1;margin-top:8px}}
 @media (max-width:1000px){.hero-grid{grid-template-columns:1fr!important;align-content:center}.hero-qh{font-size:clamp(110px,min(46vw,36vh),420px)}}
 @media (max-width:900px){.sec{grid-template-columns:1fr}.rail .lab{position:static;margin-bottom:28px}}
@@ -276,7 +276,7 @@ a:hover{color:var(--accent)}
 </div>
 </div>
 
-<footer id="install" class="reveal" style="position: sticky; bottom: 0; z-index: 0; min-height: 100vh; box-sizing: border-box; background: var(--fbg); color: var(--fink); display: flex; flex-direction: column; justify-content: space-between; gap: 48px; padding: clamp(84px, 12vh, 120px) clamp(20px, 3.2vw, 56px) clamp(28px, 5vh, 48px)">
+<footer id="install" class="reveal" style="position: sticky; bottom: 0; z-index: 0; min-height: 100vh; min-height: 100svh; box-sizing: border-box; background: var(--fbg); color: var(--fink); display: flex; flex-direction: column; justify-content: space-between; gap: 48px; padding: clamp(84px, 12vh, 120px) clamp(20px, 3.2vw, 56px) clamp(28px, 5vh, 48px)">
 <div class="lab" style="color: var(--fsoft)">05 — get a line</div>
 <div class="reveal-in">
 <div style="font-weight: 500; font-size: clamp(56px, 10vw, 200px); line-height: .88; letter-spacing: -0.065em">Plug in your<br>first line<span class="qh-cursor" style="display: inline-block; width: 0.08em; height: 0.7em; background: var(--accent); margin-left: 0.08em"></span></div>
@@ -310,31 +310,55 @@ label();
 tb.addEventListener('click', () => { const t = dark() ? 'light' : 'dark'; html.dataset.theme = t; try { localStorage.setItem('qh-theme', t); } catch (e) {} label(); });
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', label);
 // heavy, smooth wheel scrolling: each frame moves 5% of the way to where the wheel asked for
-if (!matchMedia('(prefers-reduced-motion: reduce)').matches) {
-  const se = document.scrollingElement || html;
-  let target = 0, cur = 0, raf = 0;
-  const step = () => {
-    cur += (target - cur) * 0.05;
-    if (Math.abs(target - cur) < 0.5) { cur = target; se.scrollTop = cur; raf = 0; return; }
-    se.scrollTop = cur; raf = requestAnimationFrame(step);
+const se = document.scrollingElement || html;
+const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
+let target = 0, cur = 0, raf = 0, jump = 0, gen = 0;
+// the next frame, or a timer if the browser holds frames back (seen in headless Chrome mid-page)
+const frame = f => { let ran = false; const id = requestAnimationFrame(t => { ran = true; f(t); });
+  setTimeout(() => { if (!ran) { cancelAnimationFrame(id); f(performance.now()); } }, 34); return id; };
+const step = () => {
+  if (!raf) return;  // a jump took over
+  cur += (target - cur) * 0.05;
+  if (Math.abs(target - cur) < 0.5) { cur = target; se.scrollTop = cur; raf = 0; return; }
+  se.scrollTop = cur; raf = frame(step);
+};
+if (!still) addEventListener('wheel', e => {
+  if (e.ctrlKey || Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;
+  if (jump) jump = 0;  // the wheel takes over from a jump
+  if (!raf) target = cur = se.scrollTop;
+  target = Math.max(0, Math.min(se.scrollHeight - innerHeight, target + e.deltaY * (e.deltaMode === 1 ? 32 : 0.85)));
+  e.preventDefault();
+  if (!raf) raf = frame(step);
+}, { passive: false });
+// links within the page: an eased glide timed to the distance (the wheel's lerp lurches over long ones)
+const ease = t => t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+function glide(to) {
+  raf = 0;
+  const me = ++gen;
+  to = Math.max(0, Math.min(se.scrollHeight - innerHeight, to));
+  if (still) { se.scrollTop = to; return; }
+  const from = se.scrollTop, d = to - from, dur = Math.min(1500, 650 + Math.abs(d) * 0.18), t0 = performance.now();
+  const tick = now => {
+    if (me !== gen || !jump) return;  // a newer jump or the wheel took over
+    const p = Math.min(1, (now - t0) / dur);
+    se.scrollTop = from + d * ease(p);
+    if (p < 1) frame(tick); else { jump = 0; target = cur = se.scrollTop; }
   };
-  addEventListener('wheel', e => {
-    if (e.ctrlKey || Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;
-    if (!raf) target = cur = se.scrollTop;
-    target = Math.max(0, Math.min(se.scrollHeight - innerHeight, target + e.deltaY * (e.deltaMode === 1 ? 32 : 0.85)));
-    e.preventDefault();
-    if (!raf) raf = requestAnimationFrame(step);
-  }, { passive: false });
-  // links within the page glide too
-  document.querySelectorAll('a[href^="#"]').forEach(a => a.addEventListener('click', e => {
-    const el = a.getAttribute('href') === '#top' ? html : document.querySelector(a.getAttribute('href'));
-    if (!el) return;
-    e.preventDefault();
-    target = el === html ? 0 : Math.min(se.scrollHeight - innerHeight, el.getBoundingClientRect().top + se.scrollTop);
-    cur = se.scrollTop;
-    if (!raf) raf = requestAnimationFrame(step);
-  }));
+  jump = 1;
+  frame(tick);
 }
+document.querySelectorAll('a[href^="#"]').forEach(a => a.addEventListener('click', e => {
+  const id = a.getAttribute('href').slice(1);
+  // install is the footer the page lifts off at the very end: it's always "on screen" underneath, so go to the end
+  const to = id === 'top' ? 0 : id === 'install' ? Infinity : (() => {
+    const el = document.getElementById(id);
+    return el ? el.getBoundingClientRect().top + se.scrollTop : null;
+  })();
+  if (to === null) return;
+  e.preventDefault();
+  glide(to);
+  history.replaceState(null, '', id === 'top' ? location.pathname : '#' + id);
+}));
 </script>
 </body>
 </html>

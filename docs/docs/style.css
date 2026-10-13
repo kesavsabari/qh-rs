@@ -49,7 +49,10 @@ a:hover { color: var(--accent); text-decoration-color: var(--accent); }
 .side nav .grp:first-child { margin-top: 0; }
 .side .gh { margin-top: 28px; display: inline-block; font: .8rem var(--mono); color: var(--soft); }
 
-main { padding: 56px clamp(20px, 5vw, 88px) 120px; max-width: 920px; }
+main { padding: 56px clamp(20px, 5vw, 88px) 120px; max-width: 920px; min-width: 0; }
+.wrap > * { min-width: 0; }
+pre, table { max-width: 100%; }
+img, video { max-width: 100%; height: auto; }
 section { padding-top: 12px; margin-bottom: 72px; }
 h1 { font: 500 clamp(2.8rem, 6vw, 4.6rem)/.95 var(--sans); letter-spacing: -.055em; margin: 0 0 20px; }
 h2 { font: 500 clamp(1.9rem, 3.4vw, 2.6rem)/1 var(--sans); letter-spacing: -.045em; margin: 0 0 18px; padding-top: 18px; border-top: 1px solid var(--ink); }
@@ -88,13 +91,17 @@ a.card:hover b { color: var(--accent); }
 
 @media (max-width: 860px) {
   .wrap { grid-template-columns: 1fr; }
-  .side { position: sticky; z-index: 5; height: auto; background: var(--paper); border-right: 0; border-bottom: 1px solid var(--rule); padding: 16px 20px; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; }
+  .side { position: sticky; top: 0; z-index: 5; height: auto; min-width: 0; background: var(--paper); border-right: 0; border-bottom: 1px solid var(--rule); padding: 16px 20px; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; }
   .side nav { display: none; width: 100%; max-height: 65vh; overflow-y: auto; padding-top: 10px; }
   .side.open nav { display: block; }
   .menu { display: inline-block; font: .8rem var(--mono); background: none; color: var(--ink); border: 1px solid var(--rule); border-radius: 999px; padding: 7px 14px; cursor: pointer; }
   .side p.tag { display: none; }
   .side .gh { display: none; }
-  main { padding-top: 32px; }
+  main { padding: 32px 20px 96px; }
+  h1 { font-size: 2.6rem; }
+  .lede { font-size: 1.08rem; }
+  pre { font-size: .84rem; padding: 14px; }
+  .cards { grid-template-columns: 1fr; }
   td:first-child { white-space: normal; }
   table { display: block; overflow-x: auto; }
 }

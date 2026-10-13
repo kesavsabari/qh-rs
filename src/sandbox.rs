@@ -146,9 +146,17 @@ pub fn temp_dirs() -> Vec<PathBuf> {
     out
 }
 
+/// The session's folder as a project, or None when it is your home folder or above it, or a drive's
+/// root (where a terminal starts, so people run qh there): a sandbox that may write over a whole
+/// profile protects nothing, and on Windows granting it walks every file in it.
+pub fn project(root: &Path) -> Option<PathBuf> {
+    let (r, h) = (canon(root), canon(&crate::config::home()));
+    (r.parent().is_some() && !h.starts_with(&r)).then_some(r)
+}
+
 /// Where file tools write without asking: the session's project, temp, and `[sandbox] writable`.
 pub fn writable(root: &Path, cfg: &Config) -> Vec<PathBuf> {
-    let mut v = vec![canon(root)];
+    let mut v: Vec<PathBuf> = project(root).into_iter().collect();
     v.extend(temp_dirs());
     v.extend(cfg.sandbox_write.iter().map(|p| canon(&crate::tools::resolve(root, p))));
     v
@@ -585,7 +593,8 @@ secrets, and reach the network only through an allowlist the user approves host 
 can't use the user's git login (SSH keys, keychain, credential helper) in here. If this failure is the sandbox \
 and the command really needs more, call bash again with the same cmd and \"unsandboxed\": true; the user is asked first. \
 On localhost a command reaches only servers this tab started with background=true (a `cmd &` server dies when its call ends): \
-start the server that way, then curl it from a later call.")
+start the server that way, then curl it from a later call. Run in the home folder, qh has no project and nothing \
+there is writable: tell the user to start qh in a project folder.")
 }
 
 /// For /sandbox: the policy in force for a session.
@@ -614,7 +623,9 @@ plus [sandbox] allow_hosts; any other host asks{}", if cfg.sandbox_network == "o
         Net::Off => "off".into(),
     };
     let gone = scrubbed(cfg);
-    format!("sandbox: ON\ncommands: {os}\nnetwork: {net}\nwritable:\n{}\nunreadable (secrets):\n{}\nread-only inside the project:\n{}\n\
+    let home = if project(&ctx.root).is_none() { format!("no project: {} is your home folder (or above it, or a drive's root), \
+so commands and file tools can't write there. Start qh in a project folder.\n", ctx.root.display()) } else { String::new() };
+    format!("sandbox: ON\n{home}commands: {os}\nnetwork: {net}\nwritable:\n{}\nunreadable (secrets):\n{}\nread-only inside the project:\n{}\n\
 env vars withheld from commands: {}\nfile tools ask first for secrets, writes outside the writable folders, and protected paths, \
 in every mode.", show(&p.write), show(&p.deny_read), if p.protect.is_empty() { "  (none yet)".into() } else { show(&p.protect) },
         if gone.is_empty() { "none".into() } else { gone.join(", ") })
@@ -648,6 +659,18 @@ mod tests {
                   "git@github.com: Permission denied (publickey).\nfatal: Could not read from remote repository."] {
             assert!(super::hint(e).is_some(), "{e}");
         }
+    }
+
+    #[test]
+    fn home_and_drive_roots_are_not_projects() {
+        let h = crate::config::home();
+        assert_eq!(super::project(&h), None);
+        assert_eq!(super::project(h.parent().unwrap()), None);
+        assert_eq!(super::project(std::path::Path::new(if cfg!(windows) { "C:\\" } else { "/" })), None);
+        let d = std::env::temp_dir().join(format!("qh-proj-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        assert_eq!(super::project(&d), Some(super::canon(&d)));
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

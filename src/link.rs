@@ -1538,7 +1538,6 @@ mod tests {
         let ((a, ra), (b, _rb)) = (node(), node());
         meet(&a, &b);
         wait(&ra, 5, |e| matches!(e, Event::Up { .. })).expect("up");
-        let real = lock(&a.inner).peers[0].sess.as_ref().unwrap().path;
         let at_a: SocketAddr = format!("127.0.0.1:{}", a.port()).parse().unwrap();
         // someone on the way takes b's next packet and sends it on from their own address first
         let m = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -1548,13 +1547,16 @@ mod tests {
         let (n, _) = m.recv_from(&mut buf).expect("a checks the new path");
         assert_eq!(buf[0], DATA, "a sealed check, {n} bytes: they can't answer it");
         std::thread::sleep(Duration::from_millis(300));
-        assert_eq!(lock(&a.inner).peers[0].sess.as_ref().unwrap().path, real, "the line stays where b really is");
+        // (the line may still upgrade to another of b's own addresses meanwhile, e.g. its LAN one)
+        let mid = m.local_addr().unwrap();
+        let path = || lock(&a.inner).peers[0].sess.as_ref().unwrap().path;
+        assert_ne!(path(), Path::Direct(mid), "the line stays where b really is");
         // a replayed hello does nothing at all
         let h = hello(&lock(&b.inner), 0, false);
         m.send_to(&h, at_a).unwrap();
         m.send_to(&h, at_a).unwrap();
         while m.recv_from(&mut buf).is_ok() {}
-        assert_eq!(lock(&a.inner).peers[0].sess.as_ref().unwrap().path, real);
+        assert_ne!(path(), Path::Direct(mid));
         // but when the check does come back on the new path (b really moved there), the line moves
         std::thread::sleep(Duration::from_secs(1)); // (one check per path a second)
         let pkt = sealed(&b, &[PING]);

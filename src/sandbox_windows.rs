@@ -516,7 +516,7 @@ Windows asks for admin once to add two hidden sandbox users. Until then qh asks 
         let c = match load() { Ok(c) => c, Err(e) => return fail("can't read the sandbox users' secrets", e) };
         let i = usize::from(which == "on");
         let Ok(exe) = std::env::current_exe() else { return fail("can't find qh", last_err()) };
-        let mut args: Vec<OsString> = vec!["__winsbx-in".into(), c.group.clone().into(), which.clone(), prog.clone()];
+        let mut args: Vec<OsString> = vec!["__winsbx-in".into(), c.group.clone().into(), prog.clone()];
         args.extend(a[2..].iter().cloned());
         let mut cmdline = command_line(exe.as_os_str(), &args);
         let env: Vec<_> = std::env::vars_os().collect();
@@ -569,15 +569,15 @@ Windows asks for admin once to add two hidden sandbox users. Until then qh asks 
         code as i32
     }
 
-    /// `qh __winsbx-in <group sid> on|off program args…`, as the sandbox user: run the command under a
-    /// copy of this token without privileges (offline: also write-restricted), wait, pass on its exit code.
+    /// `qh __winsbx-in <group sid> program args…`, as the sandbox user: run the command under a
+    /// write-restricted copy of this token, wait, pass on its exit code.
     pub fn runner_main(a: &[OsString]) -> i32 {
-        let (Some(group), Some(which), Some(prog)) = (a.first(), a.get(1), a.get(2)) else { return fail("usage", "qh __winsbx-in sid on|off program args…") };
+        let (Some(group), Some(prog)) = (a.first(), a.get(1)) else { return fail("usage", "qh __winsbx-in sid program args…") };
         // the command runs as the same user: without this it could open this (unrestricted) process
         // and write through it. OWNER RIGHTS limits the owner to reading the DACL, so it can't be undone.
         if let Err(e) = lock_self() { return fail("can't protect the runner", e) }
-        let token = match restricted(&group.to_string_lossy(), which != "on") { Ok(t) => t, Err(e) => return fail("can't make the restricted token", e) };
-        let mut cmdline = command_line(prog, &a[3..]);
+        let token = match restricted(&group.to_string_lossy()) { Ok(t) => t, Err(e) => return fail("can't make the restricted token", e) };
+        let mut cmdline = command_line(prog, &a[2..]);
         let p = PathBuf::from(prog);
         let app = p.is_absolute().then(|| wz(&p)); // else CreateProcess looks on PATH
         let env: Vec<_> = std::env::vars_os().collect();
@@ -627,13 +627,9 @@ Windows asks for admin once to add two hidden sandbox users. Until then qh asks 
         Ok(buf)
     }
 
-    /// This process's token with no privileges but traverse; with `write`, also write-restricted to
-    /// the sandbox group, the user, the logon session and Everyone (the NUL device and other such
-    /// objects). Online commands go without the write restriction: Windows' TLS (Schannel) refuses
-    /// every write-restricted token (SEC_E_NO_CREDENTIALS; Codex has the same bug), so cargo,
-    /// PowerShell and dotnet couldn't download. The shared spots any user may write are closed to
-    /// the group at setup instead (`public_denies`).
-    fn restricted(group: &str, write: bool) -> io::Result<OwnedHandle> {
+    /// This process's token, write-restricted to the sandbox group, the user, the logon session and
+    /// Everyone (the NUL device and other such objects), with no privileges but traverse.
+    fn restricted(group: &str) -> io::Result<OwnedHandle> {
         let mut tok = null_mut();
         if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY | TOKEN_ADJUST_DEFAULT, &mut tok) } == 0 {
             return Err(last_err());
@@ -650,9 +646,8 @@ Windows asks for admin once to add two hidden sandbox users. Until then qh asks 
         }
         let mut sa: Vec<SID_AND_ATTRIBUTES> = sids.iter().map(|&s| SID_AND_ATTRIBUTES { Sid: s, Attributes: 0 }).collect();
         let mut out = null_mut();
-        let (flags, n) = if write { (DISABLE_MAX_PRIVILEGE | WRITE_RESTRICTED, sa.len() as u32) } else { (DISABLE_MAX_PRIVILEGE, 0) };
-        if unsafe { CreateRestrictedToken(tok.as_raw_handle(), flags, 0, null(), 0, null(), n,
-            if n == 0 { null_mut() } else { sa.as_mut_ptr() }, &mut out) } == 0 { return Err(last_err()) }
+        if unsafe { CreateRestrictedToken(tok.as_raw_handle(), DISABLE_MAX_PRIVILEGE | WRITE_RESTRICTED, 0, null(), 0, null(),
+            sa.len() as u32, sa.as_mut_ptr(), &mut out) } == 0 { return Err(last_err()) }
         Ok(unsafe { OwnedHandle::from_raw_handle(out) })
     }
 
@@ -826,56 +821,11 @@ writing only in the project, temp and package caches. Restart qh for auto mode. 
             unsafe { RegSetKeyValueW(HKEY_LOCAL_MACHINE, k.as_ptr(), name.as_ptr(), REG_DWORD, ptr::from_ref(&zero).cast(), 4) };
             sids.push(lookup(u)?);
         }
-        firewall(&sids[0], &sids[1])?;
-        let g = lookup(GROUP)?;
-        let sid = sid_from(&g)?;
-        for (path, inherit) in public_spots() {
-            let (mask, flags) = if inherit { (NO_WRITE, OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE) } else { (FILE_WRITE_DATA | FILE_APPEND_DATA, NO_INHERITANCE) };
-            deny(&path, sid.0, mask, flags)?;
-        }
-        Ok(())
-    }
-
-    /// Places every user may write, closed to the sandbox group (online commands aren't
-    /// write-restricted): no new files or folders at the top of each fixed drive or in ProgramData,
-    /// nothing at all under Users\Public. (Folders some app opened to all users stay open: a known gap.)
-    fn public_spots() -> Vec<(PathBuf, bool)> {
-        use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives};
-        const DRIVE_FIXED: u32 = 3;
-        let mut v = vec![];
-        let mask = unsafe { GetLogicalDrives() };
-        for i in 0..26u8 {
-            let root = format!("{}:\\", (b'A' + i) as char);
-            if mask & (1 << i) != 0 && unsafe { GetDriveTypeW(wz(&root).as_ptr()) } == DRIVE_FIXED { v.push((PathBuf::from(root), false)) }
-        }
-        let env = |k: &str, d: &str| std::env::var_os(k).map(PathBuf::from).unwrap_or_else(|| PathBuf::from(d));
-        v.push((env("ProgramData", r"C:\ProgramData"), false));
-        v.push((env("PUBLIC", r"C:\Users\Public"), true));
-        v.into_iter().filter(|(p, _)| p.is_dir()).collect()
-    }
-
-    /// One deny ACE for `sid` on `path` (admin only: these folders aren't ours).
-    fn deny(path: &Path, sid: PSID, mask: u32, flags: u32) -> io::Result<()> {
-        let (_sd, dacl) = read_dacl(path)?;
-        if unsafe { has_ace(dacl, sid, ACCESS_DENIED_ACE_TYPE, mask, flags) } { return Ok(()) }
-        let ea = EXPLICIT_ACCESS_W {
-            grfAccessPermissions: mask, grfAccessMode: DENY_ACCESS, grfInheritance: flags,
-            Trustee: TRUSTEE_W { pMultipleTrustee: null_mut(), MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
-                TrusteeForm: TRUSTEE_IS_SID, TrusteeType: TRUSTEE_IS_UNKNOWN, ptstrName: sid as PWSTR },
-        };
-        let mut new: *mut ACL = null_mut();
-        let e = unsafe { SetEntriesInAclW(1, &ea, dacl, &mut new) };
-        if e != ERROR_SUCCESS { return Err(win_err(&format!("denying {}", path.display()), e)) }
-        let _new = Local(new.cast());
-        write_dacl(path, new).map_err(|e| io::Error::other(format!("denying {}: {e}", path.display())))
+        firewall(&sids[0], &sids[1])
     }
 
     fn admin_remove() -> io::Result<()> {
         let fw = firewall_remove();
-        // the public denies, while the group's SID still resolves
-        if let Ok(sid) = lookup(GROUP).and_then(|g| sid_from(&g)) {
-            for (path, _) in public_spots() { let _ = strip(&path, sid.0); }
-        }
         for u in USERS {
             let name = wz(u);
             // its profile (C:\Users\qh-sbx-…), made by the first command; needs the SID, so before the user goes

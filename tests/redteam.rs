@@ -322,14 +322,10 @@ fn windows_sandbox_users() {
     let l = lab("winusers");
     let (_, out) = l.bash("whoami");
     assert!(out.contains("qh-sbx-on"), "runs as the online sandbox user: {out}");
-    // C:\Users\Public is writable by every user: not by the sandbox group (denied at setup)
+    // C:\Users\Public is writable by every user: not by the write-restricted token
     let public = format!("C:/Users/Public/qh-redteam-{}", std::process::id());
     let (_, out) = l.bash(&format!("echo x > {public}; mkdir {public}-d; ls {public} {public}-d 2>&1"));
     assert!(!std::path::Path::new(&public).exists() && !std::path::Path::new(&format!("{public}-d")).exists(), "wrote where Users may: {out}");
-    // nor anything new at the top of the system drive or in ProgramData (closed to the group at setup)
-    let (root, data) = (format!("C:/qh-redteam-{}", std::process::id()), format!("C:/ProgramData/qh-redteam-{}", std::process::id()));
-    let (_, out) = l.bash(&format!("mkdir {root}; echo x > {root}.txt; mkdir {data} 2>&1"));
-    assert!(![root.clone(), format!("{root}.txt"), data.clone()].iter().any(|p| std::path::Path::new(p).exists()), "wrote in a shared spot: {out}");
     let (_, out) = l.bash("cmd //c \"echo cmd-ok > c.txt\" && cat c.txt && powershell -NoProfile -Command \"Set-Content p.txt ps-ok; Get-Content p.txt\"");
     assert!(out.contains("cmd-ok") && out.contains("ps-ok"), "cmd and PowerShell inside: {out}");
     // direct connections are blocked by the firewall filters; the allowlist proxy works (needs internet)

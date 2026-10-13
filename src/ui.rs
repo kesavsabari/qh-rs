@@ -438,6 +438,10 @@ pub fn run(hub: Arc<Hub>, tx: Sender<Ui>, rx: Receiver<Ui>) -> std::io::Result<(
     }
     app.project = std::path::PathBuf::new(); // so the team on screen follows the active tab
     app.set_active(&active);
+    #[cfg(windows)]
+    if crate::sandbox::enabled(&hub.cfg) {
+        if let Some(s) = crate::sandbox_windows::offer_once() { app.note(&active, s) }
+    }
     let res = loop {
         if let Err(e) = term.draw(|f| app.draw(f)) {
             break Err(e);
@@ -1599,6 +1603,14 @@ impl App {
                     None => crate::bg::list(&m.name),
                 };
                 self.note(&a, d);
+            }
+            #[cfg(windows)]
+            "/sandbox" if matches!(arg, "setup" | "remove") => {
+                self.note(&a, if arg == "setup" { "setting up the sandbox users: Windows asks for admin…" } else { "removing the sandbox users: Windows asks for admin…" });
+                match if arg == "setup" { crate::sandbox_windows::setup() } else { crate::sandbox_windows::remove() } {
+                    Ok(s) => self.note(&a, s),
+                    Err(e) => self.err(&a, format!("sandbox {arg}: {e}")),
+                }
             }
             "/sandbox" => {
                 let d = crate::sandbox::describe(&m.sandbox_now(), &self.hub.cfg);

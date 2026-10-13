@@ -149,6 +149,17 @@ fn main() {
     if argv.get(1).map(String::as_str) == Some("__sandbox") {
         std::process::exit(sandbox_linux::helper_main(&argv[2..]));
     }
+    // the Windows sandbox: launcher (as you), runner (as the sandbox user), and the elevated setup step
+    #[cfg(windows)]
+    {
+        let rest: Vec<std::ffi::OsString> = std::env::args_os().skip(2).collect();
+        match argv.get(1).map(String::as_str) {
+            Some("__winsbx") => std::process::exit(sandbox_windows::launcher_main(&rest)),
+            Some("__winsbx-in") => std::process::exit(sandbox_windows::runner_main(&rest)),
+            Some("__winsbx-admin") => std::process::exit(sandbox_windows::admin_main(&rest)),
+            _ => {}
+        }
+    }
     if argv.get(1).map(String::as_str) == Some("__tool") {
         std::process::exit(tool_once(&argv[2..]));
     }
@@ -162,17 +173,20 @@ fn main() {
             std::process::exit(0);
         }
         (Some("update"), _) => std::process::exit(update::cli()),
-        (Some("sandbox"), Some("reset")) => {
-            // Windows: take back every folder permission the sandbox granted (they return on the next command)
+        (Some("sandbox"), Some(sub @ ("setup" | "remove" | "reset"))) => {
+            // Windows: setup makes the sandbox users (one admin prompt), remove undoes all of it, reset
+            // takes back the folder permissions only (they return on the next command)
             #[cfg(windows)]
-            match sandbox_windows::reset() {
-                Ok(n) => { println!("removed the sandbox's permissions from {n} folders"); std::process::exit(0) }
-                Err(e) => { eprintln!("{e}"); std::process::exit(1) }
-            }
+            let r = match sub {
+                "setup" => sandbox_windows::setup(),
+                "remove" => sandbox_windows::remove(),
+                _ => sandbox_windows::reset().map(|n| format!("removed the sandbox's permissions from {n} folders")).map_err(|e| e.to_string()),
+            };
             #[cfg(not(windows))]
-            {
-                println!("nothing to reset: only the Windows sandbox changes folder permissions");
-                std::process::exit(0);
+            let r: Result<String, String> = Ok(format!("nothing to {sub}: only Windows needs a sandbox set up"));
+            match r {
+                Ok(s) => { println!("{s}"); std::process::exit(0) }
+                Err(e) => { eprintln!("qh sandbox {sub}: {e}"); std::process::exit(1) }
             }
         }
         (Some("docs"), _) => {
@@ -429,7 +443,7 @@ fn tool_once(args: &[String]) -> i32 {
             proxy = Some(p);
         }
         let px = proxy.clone().flatten();
-        let sb = sandbox::Ctx { root: cwd.clone(), proxy: if cfg!(windows) { None } else { px }, tab: tab.clone() };
+        let sb = sandbox::Ctx { root: cwd.clone(), proxy: px, tab: tab.clone() };
         println!("{}", tools::call(name, a, &cfg, &mut cwd, &tier::Limits::for_ctx(32768), &sb));
     }
     bg::kill_all();

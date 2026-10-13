@@ -1,0 +1,55 @@
+{
+  "name": "qh",
+  "displayName": "qh",
+  "description": "qh, the terminal coding agent, inside VS Code: open it beside your code, send it your selection, review its changes in the diff view.",
+  "version": "0.1.0",
+  "publisher": "kesavsabari",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/kesavsabari/qh-rs" },
+  "engines": { "vscode": "^1.90.0" },
+  "categories": ["AI", "Programming Languages", "Other"],
+  "keywords": ["agent", "ai", "coding agent", "ollama", "terminal"],
+  "main": "./extension.js",
+  "activationEvents": ["onStartupFinished"],
+  "contributes": {
+    "commands": [
+      { "command": "qh.open", "title": "Open qh", "category": "qh", "icon": "$(sparkle)" },
+      { "command": "qh.sendSelection", "title": "Send selection to qh", "category": "qh" },
+      { "command": "qh.sendFile", "title": "Send file to qh", "category": "qh" },
+      { "command": "qh.reviewChanges", "title": "Review qh's changes", "category": "qh" },
+      { "command": "qh.install", "title": "Install qh", "category": "qh" }
+    ],
+    "keybindings": [
+      { "command": "qh.open", "key": "ctrl+alt+q", "mac": "cmd+alt+q" },
+      { "command": "qh.sendSelection", "key": "ctrl+alt+k", "mac": "cmd+alt+k", "when": "editorTextFocus" }
+    ],
+    "menus": {
+      "editor/title": [
+        { "command": "qh.open", "group": "navigation" }
+      ],
+      "editor/context": [
+        { "command": "qh.sendSelection", "when": "editorHasSelection", "group": "qh@1" },
+        { "command": "qh.sendFile", "when": "!editorHasSelection", "group": "qh@1" }
+      ],
+      "explorer/context": [
+        { "command": "qh.sendFile", "when": "!explorerResourceIsFolder", "group": "qh@1" }
+      ]
+    },
+    "configuration": {
+      "title": "qh",
+      "properties": {
+        "qh.path": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the qh binary. Empty: found on PATH or where the install line puts it."
+        },
+        "qh.openIn": {
+          "type": "string",
+          "enum": ["beside", "panel"],
+          "default": "beside",
+          "description": "Open qh in an editor tab beside your code, or in the bottom panel."
+        }
+      }
+    }
+  }
+}

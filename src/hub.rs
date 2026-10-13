@@ -312,6 +312,10 @@ session tests). Messages from other sessions start with [from <name>]. qh saves 
     pub fn tools_for(&self, profile: &str, spawned: bool) -> Vec<Value> {
         let mut t = tools::build(profile, &self.cfg);
         t.extend(hub_schemas().into_iter().filter(|s| !(spawned && s["function"]["name"] == "spawn")));
+        // a second opinion: not in a tier S window, where every schema costs
+        if profile != "browser" && crate::tier::tier(self.cfg.ctx) != "S" {
+            t.push(crate::route::ask_schema());
+        }
         t
     }
 

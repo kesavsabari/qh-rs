@@ -53,18 +53,19 @@ const HELP: &str = "/new <name> [profile]  new session (Ctrl+N: instant, auto-na
 /promise [fn what]     make a teammate's last answer (or your own words) a checked promise: edits that break it are held
 /tier                  how the context window was sized to your GPU
 /mode [ask|auto-edit|auto|plan] (Shift+Tab)  /role [text]  /think  /tokens  /compact  /clear  /profile [name]
-/docs (guide in your browser)  /update (newest qh)  /undo  /diff  /allow [pattern]  /sandbox  /tasks [stop <id>]  /sessions  /commands (your own /name prompts)  /mcp (servers)
+/docs (guide in your browser)  /update (newest qh)  /undo  /diff  /ask-other [model] [question]  /allow [pattern]  /sandbox  /tasks [stop <id>]  /sessions  /commands (your own /name prompts)  /mcp (servers)
 Shift+←/→ (or Alt+←/→, Alt+1..9) switch tabs · Shift+↑/↓ or PgUp/PgDn scroll · Option+←/→ a word · Ctrl+O open last tool · Ctrl+L log · Esc interrupt · Ctrl+Q quit";
 
 use crate::tools::DANGER;
 
 /// What the `/` autocomplete offers; custom commands are added from .qh/commands.
-const COMMANDS: [(&str, &str); 43] = [
+const COMMANDS: [(&str, &str); 44] = [
     ("/model", "pick this tab's model"), ("/provider", "connect providers: sign in, keys"),
     ("/new", "new session tab"), ("/worktree", "this tab in its own git worktree"),
     ("/merge", "merge this worktree tab back (diff first)"), ("/merge --discard", "remove this worktree and its branch"),
     ("/close", "close this tab"), ("/mode", "ask · auto-edit · auto · plan"),
     ("/compact", "shrink the conversation"), ("/clear", "start this tab fresh"), ("/undo", "undo the agent's file changes"),
+    ("/ask-other", "second opinion on the diff or plan from another model"),
     ("/diff", "show the agent's file changes"), ("/cwd", "this tab's working folder"), ("/think", "thinking on/off, or an effort level"),
     ("/tokens", "context use, tokens and cost"), ("/tier", "this tab's context window"), ("/profile", "tool set: coding, general, browser, all"),
     ("/role", "give this tab a role"), ("/map", "map of sessions and messages"), ("/layout", "tabs or grid"),
@@ -596,6 +597,7 @@ fn tool_title(tool: &str, a: &Value) -> String {
         "rename_symbol" => format!("⇄ rename {} → {}", s("old"), s("new")),
         "remember" => format!("✱ remember {}", one(s("fact"), 80)),
         "web_search" => format!("⌕ search {}", one(s("query"), 90)),
+        "ask_model" => format!("⇆ ask {} {}", s("model"), one(s("question"), 80)),
         "web_fetch" | "browse" => format!("↗ {tool} {}", clip(&s("url"), 90)),
         "click" => format!("◉ click [{}]", a["ref"]),
         "type" => format!("⌨ type [{}] \"{}\"{}", a["ref"], one(s("text"), 60),
@@ -1344,7 +1346,21 @@ impl App {
                 self.note(&a, { let (c, at) = self.hub.ctx_for(&m, false);
                     format!("last request {t}/{c} · now ≈{now} · compacts at {at}\nthis tab: {}\nsession: {}{plan}", u.line(), all.line()) });
             }
-            "/compact" if busy => self.err(&a, "busy: wait for the turn to end or press Esc"),
+            "/ask-other" => {
+                let (model, q) = crate::route::parse_ask_other(arg);
+                let ctx = crate::route::subject(&m.cwd(), &lock(&m.msgs));
+                if ctx.is_empty() && q.is_empty() {
+                    return self.err(&a, "nothing to review yet: no diff and no answer. Usage: /ask-other [model] [question]");
+                }
+                self.note(&a, format!("asking {} for a second opinion…", model.as_deref().unwrap_or("the second model")));
+                let (hub, m) = (self.hub.clone(), m.clone());
+                std::thread::spawn(move || {
+                    let r = engine::ask_other(&hub, &m, model.as_deref().unwrap_or(""), &q, &ctx);
+                    hub.emit(&m.name, Event::Notice(r));
+                    hub.changed();
+                });
+            }
+            "/compact" if busy =>self.err(&a, "busy: wait for the turn to end or press Esc"),
             "/compact" => {
                 let (hub, m) = (self.hub.clone(), m.clone());
                 std::thread::spawn(move || {

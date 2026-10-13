@@ -29,6 +29,8 @@ pub struct Config {
     pub profile: String,
     pub keep_alive: String,
     pub fallback_model: String,
+    /// `[routing] ask_model`: where /ask-other and the ask_model tool go when no model is named
+    pub ask_model: String,
     pub openrouter_key: String,
     pub allow: Vec<String>,
     pub webhooks: Vec<Webhook>,
@@ -137,6 +139,7 @@ pub fn load_defaults() -> Config {
         profile: "coding".into(),
         keep_alive: "30m".into(),
         fallback_model: String::new(),
+        ask_model: String::new(),
         openrouter_key: String::new(),
         allow: vec![],
         webhooks: vec![],
@@ -198,6 +201,7 @@ pub fn load() -> Config {
         if let Some(v) = s("profile") { c.profile = v }
         if let Some(v) = s("keep_alive") { c.keep_alive = v }
         if let Some(v) = s("fallback_model") { c.fallback_model = v }
+        routing(&mut c, &t);
         if let Some(v) = s("openrouter_key") { c.openrouter_key = v }
         if let Some(a) = t.get("allow").and_then(|v| v.as_array()) {
             c.allow = a.iter().filter_map(|v| v.as_str().map(String::from)).collect();
@@ -283,8 +287,26 @@ pub fn load() -> Config {
     c
 }
 
+/// `[routing]`: which other models qh may use, all off unless set.
+fn routing(c: &mut Config, t: &toml::Table) {
+    let Some(r) = t.get("routing").and_then(|v| v.as_table()) else { return };
+    let s = |k: &str| r.get(k).and_then(|v| v.as_str()).map(|v| v.trim().to_string()).unwrap_or_default();
+    #[allow(clippy::redundant_closure_call)]
+    { c.ask_model = s("ask_model"); }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn routing_is_off_unless_set() {
+        let mut c = super::load_defaults();
+        super::routing(&mut c, &"model = \"x\"".parse().unwrap());
+        assert!(c.ask_model.is_empty());
+        super::routing(&mut c, &"[routing]\nask_model = \" openai:gpt-5 \"".parse().unwrap());
+        assert_eq!(c.ask_model, "openai:gpt-5");
+    }
+
+
     #[test]
     fn set_changes_one_setting_and_keeps_the_rest() {
         let text = "# mine\nmodel = \"a\"\nrelay = \"none\"\n\n[providers.x]\nrelay = \"table, untouched\"\n";

@@ -615,13 +615,16 @@ Windows asks for admin once to add two hidden sandbox users. Until then qh asks 
 
     /// A desktop of its own for one command, as Codex does: on yours, a sandboxed process could send
     /// keystrokes and window messages to your other windows (your terminal, qh itself) and so act as
-    /// you. You keep full rights; the sandbox group may make windows and read and write objects on it,
-    /// but not switch the screen to it or change it. It goes when this launcher exits. Returns
-    /// "<window station>\\<desktop>" for STARTUPINFO; the command's own children inherit it.
-    fn private_desktop(group: &str, part: u32) -> io::Result<(Desk, Vec<u16>)> {
+    /// you. The runner makes it: it is on your desktop already (the logon service lets it in only
+    /// when no desktop is named), and keeps full rights; the group, so the command's restricted
+    /// token, may make windows and read and write objects on it, but not switch the screen to it or
+    /// change it. It goes when the runner exits. Returns "<window station>\\<desktop>" for
+    /// STARTUPINFO; the command's own children inherit it.
+    fn private_desktop(group: &str) -> io::Result<(Desk, Vec<u16>)> {
         use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
         use windows_sys::Win32::System::StationsAndDesktops::{CreateDesktopW, GetProcessWindowStation, GetUserObjectInformationW, UOI_NAME};
-        let PARTICIPANT = part;
+        // read objects, create windows and menus, hook control, enumerate, write objects, read control
+        const PARTICIPANT: u32 = 0x1 | 0x2 | 0x4 | 0x8 | 0x40 | 0x80 | 0x2_0000;
         let mut tok = null_mut();
         if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut tok) } == 0 { return Err(last_err()) }
         let tok = unsafe { OwnedHandle::from_raw_handle(tok) };
@@ -662,11 +665,8 @@ Windows asks for admin once to add two hidden sandbox users. Until then qh asks 
         let envb = env_block(&env);
         let mut si: STARTUPINFOW = unsafe { zeroed() };
         std_handles(&mut si);
-        // TEMP diagnosis (remove): QH_WINSBX_DESK = narrow (default) | full | shared
-        let dv = std::env::var("QH_WINSBX_DESK").unwrap_or_default();
-        let mask = if dv == "full" { 0x2_01FF } else { 0x1 | 0x2 | 0x4 | 0x8 | 0x40 | 0x80 | 0x2_0000 };
-        let (_desk, mut desk_name) = match private_desktop(&group.to_string_lossy(), mask) { Ok(d) => d, Err(e) => return fail("can't make the command's desktop", e) };
-        if dv != "shared" { si.lpDesktop = desk_name.as_mut_ptr(); }
+        let (_desk, mut desk_name) = match private_desktop(&group.to_string_lossy()) { Ok(d) => d, Err(e) => return fail("can't make the command's desktop", e) };
+        si.lpDesktop = desk_name.as_mut_ptr();
         let mut pi: PROCESS_INFORMATION = unsafe { zeroed() };
         // SAFETY: live NUL-terminated buffers; the token is ours; inherits only std handles (all qh has here)
         let ok = unsafe { CreateProcessAsUserW(token.as_raw_handle(), app.as_ref().map_or(null(), |a| a.as_ptr()), cmdline.as_mut_ptr(),

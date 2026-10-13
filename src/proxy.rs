@@ -518,8 +518,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         let home = d.join("cargo-home");
         std::fs::create_dir_all(&home).unwrap();
-        std::fs::write(home.join("config.toml"), format!("[source.crates-io]\nreplace-with = \"qh-mirror\"\n\n\
-[source.qh-mirror]\nregistry = \"sparse+http://127.0.0.1:{}/qh-mirror/crates-io/\"\n", p.port)).unwrap();
+        // as the Windows sandbox sets it up: a fixed config, the mirror's address per command in the env
+        std::fs::write(home.join("config.toml"), "[source.crates-io]\nreplace-with = \"qh-mirror\"\n").unwrap();
         let ok = |c: &mut Command| { let o = c.output().unwrap(); assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr)); };
         ok(Command::new("cargo").args(["new", "-q", "--vcs", "none", "m"]).current_dir(&d));
         let proj = d.join("m");
@@ -528,6 +528,7 @@ mod tests {
         std::fs::write(proj.join("Cargo.toml"), t).unwrap();
         // no proxy variables and no other way out: only the mirror can have served this
         ok(Command::new("cargo").args(["build", "-q"]).current_dir(&proj).env("CARGO_HOME", &home)
+            .env("CARGO_REGISTRIES_QH_MIRROR_INDEX", format!("sparse+http://127.0.0.1:{}/qh-mirror/crates-io/", p.port))
             .env("CARGO_TARGET_DIR", d.join("t")).env_remove("HTTPS_PROXY").env_remove("https_proxy"));
         // cargo names its cache after the registry it used: the mirror on loopback
         let cache: Vec<String> = std::fs::read_dir(home.join("registry/cache")).unwrap().flatten()

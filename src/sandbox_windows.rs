@@ -198,17 +198,23 @@ fn git_config(count: Option<&str>) -> Vec<(String, String)> {
     v
 }
 
-/// The config of the sandbox's own cargo home: yours, plus crates.io through qh's plain-HTTP mirror
-/// on the proxy (cargo's TLS is Schannel, which the sandbox can't use). Yours wins if it already
-/// replaces crates.io.
-fn cargo_config(yours: &str, port: Option<u16>) -> String {
+/// The config of the sandbox's own cargo home: yours, plus crates.io replaced by the registry
+/// `qh-mirror`, qh's plain-HTTP mirror on the proxy (cargo's TLS is Schannel, which the sandbox
+/// can't use). Its address comes per command in CARGO_REGISTRIES_QH_MIRROR_INDEX, so this file is
+/// the same for every qh: with the port in it, two qh at once rewrote it under each other's cargo
+/// (seen in CI). Yours wins if it already replaces crates.io.
+fn cargo_config(yours: &str) -> String {
     let mut c = yours.trim_end().to_string();
-    if let Some(port) = port.filter(|_| !yours.contains("[source.crates-io]")) {
+    if !yours.contains("[source.crates-io]") {
         if !c.is_empty() { c += "\n\n" }
-        c += &format!("# added by qh for its Windows sandbox\n[source.crates-io]\nreplace-with = \"qh-mirror\"\n\n\
-[source.qh-mirror]\nregistry = \"sparse+http://127.0.0.1:{port}/qh-mirror/crates-io/\"\n");
+        c += "# added by qh for its Windows sandbox\n[source.crates-io]\nreplace-with = \"qh-mirror\"\n";
     }
     c
+}
+
+/// The mirror's address for cargo, through the proxy on `port`.
+fn mirror_index(port: u16) -> String {
+    format!("sparse+http://127.0.0.1:{port}/qh-mirror/crates-io/")
 }
 
 #[cfg(not(windows))]
@@ -510,7 +516,7 @@ Windows asks for admin once to add two hidden sandbox users. Until then qh asks 
         let cargo = dir().join("cargo");
         fs::create_dir_all(&cargo)?;
         let yours = ["config.toml", "config"].iter().find_map(|f| fs::read_to_string(home.join(".cargo").join(f)).ok()).unwrap_or_default();
-        let conf = cargo_config(&yours, port);
+        let conf = cargo_config(&yours);
         if fs::read_to_string(cargo.join("config.toml")).ok().as_deref() != Some(conf.as_str()) { fs::write(cargo.join("config.toml"), &conf)? }
         let mut p = p.clone();
         p.write.push(cargo.clone());
@@ -520,6 +526,7 @@ Windows asks for admin once to add two hidden sandbox users. Until then qh asks 
         cmd.envs(git_config(std::env::var("GIT_CONFIG_COUNT").ok().as_deref()));
         // curl as Git for Windows ships it can use OpenSSL too
         cmd.env("CURL_SSL_BACKEND", "openssl").env("CARGO_HOME", &cargo);
+        if let Some(port) = port { cmd.env("CARGO_REGISTRIES_QH_MIRROR_INDEX", mirror_index(port)); }
         Ok(cmd)
     }
 
@@ -1156,11 +1163,11 @@ mod tests {
         assert_eq!((g[2].1.as_str(), g[3].1.as_str()), ("http.sslBackend", "openssl"));
         let t = git_config(Some("2"));
         assert_eq!((t[0].0.as_str(), t[1].1.as_str(), t[2].0.as_str(), t[4].1.as_str()), ("GIT_CONFIG_KEY_2", "*", "GIT_CONFIG_KEY_3", "4"));
-        let c = cargo_config("[net]\nretry = 3\n", Some(47610));
-        assert!(c.starts_with("[net]\nretry = 3\n\n# added by qh") && c.contains("sparse+http://127.0.0.1:47610/qh-mirror/crates-io/"));
+        let c = cargo_config("[net]\nretry = 3\n");
+        assert!(c.starts_with("[net]\nretry = 3\n\n# added by qh") && !c.contains("127.0.0.1"));
         let toml: toml::Table = c.parse().unwrap();
         assert_eq!(toml["source"]["crates-io"]["replace-with"].as_str(), Some("qh-mirror"));
-        assert_eq!(cargo_config("[source.crates-io]\nreplace-with = \"corp\"\n", Some(1)), "[source.crates-io]\nreplace-with = \"corp\"");
-        assert_eq!(cargo_config("", None), "");
+        assert_eq!(cargo_config("[source.crates-io]\nreplace-with = \"corp\"\n"), "[source.crates-io]\nreplace-with = \"corp\"");
+        assert_eq!(mirror_index(47610), "sparse+http://127.0.0.1:47610/qh-mirror/crates-io/");
     }
 }

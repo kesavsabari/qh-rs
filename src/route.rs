@@ -43,15 +43,32 @@ pub fn ask_msgs(question: &str, context: &str) -> Vec<Value> {
     vec![json!({"role": "system", "content": OPINION}), json!({"role": "user", "content": format!("{q}{ctx}")})]
 }
 
-/// What /ask-other sends: the tab's uncommitted diff, else its last answer (the plan).
+/// What /ask-other sends: the tab's uncommitted changes (new files too: `git diff HEAD` leaves them
+/// out, and fails before the first commit), the agent's latest answer, and what its last turn read
+/// and ran. The reviewer has no tools: without these it can only say it can't tell (seen live).
 pub fn subject(cwd: &Path, msgs: &[Value]) -> String {
-    let diff = std::process::Command::new("git").arg("-C").arg(cwd).args(["diff", "HEAD"]).output().ok()
-        .filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
+    let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(cwd).args(args).output().ok()
+        .filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).to_string());
+    let mut parts = vec![];
+    let diff = git(&["diff", "HEAD"]).or_else(|| git(&["diff"])).unwrap_or_default();
     if !diff.trim().is_empty() {
-        return format!("The current diff:\n{diff}");
+        parts.push(format!("The current diff:\n{}", clip(&diff, 16_000)));
     }
-    msgs.iter().rev().filter(|x| x["role"] == "assistant").filter_map(|x| x["content"].as_str())
-        .find(|c| !c.trim().is_empty()).map(|c| format!("The agent's latest answer / plan:\n{c}")).unwrap_or_default()
+    let new: Vec<String> = git(&["ls-files", "--others", "--exclude-standard"]).unwrap_or_default().lines().take(8)
+        .filter_map(|f| std::fs::read_to_string(cwd.join(f)).ok().map(|t| format!("New file {f}:\n{}", clip(&t, 4_000)))).collect();
+    if !new.is_empty() {
+        parts.push(new.join("\n\n"));
+    }
+    if let Some(c) = msgs.iter().rev().filter(|x| x["role"] == "assistant").filter_map(|x| x["content"].as_str()).find(|c| !c.trim().is_empty()) {
+        parts.push(format!("The agent's latest answer / plan:\n{}", clip(c, 6_000)));
+    }
+    let start = msgs.iter().rposition(|x| x["role"] == "user").unwrap_or(0);
+    let seen: Vec<String> = msgs[start..].iter().filter(|x| x["role"] == "tool")
+        .map(|x| format!("[{}]\n{}", x["tool_name"].as_str().unwrap_or("tool"), clip(x["content"].as_str().unwrap_or(""), 3_000))).collect();
+    if !seen.is_empty() {
+        parts.push(format!("What the agent's last turn read and ran:\n{}", clip(&seen.join("\n\n"), 12_000)));
+    }
+    parts.join("\n\n")
 }
 
 fn clip(s: &str, n: usize) -> String {
@@ -112,6 +129,22 @@ mod tests {
         for n in FETCH_TOOLS {
             assert!(!crate::tools::risky(n, &json!({}), &cfg) && crate::tools::builtin_schema(n).is_some(), "{n}");
         }
+    }
+
+    #[test]
+    fn ask_other_sends_new_files_the_answer_and_what_was_read() {
+        let d = std::env::temp_dir().join(format!("qh-subject-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let _ = std::process::Command::new("git").arg("-C").arg(&d).args(["init", "-q"]).status();
+        std::fs::write(d.join("calc.py"), "def add(a, b):\n    return a - b\n").unwrap();
+        let msgs = vec![json!({"role": "user", "content": "is add right?"}),
+                        json!({"role": "tool", "tool_name": "read_file", "content": "1\tdef add(a, b):"}),
+                        json!({"role": "assistant", "content": "No: it subtracts."})];
+        let s = subject(&d, &msgs);
+        assert!(s.contains("New file calc.py") && s.contains("return a - b"), "{s}");
+        assert!(s.contains("No: it subtracts.") && s.contains("[read_file]"), "{s}");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

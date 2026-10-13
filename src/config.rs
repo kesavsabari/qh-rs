@@ -28,7 +28,8 @@ pub struct Config {
     pub cost_warn: f64,
     pub profile: String,
     pub keep_alive: String,
-    pub fallback_model: String,
+    /// tried in order when the model is rate-limited or down; a plain string is a list of one
+    pub fallback_model: Vec<String>,
     pub openrouter_key: String,
     pub allow: Vec<String>,
     pub webhooks: Vec<Webhook>,
@@ -136,7 +137,7 @@ pub fn load_defaults() -> Config {
         cost_warn: 2.0,
         profile: "coding".into(),
         keep_alive: "30m".into(),
-        fallback_model: String::new(),
+        fallback_model: vec![],
         openrouter_key: String::new(),
         allow: vec![],
         webhooks: vec![],
@@ -197,7 +198,7 @@ pub fn load() -> Config {
         if let Some(v) = t.get("cost_warn").and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64))) { c.cost_warn = v }
         if let Some(v) = s("profile") { c.profile = v }
         if let Some(v) = s("keep_alive") { c.keep_alive = v }
-        if let Some(v) = s("fallback_model") { c.fallback_model = v }
+        if let Some(v) = fallbacks(t.get("fallback_model")) { c.fallback_model = v }
         if let Some(v) = s("openrouter_key") { c.openrouter_key = v }
         if let Some(a) = t.get("allow").and_then(|v| v.as_array()) {
             c.allow = a.iter().filter_map(|v| v.as_str().map(String::from)).collect();
@@ -283,8 +284,27 @@ pub fn load() -> Config {
     c
 }
 
+/// `fallback_model = "a"` or `["a", "b"]`; blanks dropped.
+fn fallbacks(v: Option<&toml::Value>) -> Option<Vec<String>> {
+    let v = match v? {
+        toml::Value::String(s) => vec![s.clone()],
+        toml::Value::Array(a) => a.iter().filter_map(|v| v.as_str().map(String::from)).collect(),
+        _ => return None,
+    };
+    Some(v.into_iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fallback_model_takes_a_string_or_a_list() {
+        let f = |t: &str| super::fallbacks(t.parse::<toml::Table>().unwrap().get("fallback_model"));
+        assert_eq!(f("fallback_model = \"a\""), Some(vec!["a".to_string()]));
+        assert_eq!(f("fallback_model = [\"a\", \" \", \"or:b\"]"), Some(vec!["a".to_string(), "or:b".to_string()]));
+        assert_eq!(f("fallback_model = \"\""), Some(vec![]));
+        assert_eq!(f("model = \"x\""), None);
+    }
+
     #[test]
     fn set_changes_one_setting_and_keeps_the_rest() {
         let text = "# mine\nmodel = \"a\"\nrelay = \"none\"\n\n[providers.x]\nrelay = \"table, untouched\"\n";

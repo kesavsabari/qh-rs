@@ -414,6 +414,9 @@ fn explain(p: &Provider, e: Error) -> Error {
             "Ollama isn't signed in to ollama.com, which cloud models need: run `ollama signin` (or sign in from the Ollama app).".into()),
         Error::Other(m) if m.starts_with("HTTP 402") => Error::Other(format!(
             "{n} says the account is out of credit (HTTP 402). Top it up, or pick a free/local model with /model.")),
+        // Other, not Connect: retrying or falling back can't help when nothing was ever set up
+        Error::Connect(_) if p.local && p.kind == Kind::Ollama && !crate::setup::chosen() => Error::Other(
+            "No model is set up on this computer yet: run `qh setup` to connect one (a cloud model or local Ollama), or pick one with /model.".into()),
         Error::Connect(m) if p.local && p.kind == Kind::Ollama => Error::Connect(format!(
             "{m}. Ollama isn't answering at {}: start it (`ollama serve` or the Ollama app), or run `qh setup`.", p.base)),
         _ => e,

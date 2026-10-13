@@ -215,8 +215,12 @@ fn main() {
         eprintln!("--json and --max-turns work with -p \"prompt\"");
         std::process::exit(jsonl::BAD_USAGE);
     }
-    if args.print.is_empty() && setup::needed() && std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+    if args.print.is_empty() && std::io::IsTerminal::is_terminal(&std::io::stdin())
+        && (setup::needed() || setup::no_model(&config::load())) {
         providers::init(&config::load());
+        if !setup::needed() {
+            println!("No model is set up on this computer yet.");
+        }
         if !setup::run() {
             std::process::exit(1);
         }

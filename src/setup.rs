@@ -314,14 +314,18 @@ const PROVIDERS: [(&str, &str, &str); 11] = [
     ("ollama-cloud", "Ollama cloud by API key", "https://ollama.com/settings/keys"),
 ];
 
+/// Sets host and model in config.toml and keeps the rest of it: a team's relay, sandbox
+/// settings and the like must survive running setup again.
 fn write_config(host: &str, model: Option<&str>) -> Result<std::path::PathBuf, String> {
-    let dir = config_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let path = dir.join("config.toml");
-    let mut body = format!("# written by `qh setup`; run it again to change, or edit by hand\nhost = \"{host}\"\n");
-    if let Some(m) = model { body += &format!("model = \"{m}\"\n") }
-    std::fs::write(&path, body).map_err(|e| e.to_string())?;
-    Ok(path)
+    if !config_file().exists() {
+        std::fs::create_dir_all(config_dir()).map_err(|e| e.to_string())?;
+        std::fs::write(config_file(), "# written by `qh setup`; run it again to change, or edit by hand\n").map_err(|e| e.to_string())?;
+    }
+    crate::config::set("host", host)?;
+    match model {
+        Some(m) => crate::config::set("model", m),
+        None => Ok(config_file()),
+    }
 }
 
 /// Interactive setup. Returns false if the user backed out without a working model.
@@ -403,7 +407,25 @@ pub fn run() -> bool {
     true
 }
 
+fn config_file() -> std::path::PathBuf {
+    std::env::var("QH_CONFIG").map(std::path::PathBuf::from).unwrap_or_else(|_| config_dir().join("config.toml"))
+}
+
 /// First start: no config file anywhere.
 pub fn needed() -> bool {
     std::env::var_os("QH_CONFIG").is_none() && !config_dir().join("config.toml").exists()
+}
+
+/// A model was picked on this computer: by setup or `/model default`, or `model` in config.toml.
+pub fn chosen() -> bool {
+    let saved = std::fs::read_to_string(state_dir().join("default_model")).unwrap_or_default();
+    let in_config = std::fs::read_to_string(config_file()).ok().and_then(|t| t.parse::<toml::Table>().ok())
+        .is_some_and(|t| t.get("model").and_then(|v| v.as_str()).is_some_and(|m| !m.trim().is_empty()));
+    !saved.trim().is_empty() || in_config
+}
+
+/// Nothing to talk to: no model picked, and the built-in one isn't on this computer's Ollama
+/// (seen on a Mac with a config but no model: every message only retried a local model that wasn't there).
+pub fn no_model(cfg: &crate::config::Config) -> bool {
+    !chosen() && !local_models(&cfg.host).is_some_and(|m| m.contains(&cfg.model))
 }

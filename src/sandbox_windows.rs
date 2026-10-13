@@ -156,11 +156,6 @@ fn plan(p: &Policy, home: &Path, profile: &Path) -> Vec<(Kind, PathBuf, bool)> {
             if !denied(&path) { v.push((Kind::Read, path, m.is_dir())) }
         }
     }
-    // cargo locks these on every registry access; the folder they're in stays read-only
-    for f in [".package-cache", ".package-cache-mutate"] {
-        let path = home.join(".cargo").join(f);
-        if path.is_file() && !denied(&path) { v.push((Kind::Write, path, false)) }
-    }
     let granted: Vec<PathBuf> = v.iter().map(|g| g.1.clone()).collect();
     for d in &p.deny_read {
         if let Ok(m) = d.metadata() {
@@ -189,12 +184,31 @@ fn password(r: &[u8; 32]) -> String {
     format!("Qh7#{}", r.iter().map(|b| C[*b as usize % C.len()] as char).collect::<String>())
 }
 
-/// `GIT_CONFIG_*` entries that trust every repo: the project belongs to you, not the sandbox user,
-/// and git refuses another user's repo ("dubious ownership"). Appended after any the caller set.
-fn git_trust(count: Option<&str>) -> Vec<(String, String)> {
+/// `GIT_CONFIG_*` entries, appended after any the caller set: trust every repo (the project belongs
+/// to you, not the sandbox user, and git refuses another user's repo: "dubious ownership"), and
+/// use OpenSSL, not Schannel, which refuses the sandbox's write-restricted token.
+fn git_config(count: Option<&str>) -> Vec<(String, String)> {
     let n: usize = count.and_then(|c| c.trim().parse().ok()).unwrap_or(0);
-    vec![(format!("GIT_CONFIG_KEY_{n}"), "safe.directory".into()), (format!("GIT_CONFIG_VALUE_{n}"), "*".into()),
-         ("GIT_CONFIG_COUNT".into(), (n + 1).to_string())]
+    let mut v = vec![];
+    for (i, (k, val)) in [("safe.directory", "*"), ("http.sslBackend", "openssl")].iter().enumerate() {
+        v.push((format!("GIT_CONFIG_KEY_{}", n + i), k.to_string()));
+        v.push((format!("GIT_CONFIG_VALUE_{}", n + i), val.to_string()));
+    }
+    v.push(("GIT_CONFIG_COUNT".into(), (n + 2).to_string()));
+    v
+}
+
+/// The config of the sandbox's own cargo home: yours, plus crates.io through qh's plain-HTTP mirror
+/// on the proxy (cargo's TLS is Schannel, which the sandbox can't use). Yours wins if it already
+/// replaces crates.io.
+fn cargo_config(yours: &str, port: Option<u16>) -> String {
+    let mut c = yours.trim_end().to_string();
+    if let Some(port) = port.filter(|_| !yours.contains("[source.crates-io]")) {
+        if !c.is_empty() { c += "\n\n" }
+        c += &format!("# added by qh for its Windows sandbox\n[source.crates-io]\nreplace-with = \"qh-mirror\"\n\n\
+[source.qh-mirror]\nregistry = \"sparse+http://127.0.0.1:{port}/qh-mirror/crates-io/\"\n");
+    }
+    c
 }
 
 #[cfg(not(windows))]
@@ -489,10 +503,23 @@ Windows asks for admin once to add two hidden sandbox users. Until then qh asks 
     pub fn command(p: &Policy, program: &Path, args: &[&str]) -> io::Result<std::process::Command> {
         let c = load()?;
         let sid = sid_from(&c.group)?;
-        grant(p, sid.0)?;
+        let port = match p.net { Net::Proxy { port } => Some(port), _ => None };
+        // the sandbox's own cargo home (registry cache, locks, config with the mirror): writable,
+        // unlike yours; toolchains still come from yours through PATH and rustup
+        let home = std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_else(crate::platform::home);
+        let cargo = dir().join("cargo");
+        fs::create_dir_all(&cargo)?;
+        let yours = ["config.toml", "config"].iter().find_map(|f| fs::read_to_string(home.join(".cargo").join(f)).ok()).unwrap_or_default();
+        let conf = cargo_config(&yours, port);
+        if fs::read_to_string(cargo.join("config.toml")).ok().as_deref() != Some(conf.as_str()) { fs::write(cargo.join("config.toml"), &conf)? }
+        let mut p = p.clone();
+        p.write.push(cargo.clone());
+        grant(&p, sid.0)?;
         let mut cmd = std::process::Command::new(std::env::current_exe()?);
         cmd.arg("__winsbx").arg(if p.net == Net::Off { "off" } else { "on" }).arg(program).args(args);
-        cmd.envs(git_trust(std::env::var("GIT_CONFIG_COUNT").ok().as_deref()));
+        cmd.envs(git_config(std::env::var("GIT_CONFIG_COUNT").ok().as_deref()));
+        // curl as Git for Windows ships it can use OpenSSL too
+        cmd.env("CURL_SSL_BACKEND", "openssl").env("CARGO_HOME", &cargo);
         Ok(cmd)
     }
 
@@ -717,6 +744,7 @@ writing only in the project, temp and package caches. Restart qh for auto mode. 
         for f in [secrets_file(), dir().join("sandbox-offered")] {
             let _ = fs::remove_file(f);
         }
+        let _ = fs::remove_dir_all(dir().join("cargo")); // the sandbox's own cargo home: a cache
         Ok(format!("removed the sandbox users, their firewall filters and stored passwords, and their access to {n} folders"))
     }
 
@@ -1006,7 +1034,7 @@ mod tests {
             std::fs::create_dir_all(d).unwrap();
         }
         std::fs::create_dir_all(t.join("elsewhere")).unwrap();
-        for f in [home.join(".cargo/credentials.toml"), home.join(".cargo/.package-cache"), proj.join(".git/config"), proj.join(".env"), t.join("elsewhere/.netrc")] {
+        for f in [home.join(".cargo/credentials.toml"), proj.join(".git/config"), proj.join(".env"), t.join("elsewhere/.netrc")] {
             std::fs::write(f, "x").unwrap();
         }
         let p = Policy {
@@ -1022,7 +1050,6 @@ mod tests {
             (Kind::Write, "proj", true),
             (Kind::Read, "home/.cargo", true),
             (Kind::Read, "home/AppData/Roaming/npm", true),
-            (Kind::Write, "home/.cargo/.package-cache", false),
             (Kind::DenyRead, "home/.cargo/credentials.toml", false),
             (Kind::DenyRead, "proj/.env", false),
             (Kind::DenyRead, "elsewhere/.netrc", false), // outside the profile: Users may read it
@@ -1039,8 +1066,16 @@ mod tests {
         let p = password(&[200; 32]);
         assert!(p.len() == 36 && p.chars().any(|c| c.is_ascii_uppercase()) && p.chars().any(|c| c.is_ascii_lowercase())
             && p.chars().any(|c| c.is_ascii_digit()) && p.chars().any(|c| !c.is_ascii_alphanumeric()));
-        assert_eq!(git_trust(None)[2], ("GIT_CONFIG_COUNT".into(), "1".into()));
-        let t = git_trust(Some("2"));
-        assert_eq!((t[0].0.as_str(), t[1].1.as_str(), t[2].1.as_str()), ("GIT_CONFIG_KEY_2", "*", "3"));
+        let g = git_config(None);
+        assert_eq!(g.last(), Some(&("GIT_CONFIG_COUNT".into(), "2".into())));
+        assert_eq!((g[2].1.as_str(), g[3].1.as_str()), ("http.sslBackend", "openssl"));
+        let t = git_config(Some("2"));
+        assert_eq!((t[0].0.as_str(), t[1].1.as_str(), t[2].0.as_str(), t[4].1.as_str()), ("GIT_CONFIG_KEY_2", "*", "GIT_CONFIG_KEY_3", "4"));
+        let c = cargo_config("[net]\nretry = 3\n", Some(47610));
+        assert!(c.starts_with("[net]\nretry = 3\n\n# added by qh") && c.contains("sparse+http://127.0.0.1:47610/qh-mirror/crates-io/"));
+        let toml: toml::Table = c.parse().unwrap();
+        assert_eq!(toml["source"]["crates-io"]["replace-with"].as_str(), Some("qh-mirror"));
+        assert_eq!(cargo_config("[source.crates-io]\nreplace-with = \"corp\"\n", Some(1)), "[source.crates-io]\nreplace-with = \"corp\"");
+        assert_eq!(cargo_config("", None), "");
     }
 }

@@ -3,6 +3,10 @@
 //! CONNECT tunnels (HTTPS, git, cargo, npm, pip) and plain `GET http://…` requests; one upstream
 //! connection per client connection. Listens on 127.0.0.1 and, on Unix, a private socket for
 //! commands in their own network namespace (a helper inside bridges to it).
+//!
+//! It also serves package mirrors in plain HTTP (`/qh-mirror/…`) for commands that can't do TLS
+//! themselves: on Windows, Schannel refuses the sandbox's write-restricted token, and cargo has no
+//! other TLS. qh fetches upstream over its own TLS, after the same allowlist check.
 use std::io::{self, Read, Write};
 use std::net::{Ipv6Addr, Shutdown, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::Arc;
@@ -108,6 +112,9 @@ fn serve(mut accept: impl FnMut() -> io::Result<Box<dyn Stream>> + Send + 'stati
 fn handle(mut c: Box<dyn Stream>, decide: &(dyn Fn(&str, u16) -> bool + Send + Sync)) {
     c.timeout(Some(HEAD_TIME));
     let Some((buf, end)) = read_head(&mut *c) else { return };
+    if let Some(m) = (end <= MAX_HEAD).then(|| mirror_request(&buf[..end])).flatten() {
+        return mirror(&mut *c, m, decide);
+    }
     let Some((host, port, fwd)) = (end <= MAX_HEAD).then(|| parse(&buf[..end])).flatten() else {
         return reply(&mut *c, "400 Bad Request", "qh sandbox: malformed proxy request");
     };
@@ -200,6 +207,79 @@ fn parse(head: &[u8]) -> Option<(String, u16, Option<Vec<u8>>)> {
     Some((host, port, Some(out)))
 }
 
+/// Path prefix → upstream: the crates.io sparse index and its crate downloads.
+const MIRRORS: [(&str, &str); 2] = [("/qh-mirror/crates-io/", "https://index.crates.io/"),
+                                     ("/qh-mirror/crates-dl/", "https://static.crates.io/crates/")];
+
+/// A request for one of the mirrors, in origin-form (sent straight to the proxy, not through it).
+struct MirrorReq { method: String, url: String, host: String, local: String, headers: Vec<(String, String)> }
+
+fn mirror_request(head: &[u8]) -> Option<MirrorReq> {
+    let mut lines = head.split(|&b| b == b'\n').map(|l| l.strip_suffix(b"\r").unwrap_or(l));
+    let mut p = std::str::from_utf8(lines.next()?).ok()?.split(' ');
+    let (m, target, v) = (p.next()?, p.next()?, p.next()?);
+    if p.next().is_some() || !matches!(m, "GET" | "HEAD") || !v.starts_with("HTTP/1.") { return None }
+    let (prefix, base) = MIRRORS.iter().find(|(pre, _)| target.starts_with(pre))?;
+    let rest = &target[prefix.len()..];
+    if rest.is_empty() || rest.contains("..") || !rest.bytes().all(|b| b.is_ascii_graphic()) { return None }
+    let (mut local, mut headers) = (String::new(), vec![]);
+    for l in lines.take_while(|l| !l.is_empty()) {
+        let l = std::str::from_utf8(l).ok()?;
+        let (k, val) = l.split_once(':')?;
+        match k.trim().to_ascii_lowercase().as_str() {
+            "host" => local = val.trim().into(),
+            k @ ("if-none-match" | "if-modified-since" | "accept" | "user-agent") => headers.push((k.into(), val.trim().into())),
+            _ => {}
+        }
+    }
+    // the download links handed out point back here: only ever at loopback
+    if !matches!(authority(&local, Some(80)), Some((h, _)) if h == "127.0.0.1" || h == "localhost") { return None }
+    let url = format!("{base}{rest}");
+    let host = url[8..].split('/').next()?.to_string();
+    Some(MirrorReq { method: m.into(), url, host, local, headers })
+}
+
+/// Fetch a mirror request upstream (no redirects: they could lead off the allowlist) and pass the
+/// response back, closing the connection after it. The index's config.json is rewritten so crate
+/// downloads come back through the mirror too.
+fn mirror(c: &mut dyn Stream, m: MirrorReq, decide: &(dyn Fn(&str, u16) -> bool + Send + Sync)) {
+    if !decide(&m.host, 443) {
+        return reply(c, "403 Forbidden", &format!("qh sandbox: {} is not on the network allowlist (the user declined or wasn't asked)", m.host));
+    }
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    let agent = AGENT.get_or_init(|| ureq::AgentBuilder::new().redirects(0).timeout_connect(CONNECT_TIME)
+        .timeout_read(Duration::from_secs(60)).build());
+    let mut req = agent.request(&m.method, &m.url);
+    for (k, v) in &m.headers { req = req.set(k, v) }
+    let r = match req.call() {
+        Ok(r) | Err(ureq::Error::Status(_, r)) => r,
+        Err(e) => return reply(c, "502 Bad Gateway", &format!("qh sandbox: can't fetch {}: {e}", m.url)),
+    };
+    let mut head = format!("HTTP/1.1 {} {}\r\n", r.status(), r.status_text());
+    for k in ["content-type", "etag", "last-modified", "cache-control", "location"] {
+        if let Some(v) = r.header(k) { head += &format!("{k}: {v}\r\n") }
+    }
+    let config = m.method == "GET" && m.url == "https://index.crates.io/config.json" && r.status() == 200;
+    if config {
+        let body = r.into_string().map(|b| config_json(&b, &m.local)).unwrap_or_default();
+        let _ = write!(c, "{head}content-length: {}\r\nconnection: close\r\n\r\n{body}", body.len());
+    } else {
+        // no content-length: the body may have been decompressed on the way; the close ends it
+        if write!(c, "{head}connection: close\r\n\r\n").is_ok() && m.method == "GET" {
+            let _ = io::copy(&mut r.into_reader(), c);
+        }
+    }
+    let _ = c.flush();
+    c.shut(Shutdown::Both);
+}
+
+/// The crates.io index config with `dl` pointed at the mirror on `local` (host:port).
+fn config_json(body: &str, local: &str) -> String {
+    let mut v: serde_json::Value = serde_json::from_str(body).unwrap_or_else(|_| serde_json::json!({}));
+    v["dl"] = format!("http://{local}/qh-mirror/crates-dl").into();
+    v.to_string()
+}
+
 /// host[:port] or [v6][:port] → (lowercase host without brackets or trailing dot, port).
 fn authority(s: &str, default: Option<u16>) -> Option<(String, u16)> {
     let (host, port, v6) = match s.strip_prefix('[') {
@@ -262,6 +342,7 @@ fn pump(from: &mut dyn Stream, to: &mut dyn Stream) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
     use std::sync::Mutex;
 
     type Seen = Arc<Mutex<Vec<(String, u16)>>>;
@@ -398,5 +479,60 @@ mod tests {
             .arg(format!("http://127.0.0.1:{up}/x")).output() else { return };
         assert_eq!(String::from_utf8_lossy(&out.stdout), "ok");
         assert!(rx.recv().unwrap().starts_with("GET /x HTTP/1.1\r\nHost: 127.0.0.1:"));
+    }
+
+    #[test]
+    fn mirror_requests_are_only_index_and_downloads_for_loopback() {
+        let m = mirror_request(b"GET /qh-mirror/crates-io/se/rd/serde HTTP/1.1\r\nHost: 127.0.0.1:47610\r\nIf-None-Match: \"x\"\r\nCookie: a\r\n\r\n").unwrap();
+        assert_eq!((m.url.as_str(), m.host.as_str(), m.local.as_str()), ("https://index.crates.io/se/rd/serde", "index.crates.io", "127.0.0.1:47610"));
+        assert_eq!(m.headers, [("if-none-match".to_string(), "\"x\"".to_string())]);
+        let m = mirror_request(b"HEAD /qh-mirror/crates-dl/serde/1.0.0/download HTTP/1.1\r\nHost: localhost:9\r\n\r\n").unwrap();
+        assert_eq!((m.method.as_str(), m.url.as_str()), ("HEAD", "https://static.crates.io/crates/serde/1.0.0/download"));
+        for bad in [&b"GET /qh-mirror/crates-io/../x HTTP/1.1\r\nHost: 127.0.0.1:1\r\n\r\n"[..],
+                    b"POST /qh-mirror/crates-io/x HTTP/1.1\r\nHost: 127.0.0.1:1\r\n\r\n",
+                    b"GET /qh-mirror/crates-io/x HTTP/1.1\r\nHost: evil.example:80\r\n\r\n",
+                    b"GET /qh-mirror/crates-io/x HTTP/1.1\r\n\r\n",
+                    b"GET /qh-mirror/other/x HTTP/1.1\r\nHost: 127.0.0.1:1\r\n\r\n",
+                    b"GET /qh-mirror/crates-io/ HTTP/1.1\r\nHost: 127.0.0.1:1\r\n\r\n"] {
+            assert!(mirror_request(bad).is_none(), "{}", String::from_utf8_lossy(bad));
+        }
+        let c = config_json(r#"{"dl":"https://static.crates.io/crates","api":"https://crates.io"}"#, "127.0.0.1:47610");
+        let v: serde_json::Value = serde_json::from_str(&c).unwrap();
+        assert_eq!((v["dl"].as_str(), v["api"].as_str()), (Some("http://127.0.0.1:47610/qh-mirror/crates-dl"), Some("https://crates.io")));
+    }
+
+    #[test]
+    fn mirror_asks_the_allowlist_first() {
+        let (p, seen) = proxy();
+        let r = ask(&p, format!("GET /qh-mirror/crates-io/config.json HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n", p.port).as_bytes());
+        assert!(r.starts_with("HTTP/1.1 403"), "{r}");
+        assert_eq!(*seen.lock().unwrap(), [("index.crates.io".to_string(), 443)]);
+    }
+
+    /// Real cargo, real crates.io, through the mirror only (QH_REALWORK=1: needs internet).
+    #[test]
+    fn cargo_builds_through_the_mirror() {
+        if std::env::var("QH_REALWORK").is_err() || Command::new("cargo").arg("--version").output().is_err() { return }
+        let p = start(Arc::new(|h: &str, _| h.ends_with("crates.io"))).unwrap();
+        let d = std::env::temp_dir().join(format!("qh-mirror-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let home = d.join("cargo-home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("config.toml"), format!("[source.crates-io]\nreplace-with = \"qh-mirror\"\n\n\
+[source.qh-mirror]\nregistry = \"sparse+http://127.0.0.1:{}/qh-mirror/crates-io/\"\n", p.port)).unwrap();
+        let ok = |c: &mut Command| { let o = c.output().unwrap(); assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr)); };
+        ok(Command::new("cargo").args(["new", "-q", "--vcs", "none", "m"]).current_dir(&d));
+        let proj = d.join("m");
+        let mut t = std::fs::read_to_string(proj.join("Cargo.toml")).unwrap();
+        t.push_str("itoa = \"1\"\n");
+        std::fs::write(proj.join("Cargo.toml"), t).unwrap();
+        // no proxy variables and no other way out: only the mirror can have served this
+        ok(Command::new("cargo").args(["build", "-q"]).current_dir(&proj).env("CARGO_HOME", &home)
+            .env("CARGO_TARGET_DIR", d.join("t")).env_remove("HTTPS_PROXY").env_remove("https_proxy"));
+        // cargo names its cache after the registry it used: the mirror on loopback
+        let cache: Vec<String> = std::fs::read_dir(home.join("registry/cache")).unwrap().flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        assert!(!cache.is_empty() && cache.iter().all(|n| n.starts_with("127.0.0.1-")), "{cache:?}");
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

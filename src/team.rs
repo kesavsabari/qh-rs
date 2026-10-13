@@ -2694,7 +2694,7 @@ pub fn ago(ts: u64) -> String {
 
 /// "team: you · rahul ● · anu ○ 2h ago · 2 new messages · 1 waiting (Ctrl+T)" for the status bar, while team mode is on.
 pub fn status_line() -> Option<String> {
-    let mut out = cur(|s| {
+    let on_screen = cur(|s| {
         let mut peers: Vec<&Peer> = s.peers.values().filter(|p| p.joined).collect();
         peers.sort_by_key(|p| (!p.online, std::cmp::Reverse(p.ts)));
         let mut out = format!("team: {}", s.me);
@@ -2710,11 +2710,29 @@ pub fn status_line() -> Option<String> {
         if !s.asking.is_empty() { out += &format!(" · {} waiting to join (Ctrl+T)", s.asking.len()) }
         if !s.error.is_empty() { out += " · sync problem" }
         out
-    })?;
+    });
+    // qh started outside the team's folder: still connected, one key away
+    let mut out = match on_screen {
+        Some(o) => o,
+        None => {
+            let c = CURRENT.lock().unwrap().clone();
+            let bg: Vec<String> = STATES.lock().unwrap().get_or_insert_with(HashMap::new).values()
+                .filter(|s| s.running.load(Relaxed)).map(|s| s.repo.clone()).collect();
+            background_hint(&c, &bg)?
+        }
+    };
     for (r, n) in waiting_elsewhere() {
         out += &format!(" · {n} waiting in {}", r.rsplit('/').next().unwrap_or(&r));
     }
     Some(out)
+}
+
+/// "team <name> · Ctrl+] to open" for a team connected while another project is on screen.
+fn background_hint(current: &str, running: &[String]) -> Option<String> {
+    let mut v: Vec<&String> = running.iter().filter(|r| *r != current).collect();
+    v.sort();
+    let r = v.first()?;
+    Some(format!("team {} · Ctrl+] to open", r.rsplit('/').next().unwrap_or(r)))
 }
 
 /// Something in a connected team project waits for you: messages, join requests, asks.
@@ -3206,6 +3224,13 @@ pub fn list_team_files(cwd: &Path, to: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_team_in_the_background_shows_how_to_open_it() {
+        assert_eq!(super::background_hint("", &["kesav/shop".into()]).as_deref(), Some("team shop · Ctrl+] to open"));
+        assert_eq!(super::background_hint("kesav/shop", &["kesav/shop".into()]), None, "on screen: the full line shows instead");
+        assert_eq!(super::background_hint("", &[]), None);
+    }
+
     use super::*;
 
     #[test]

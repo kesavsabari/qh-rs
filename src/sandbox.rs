@@ -577,6 +577,15 @@ fn command_os(p: &Policy, ctx: &Ctx, cfg: &Config, prog: &Path, args: &[&str], e
     }
 }
 
+/// Windows' STATUS_DLL_INIT_FAILED, as an exit code: a tool that uses windows (PowerShell, whoami,
+/// node) couldn't attach to the sandbox's desktop, which happens where there is no desktop at all
+/// (SSH, a service: session 0).
+pub const NO_DESKTOP_EXIT: i32 = 0xC000_0142_u32 as i32;
+pub const NO_DESKTOP_HINT: &str = "[qh sandbox] This Windows session has no desktop (SSH or a service), and tools that \
+use windows (PowerShell, whoami, node and most others) can't start inside the sandbox without one. Tell the user: run qh \
+from a terminal on the desktop to keep the sandbox, or call bash again with the same cmd and \"unsandboxed\": true \
+(the user is asked first).";
+
 /// Appended to a failed sandboxed command's output when the failure looks like the sandbox's doing.
 pub fn hint(out: &str) -> Option<&'static str> {
     // Windows: Schannel refuses the sandbox's write-restricted token

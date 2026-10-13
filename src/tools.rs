@@ -488,6 +488,7 @@ fn bash(cwd: &mut PathBuf, a: &Value, cfg: &Config, sb: &crate::sandbox::Ctx) ->
     }
     let err = String::from_utf8_lossy(&o.stderr);
     let hint = match (ran, o.status.success()) {
+        (crate::sandbox::Ran::Sandboxed, false) if o.status.code() == Some(crate::sandbox::NO_DESKTOP_EXIT) => format!("\n{}", crate::sandbox::NO_DESKTOP_HINT),
         (crate::sandbox::Ran::Sandboxed, false) => crate::sandbox::hint(&format!("{out}{err}")).map(|h| format!("\n{h}")).unwrap_or_default(),
         _ => String::new(),
     };

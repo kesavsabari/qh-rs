@@ -42,8 +42,8 @@ a:hover { color: var(--accent); text-decoration-color: var(--accent); }
 .brand:hover { color: var(--ink); }
 @keyframes blink { 50% { opacity: 0; } }
 .side p.tag { color: var(--soft); font-size: .88rem; line-height: 1.5; margin: 14px 0 26px; }
-.side nav a { display: block; color: var(--soft); text-decoration: none; padding: 5px 0 5px 12px; margin-left: -12px; border-left: 2px solid transparent; font-size: .93rem; transition: color .2s, padding-left .25s; }
-.side nav a:hover { color: var(--ink); padding-left: 16px; }
+.side nav a { display: block; color: var(--soft); text-decoration: none; padding: 5px 0 5px 12px; margin-left: -12px; border-left: 2px solid transparent; font-size: .93rem; transition: color .2s, transform .25s; }
+.side nav a:hover { color: var(--ink); transform: translateX(4px); }
 .side nav a.on { color: var(--ink); border-left-color: var(--accent); }
 .side nav .grp { font: 400 .75rem/1 var(--mono); color: var(--faint); margin: 24px 0 8px; padding-top: 12px; border-top: 1px solid var(--rule); }
 .side nav .grp:first-child { margin-top: 0; }

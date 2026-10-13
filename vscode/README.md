@@ -5,7 +5,7 @@
 This extension puts qh beside your code.
 
 - **Open qh**: the ✦ button at the top right of an editor, the `✦ qh` item in the status bar, or <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Q</kbd> (<kbd>Cmd</kbd>+<kbd>Alt</kbd>+<kbd>Q</kbd> on a Mac). qh opens in a tab beside your code, in your project folder, with everything it has in the terminal: sessions, team mode, the sandbox.
-- **Send your selection**: select code and press <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>K</kbd> (<kbd>Cmd</kbd>+<kbd>Alt</kbd>+<kbd>K</kbd>), or right-click → *Send selection to qh*. qh gets `@file (lines 10-20)` in its input; type your request after it.
+- **Send your selection**: select code and press <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>L</kbd> (<kbd>Cmd</kbd>+<kbd>Alt</kbd>+<kbd>L</kbd>), or right-click → *Send selection to qh*. qh gets `@file (lines 10-20)` in its input; type your request after it.
 - **Send a file**: right-click a file in the editor or the explorer → *Send file to qh*.
 - **Review changes**: when qh edits files, the status bar shows `± 3 changes`. Click it, pick a file, and see the diff in VS Code's diff view.
 

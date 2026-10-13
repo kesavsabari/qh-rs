@@ -21,7 +21,7 @@
     ],
     "keybindings": [
       { "command": "qh.open", "key": "ctrl+alt+q", "mac": "cmd+alt+q" },
-      { "command": "qh.sendSelection", "key": "ctrl+alt+k", "mac": "cmd+alt+k", "when": "editorTextFocus" }
+      { "command": "qh.sendSelection", "key": "ctrl+alt+l", "mac": "cmd+alt+l", "when": "editorTextFocus" }
     ],
     "menus": {
       "editor/title": [

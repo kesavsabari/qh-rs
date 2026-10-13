@@ -336,12 +336,14 @@ fn windows_sandbox_users() {
     // (HTTPS inside can't use Schannel, which refuses the write-restricted token: git and curl are
     // switched to OpenSSL, Python brings its own)
     let (_, out) = l.bash("command -v curl; curl -V | head -2; echo \"backend=$CURL_SSL_BACKEND\"; \
-curl -s -m 8 --noproxy '*' -o /dev/null -w 'direct=%{http_code}' https://1.1.1.1; echo; \
-curl -sS -m 20 -o /dev/null -w 'proxy=%{http_code}' https://index.crates.io/config.json; echo; \
+python -c \"import socket; socket.create_connection(('1.1.1.1', 443), 5); print('DIRECT-OPEN')\" 2>&1 | tail -1; \
 git ls-remote https://github.com/git/git HEAD >/dev/null && echo git-https-ok; \
 python -c \"import urllib.request as u; print('py=%d' % u.urlopen('https://index.crates.io/config.json', timeout=20).status)\"");
-    assert!(out.contains("direct=000"), "a direct connection got out: {out}");
-    assert!(out.contains("proxy=200") && out.contains("git-https-ok"), "HTTPS through the proxy: {out}");
+    assert!(!out.contains("DIRECT-OPEN"), "a direct connection got out: {out}");
+    assert!(out.contains("git-https-ok") && out.contains("py=200"), "HTTPS through the proxy: {out}");
+    // Git for Windows' curl is Schannel-only: it fails, and the hint says what to use instead
+    let (_, out) = l.bash("curl -sS -m 20 -o /dev/null https://index.crates.io/config.json && echo curl-ok");
+    assert!(out.contains("curl-ok") || out.contains("Windows' own TLS"), "curl's TLS failure gets the Windows hint: {out}");
     // a server of yours on loopback (Ollama, a debug port) is out of reach: only the proxy's ports are open
     let host = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = host.local_addr().unwrap().port();

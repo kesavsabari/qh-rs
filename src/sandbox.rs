@@ -571,6 +571,13 @@ fn command_os(p: &Policy, ctx: &Ctx, cfg: &Config, prog: &Path, args: &[&str], e
 
 /// Appended to a failed sandboxed command's output when the failure looks like the sandbox's doing.
 pub fn hint(out: &str) -> Option<&'static str> {
+    // Windows: Schannel refuses the sandbox's write-restricted token
+    if out.contains("SEC_E_NO_CREDENTIALS") || out.contains("AcquireCredentialsHandle") {
+        return Some("[qh sandbox] Windows' own TLS (Schannel: curl.exe, PowerShell's Invoke-WebRequest, .NET, winget) \
+can't run inside the sandbox. Download with python (urllib), node (fetch) or git instead: they bring their own TLS \
+and go through the allowlist proxy; cargo already uses qh's mirror. If only this tool will do, call bash again with \
+the same cmd and \"unsandboxed\": true; the user is asked first.");
+    }
     static BLOCKED: LazyLock<Regex> = LazyLock::new(|| Regex::new(
         r"(?i)permission denied|operation not permitted|read-only file system|qh sandbox|403 forbidden|could not resolve|network is unreachable|connection refused|couldn.t connect to server|econnrefused|eperm|eacces|erofs|could not read username|authentication failed|terminal prompts disabled|could not read from remote repository").unwrap());
     BLOCKED.is_match(out).then_some("[qh sandbox] Commands can write only in the project, temp and package caches, can't read \
@@ -641,6 +648,12 @@ mod tests {
                   "git@github.com: Permission denied (publickey).\nfatal: Could not read from remote repository."] {
             assert!(super::hint(e).is_some(), "{e}");
         }
+    }
+
+    #[test]
+    fn windows_tls_failures_point_at_tools_that_work() {
+        let h = super::hint("curl: (35) schannel: AcquireCredentialsHandle failed: SEC_E_NO_CREDENTIALS (0x8009030e)").unwrap();
+        assert!(h.contains("python") && h.contains("unsandboxed"), "{h}");
     }
 
     use super::*;

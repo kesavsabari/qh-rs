@@ -564,10 +564,16 @@ Windows asks for admin once to add two hidden sandbox users. Until then qh asks 
         // (no lpDesktop: the logon service lets the runner onto your desktop only when none is named;
         // the runner then puts the command itself on a private one)
         let mut pi: PROCESS_INFORMATION = unsafe { zeroed() };
-        // SAFETY: all pointers are to live NUL-terminated buffers. The profile is loaded: without it
-        // Windows' TLS (schannel) has no credentials, so every HTTPS download fails; `remove` deletes it
-        let ok = unsafe { CreateProcessWithLogonW(user.as_ptr(), domain.as_ptr(), pw.as_ptr(), LOGON_WITH_PROFILE, app.as_ptr(), cmdline.as_mut_ptr(),
-            CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW, envb.as_ptr().cast(), cwd.as_ptr(), &si, &mut pi) };
+        // SAFETY: all pointers are to live NUL-terminated buffers. The profile is loaded, so the
+        // sandbox user has a registry hive of its own for tools' settings; `remove` deletes it.
+        // Two logons at once while that profile loads get "already running" (1056): wait and retry.
+        let mut ok = 0;
+        for _ in 0..50 {
+            ok = unsafe { CreateProcessWithLogonW(user.as_ptr(), domain.as_ptr(), pw.as_ptr(), LOGON_WITH_PROFILE, app.as_ptr(), cmdline.as_mut_ptr(),
+                CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW, envb.as_ptr().cast(), cwd.as_ptr(), &si, &mut pi) };
+            if ok != 0 || last_err().raw_os_error() != Some(1056) { break }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
         if ok == 0 {
             let e = last_err();
             let fix = match e.raw_os_error() {

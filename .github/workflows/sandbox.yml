@@ -46,7 +46,8 @@ jobs:
         shell: bash
         continue-on-error: true
         run: |
-          openssl req -x509 -newkey rsa:2048 -nodes -keyout k.pem -out c.pem -days 1 -subj /CN=localhost 2>/dev/null
+          set +e
+          MSYS_NO_PATHCONV=1 openssl req -x509 -newkey rsa:2048 -nodes -keyout k.pem -out c.pem -days 1 -subj /CN=localhost || echo "openssl failed"
           python -c "import http.server,ssl;s=http.server.HTTPServer(('127.0.0.1',47610),http.server.SimpleHTTPRequestHandler);c=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);c.load_cert_chain('c.pem','k.pem');s.socket=c.wrap_socket(s.socket,server_side=True);s.serve_forever()" &
           sleep 3
           C="$(cygpath -w "$(command -v curl)")"

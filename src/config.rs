@@ -150,8 +150,8 @@ pub fn load_defaults() -> Config {
         hooks: vec![],
         mcp: vec![],
         browser_headless: false,
-        // auto by default where commands run in the OS sandbox; Windows waits for its sandbox
-        mode: if cfg!(windows) { "ask" } else { "auto" }.into(),
+        // auto by default where commands run in the OS sandbox: on Windows once its sandbox users exist
+        mode: if cfg!(windows) && !crate::sandbox_windows::ready() { "ask" } else { "auto" }.into(),
         browser_allow_hosts: vec![],
         providers: vec![],
         default_provider: String::new(),

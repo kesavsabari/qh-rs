@@ -3002,8 +3002,30 @@ fn draw_confirm(f: &mut Frame, c: &Confirm, queued: usize) {
     };
     let area = f.area();
     let w = area.width.saturating_sub(4).min(90);
-    let body_h = (detail.len() as u16).min(area.height.saturating_sub(12));
-    let h = (body_h + 7).min(area.height);
+    // rows a line takes once wrapped inside the border, so the keys line never falls off the bottom
+    let iw = w.saturating_sub(2).max(1);
+    let rows = |l: &Line| Paragraph::new(l.clone()).wrap(ratatui::widgets::Wrap { trim: false }).line_count(iw).max(1) as u16;
+    let mut head = vec![Line::styled(summary, Style::new().fg(DIM))];
+    if !c.warn.is_empty() {
+        head.push(Line::styled(format!("! {}", c.warn), Style::new().fg(Color::Red).add_modifier(Modifier::BOLD)));
+    }
+    head.push(Line::raw(""));
+    let mut foot = vec![Line::raw("")];
+    if !c.rule.is_empty() {
+        foot.push(Line::from(vec![Span::styled("always = auto-approve ", Style::new().fg(DIM)), Span::styled(c.rule.clone(), Style::new().add_modifier(Modifier::BOLD))]));
+    }
+    let keys = if c.rule.is_empty() { "[y] allow   [n] deny" } else { "[y] allow   [a] always   [n] deny" };
+    foot.push(Line::styled(keys, Style::new().add_modifier(Modifier::BOLD)));
+    let fixed: u16 = head.iter().chain(&foot).map(|l| rows(l)).sum::<u16>() + 2;
+    let budget = area.height.saturating_sub(5).saturating_sub(fixed);
+    let (mut body_h, mut body) = (0u16, vec![]);
+    for l in detail {
+        let r = rows(&l);
+        if body_h + r > budget { break }
+        body_h += r;
+        body.push(l);
+    }
+    let h = (fixed + body_h).min(area.height);
     let r = Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 2, width: w, height: h };
     f.render_widget(Clear, r);
     let color = if danger || !c.warn.is_empty() { Color::Red } else { Color::Yellow };
@@ -3013,18 +3035,7 @@ fn draw_confirm(f: &mut Frame, c: &Confirm, queued: usize) {
                                Span::raw(format!("  {}  wants to run{more}", c.session))]));
     let inner = block.inner(r);
     f.render_widget(block, r);
-    let mut lines = vec![Line::styled(summary, Style::new().fg(DIM))];
-    if !c.warn.is_empty() {
-        lines.push(Line::styled(format!("! {}", c.warn), Style::new().fg(Color::Red).add_modifier(Modifier::BOLD)));
-    }
-    lines.push(Line::raw(""));
-    lines.extend(detail.into_iter().take(body_h as usize));
-    lines.push(Line::raw(""));
-    if !c.rule.is_empty() {
-        lines.push(Line::from(vec![Span::styled("always = auto-approve ", Style::new().fg(DIM)), Span::styled(c.rule.clone(), Style::new().add_modifier(Modifier::BOLD))]));
-    }
-    let keys = if c.rule.is_empty() { "[y] allow   [n] deny" } else { "[y] allow   [a] always   [n] deny" };
-    lines.push(Line::styled(keys, Style::new().add_modifier(Modifier::BOLD)));
+    let lines: Vec<Line> = head.into_iter().chain(body).chain(foot).collect();
     f.render_widget(Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: false }), inner);
 }
 

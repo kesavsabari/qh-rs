@@ -848,6 +848,15 @@ pub fn risky(name: &str, a: &Value, cfg: &Config) -> bool {
     }
 }
 
+/// The port of an http(s) URL on this machine (localhost, 127.0.0.1, [::1]), if it names one.
+#[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
+fn local_port(url: &str) -> Option<u16> {
+    let rest = url.strip_prefix("http://").or_else(|| url.strip_prefix("https://"))?;
+    let auth = rest.split(['/', '?', '#']).next()?;
+    let (host, port) = auth.rsplit_once(':')?;
+    matches!(host, "localhost" | "127.0.0.1" | "[::1]").then(|| port.parse().ok()).flatten()
+}
+
 pub fn call(name: &str, a: &Value, cfg: &Config, cwd: &mut PathBuf, lim: &crate::tier::Limits, sb: &crate::sandbox::Ctx) -> String {
     OUT_CAP.with(|c| c.set(lim.out_cap));
     if browser::TOOLS.contains(&name) {
@@ -856,9 +865,21 @@ pub fn call(name: &str, a: &Value, cfg: &Config, cwd: &mut PathBuf, lim: &crate:
         // the tab's own dev server: a page its background task serves may be opened, nothing else local.
         // On Linux the tab's tasks listen inside its network namespace: those ports are forwarded out.
         #[cfg(target_os = "macos")]
-        let ports = crate::sandbox_macos::tab_ports(&crate::bg::pids(&sb.tab));
+        let tab_ports = || crate::sandbox_macos::tab_ports(&crate::bg::pids(&sb.tab));
         #[cfg(target_os = "linux")]
-        let ports = crate::sandbox_linux::tab_ports(&sb.tab);
+        let tab_ports = || crate::sandbox_linux::tab_ports(&sb.tab);
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        let mut ports = tab_ports();
+        // a server the tab just started may not be listening yet (seen live: the agent browsed right
+        // after starting it and got "local network"): give its own background tasks a moment
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        if let Some(want) = local_port(a["url"].as_str().unwrap_or("")).filter(|p| !ports.contains(p)) {
+            for _ in 0..15 {
+                if crate::bg::pids(&sb.tab).is_empty() || ports.contains(&want) { break }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                ports = tab_ports();
+            }
+        }
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         for p in ports {
             allow.extend([format!("localhost:{p}"), format!("127.0.0.1:{p}")]);
@@ -890,6 +911,18 @@ pub fn call(name: &str, a: &Value, cfg: &Config, cwd: &mut PathBuf, lim: &crate:
         },
     };
     r.unwrap_or_else(|e| format!("error: {e}"))
+}
+
+#[cfg(test)]
+mod url_tests {
+    #[test]
+    fn local_ports_only() {
+        assert_eq!(super::local_port("http://127.0.0.1:8765/x"), Some(8765));
+        assert_eq!(super::local_port("http://localhost:3000"), Some(3000));
+        assert_eq!(super::local_port("https://[::1]:8443/"), Some(8443));
+        assert_eq!(super::local_port("http://example.com:8080/"), None);
+        assert_eq!(super::local_port("http://127.0.0.1/"), None);
+    }
 }
 
 #[cfg(test)]

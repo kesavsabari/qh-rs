@@ -381,7 +381,7 @@ impl Browser {
                     problems.iter().take(MAX_PROBLEMS).map(|p| format!("- {p}")).collect::<Vec<_>>().join("\n"),
                     if more > 0 { format!("\n- … {more} more") } else { String::new() })
         };
-        Ok(format!("{warn}{}\n{}\n\nElements:\n{}\n\nText:\n{chunk}{more}{problems}", d["title"].as_str().unwrap_or(""),
+        Ok(format!("{warn}Title: {}\nURL: {}\n\nElements:\n{}\n\nText:\n{chunk}{more}{problems}", d["title"].as_str().unwrap_or(""),
                    d["url"].as_str().unwrap_or(""), lines.join("\n")))
     }
 

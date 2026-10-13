@@ -271,8 +271,9 @@ fn main() {
     if !args.print.is_empty() {
         let opts = Headless { stats: args.stats.as_deref(), json: args.json, max_turns: args.max_turns };
         let code = headless(&hub, &args.print, rx, &opts);
+        bg::kill_all(); // its background tasks end with it, as in the TUI (seen live: dev servers outlived qh -p)
         browser::shutdown();
-    lsp::shutdown();
+        lsp::shutdown();
         std::process::exit(code);
     }
     update::check_in_background(update_check);

@@ -844,9 +844,13 @@ pub fn call(name: &str, a: &Value, cfg: &Config, cwd: &mut PathBuf, lim: &crate:
         #[allow(unused_mut)]
         let mut allow = cfg.browser_allow_hosts.clone();
         // the tab's own dev server: a page its background task serves may be opened, nothing else local.
-        // On Linux the tab's tasks listen inside its network namespace, out of the browser's reach.
+        // On Linux the tab's tasks listen inside its network namespace: those ports are forwarded out.
         #[cfg(target_os = "macos")]
-        for p in crate::sandbox_macos::tab_ports(&crate::bg::pids(&sb.tab)) {
+        let ports = crate::sandbox_macos::tab_ports(&crate::bg::pids(&sb.tab));
+        #[cfg(target_os = "linux")]
+        let ports = crate::sandbox_linux::tab_ports(&sb.tab);
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        for p in ports {
             allow.extend([format!("localhost:{p}"), format!("127.0.0.1:{p}")]);
         }
         return browser::call(name, a, cfg.browser_headless, &allow);

@@ -99,12 +99,26 @@ struct Holder {
     /// the network it was made for: the proxy's port and socket, or "off"
     key: String,
     child: std::process::Child,
+    /// the proxy bridge's port in the namespace: never forwarded out
+    bridge: Option<u16>,
+    /// the holder's door on the host's 127.0.0.1 (bound before it left the host's network), and
+    /// the token that opens it
+    door: u16,
+    token: String,
+    /// ports forwarded to the host's 127.0.0.1, each with its listeners' stop flag
+    out: std::collections::HashMap<u16, std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl Drop for Holder {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        for (p, stop) in self.out.drain() {
+            stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            // wake the accepts so they see it
+            let _ = std::net::TcpStream::connect(("127.0.0.1", p));
+            let _ = std::net::TcpStream::connect(("::1", p));
+        }
     }
 }
 
@@ -121,10 +135,11 @@ pub fn tab_netns(tab: &str, net: &Net, sock: Option<&Path>) -> Option<u32> {
     if *net == Net::Open || !caps().userns || std::env::var("QH_SANDBOX_NO_NS").as_deref() == Ok("1") {
         return None;
     }
-    let (key, spec) = match net {
+    let token: String = crate::oauth::random()[..16].iter().map(|b| format!("{b:02x}")).collect();
+    let (key, spec, bridge) = match net {
         Net::Proxy { port } => (format!("{port} {}", sock.map(|s| s.display().to_string()).unwrap_or_default()),
-                                json!({"port": port, "sock": sock.map(|s| s.display().to_string())})),
-        _ => ("off".to_string(), json!({})),
+                                json!({"port": port, "sock": sock.map(|s| s.display().to_string())}), Some(*port)),
+        _ => ("off".to_string(), json!({}), None),
     };
     let mut hs = holders();
     if let Some(h) = hs.get_mut(tab) {
@@ -138,10 +153,13 @@ pub fn tab_netns(tab: &str, net: &Net, sock: Option<&Path>) -> Option<u32> {
         .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null())
         .process_group(0); // not killed with a command's process group
     let mut child = c.spawn().ok()?;
+    // the door's token on stdin, not argv: /proc/<pid>/cmdline is readable to anyone
+    let _ = child.stdin.as_mut().map(|i| writeln!(i, "{token}"));
     let mut line = String::new();
     let ready = child.stdout.take().map(|o| std::io::BufRead::read_line(&mut std::io::BufReader::new(o), &mut line).is_ok()).unwrap_or(false);
-    let h = Holder { key, child };
-    if !ready || line.trim() != "ready" {
+    let door = line.trim().strip_prefix("ready ").and_then(|p| p.parse().ok());
+    let h = Holder { key, child, bridge, door: door.unwrap_or(0), token, out: Default::default() };
+    if !ready || door.is_none() {
         return None; // dropped: killed
     }
     let pid = h.child.id();
@@ -153,6 +171,66 @@ pub fn tab_netns(tab: &str, net: &Net, sock: Option<&Path>) -> Option<u32> {
 pub fn close_tab(tab: &str) {
     let h = holders().remove(tab);
     drop(h);
+}
+
+/// TCP ports listening in a /proc/net/tcp or tcp6 table.
+fn listening(table: &str) -> Vec<u16> {
+    table.lines().skip(1).filter_map(|l| {
+        let f: Vec<&str> = l.split_whitespace().collect();
+        (f.get(3) == Some(&"0A")).then(|| u16::from_str_radix(f.get(1)?.rsplit(':').next()?, 16).ok()).flatten()
+    }).collect()
+}
+
+/// The ports listening in a namespace (as `pid` sees it), but the bridge's.
+fn ns_ports(pid: &str, bridge: Option<u16>) -> Vec<u16> {
+    let mut v: Vec<u16> = ["tcp", "tcp6"].iter().flat_map(|t| listening(&std::fs::read_to_string(format!("/proc/{pid}/net/{t}")).unwrap_or_default()))
+        .filter(|p| Some(*p) != bridge).collect();
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// The tab's own servers (ports its tasks listen on in its namespace), each forwarded to the same
+/// port on the host's 127.0.0.1 and ::1 so the browser can open it. A port the host already uses
+/// is left out: the browser would reach the host's server, not the tab's.
+pub fn tab_ports(tab: &str) -> Vec<u16> {
+    let mut hs = holders();
+    let Some(h) = hs.get_mut(tab) else { return vec![] };
+    let ports = ns_ports(&h.child.id().to_string(), h.bridge);
+    for &p in &ports {
+        if !h.out.contains_key(&p) {
+            if let Some(stop) = forward(p, h.door, &h.token) {
+                h.out.insert(p, stop);
+            }
+        }
+    }
+    ports.into_iter().filter(|p| h.out.contains_key(p)).collect()
+}
+
+/// Listen on the host's 127.0.0.1:port (and ::1 where there is one); each connection goes through
+/// the holder's door to the same port inside.
+fn forward(port: u16, door: u16, token: &str) -> Option<std::sync::Arc<std::sync::atomic::AtomicBool>> {
+    let v4 = std::net::TcpListener::bind(("127.0.0.1", port)).ok()?;
+    let v6 = match std::net::TcpListener::bind(("::1", port)) {
+        Ok(l) => Some(l),
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => return None,
+        Err(_) => None, // no IPv6 here
+    };
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    for l in std::iter::once(v4).chain(v6) {
+        let (stop, token) = (stop.clone(), token.to_string());
+        std::thread::spawn(move || for c in l.incoming().flatten() {
+            if stop.load(std::sync::atomic::Ordering::SeqCst) { return }
+            let token = token.clone();
+            std::thread::spawn(move || {
+                let Ok(mut d) = std::net::TcpStream::connect(("127.0.0.1", door)) else { return };
+                if d.write_all(format!("{token} {port}\n").as_bytes()).is_ok() {
+                    pipe(c, d);
+                }
+            });
+        });
+    }
+    Some(stop)
 }
 
 pub fn close_all() {
@@ -282,16 +360,60 @@ fn bridge(port: u16, sock: PathBuf) -> std::io::Result<()> {
             let sock = sock.clone();
             std::thread::spawn(move || {
                 let Ok(u) = std::os::unix::net::UnixStream::connect(&sock) else { return };
-                let (Ok(mut c2), Ok(mut u2)) = (c.try_clone(), u.try_clone()) else { return };
-                let up = std::thread::spawn(move || { let _ = std::io::copy(&mut c2, &mut u2); let _ = u2.shutdown(std::net::Shutdown::Write); });
-                let (mut c, mut u) = (c, u);
-                let _ = std::io::copy(&mut u, &mut c);
-                let _ = c.shutdown(std::net::Shutdown::Write);
-                let _ = up.join();
+                pipe(c, u);
             });
         }
     });
     Ok(())
+}
+
+/// A stream `pipe` can copy both ways.
+trait Duplex: std::io::Read + Write + Send + Sized + 'static {
+    fn dup(&self) -> std::io::Result<Self>;
+    fn close_write(&self);
+}
+
+impl Duplex for std::net::TcpStream {
+    fn dup(&self) -> std::io::Result<Self> { self.try_clone() }
+    fn close_write(&self) { let _ = self.shutdown(std::net::Shutdown::Write); }
+}
+
+impl Duplex for std::os::unix::net::UnixStream {
+    fn dup(&self) -> std::io::Result<Self> { self.try_clone() }
+    fn close_write(&self) { let _ = self.shutdown(std::net::Shutdown::Write); }
+}
+
+/// Copy `a` ⇄ `b` until both sides are done.
+fn pipe(mut a: impl Duplex, mut b: impl Duplex) {
+    let (Ok(mut a2), Ok(mut b2)) = (a.dup(), b.dup()) else { return };
+    let up = std::thread::spawn(move || { let _ = std::io::copy(&mut a2, &mut b2); b2.close_write(); });
+    let _ = std::io::copy(&mut b, &mut a);
+    a.close_write();
+    let _ = up.join();
+}
+
+/// The holder's door (bound on the host's 127.0.0.1 before it left the host's network): qh sends
+/// "<token> <port>" and is joined to that port inside, if a server of the tab listens there and
+/// it isn't the proxy bridge. Nothing else in the namespace can be reached through it.
+fn door(l: std::net::TcpListener, token: String, bridge: Option<u16>) {
+    std::thread::spawn(move || for c in l.incoming().flatten() {
+        let token = token.clone();
+        std::thread::spawn(move || {
+            let mut line = vec![];
+            let mut r = std::io::Read::take(&c, 80);
+            let mut b = [0u8; 1];
+            while let Ok(1) = std::io::Read::read(&mut r, &mut b) {
+                if b[0] == b'\n' { break }
+                line.push(b[0]);
+            }
+            let line = String::from_utf8_lossy(&line).to_string();
+            let Some((t, p)) = line.split_once(' ') else { return };
+            let Ok(port) = p.parse::<u16>() else { return };
+            if t != token || !ns_ports("self", bridge).contains(&port) { return }
+            let Ok(s) = std::net::TcpStream::connect(("127.0.0.1", port)).or_else(|_| std::net::TcpStream::connect(("::1", port))) else { return };
+            pipe(c, s);
+        });
+    });
 }
 
 struct Ruleset {
@@ -494,17 +616,29 @@ pub fn helper_main(args: &[String]) -> i32 {
 /// It runs no command: only qh's own bridge code lives here.
 fn holder_main(spec: &str) -> i32 {
     let v: Value = serde_json::from_str(spec).unwrap_or_default();
+    let mut token = String::new();
+    let _ = std::io::stdin().read_line(&mut token);
+    // the door stays on the host's network: bound before we leave it
+    let d = match std::net::TcpListener::bind("127.0.0.1:0").and_then(|l| Ok((l.local_addr()?.port(), l))) {
+        Ok(d) => d,
+        Err(e) => { eprintln!("qh sandbox holder: door: {e}"); return 126 }
+    };
     if let Err(e) = unshare(true) {
         eprintln!("qh sandbox holder: {e}");
         return 126;
     }
-    if let (Some(port), Some(sock)) = (v["port"].as_u64(), v["sock"].as_str()) {
-        if let Err(e) = bridge(port as u16, sock.into()) {
+    let bridge_port = v["port"].as_u64().map(|p| p as u16);
+    if let (Some(port), Some(sock)) = (bridge_port, v["sock"].as_str()) {
+        if let Err(e) = bridge(port, sock.into()) {
             eprintln!("qh sandbox holder: network bridge: {e}");
             return 126;
         }
     }
-    println!("ready");
+    let token = token.trim().to_string();
+    if token.len() >= 32 {
+        door(d.1, token, bridge_port);
+    }
+    println!("ready {}", d.0);
     let _ = std::io::stdout().flush();
     let mut buf = [0u8; 64];
     while matches!(std::io::Read::read(&mut std::io::stdin(), &mut buf), Ok(n) if n > 0) {}
@@ -538,6 +672,15 @@ mod tests {
         assert_eq!((q.write, q.deny_read, q.protect, q.net), (p.write, p.deny_read, p.protect, p.net));
         assert_eq!(sock, Some(PathBuf::from("/tmp/s.sock")));
         assert_eq!(&args[2..], ["--", "bash", "-c", "ls"]);
+    }
+
+    #[test]
+    fn only_listening_ports_count() {
+        let t = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n\
+   0: 0100007F:1645 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 1 1\n\
+   1: 0100007F:A2B1 0100007F:1645 01 00000000:00000000 00:00000000 00000000  1000        0 2 1\n\
+   0: 00000000000000000000000001000000:0050 00000000000000000000000000000000:0000 0A 0 0 0 1000 0 3 1\n";
+        assert_eq!(listening(t), [5701, 80], "the established connection's port isn't a server");
     }
 
     #[test]

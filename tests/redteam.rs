@@ -216,6 +216,52 @@ fn a_tab_reaches_its_own_background_server_only() {
     assert!(out[4].contains("again=200"), "still reachable on a later call: {}", out[4]);
 }
 
+/// The browser's way in: a tab's own server is forwarded to the host's 127.0.0.1 (same port);
+/// another tab's server, and the proxy bridge, are not.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_tabs_own_server_is_forwarded_to_the_host_only() {
+    use std::io::{BufRead, Read, Write};
+    if !sandboxed() {
+        eprintln!("SKIPPED: this machine can't sandbox commands");
+        return;
+    }
+    let probe = Command::new(env!("CARGO_BIN_EXE_qh")).args(["__sandbox", "--probe"]).output().unwrap();
+    if !String::from_utf8_lossy(&probe.stdout).contains("userns=1") || Command::new("python3").arg("--version").output().is_err() {
+        eprintln!("SKIPPED: no unprivileged namespaces or no python3 here");
+        return;
+    }
+    let l = lab("fwd");
+    let (pa, pb) = (40000 + std::process::id() % 10000, 50000 + std::process::id() % 10000);
+    let bash = |tab: &str, cmd: String, bg: bool| serde_json::json!([tab, "bash", {"cmd": cmd, "background": bg}]);
+    let up = |p: u32| format!("for i in $(seq 50); do curl -s -o /dev/null -m 1 http://127.0.0.1:{p}/ && break; sleep 0.1; done");
+    let calls = serde_json::json!([
+        bash("A", format!("python3 -m http.server {pa} --bind 127.0.0.1"), true), bash("A", up(pa), false),
+        bash("B", format!("python3 -m http.server {pb} --bind 127.0.0.1"), true), bash("B", up(pb), false),
+        ["A", "--tab-ports", {}],
+        bash("C", "sleep 4".into(), false), // qh stays up (with its forwards) while we fetch
+    ]);
+    let mut qh = Command::new(env!("CARGO_BIN_EXE_qh")).args(["__tool", "--seq", &calls.to_string()])
+        .current_dir(&l.proj).stdout(std::process::Stdio::piped())
+        .env("HOME", &l.home).env("QH_STATE_DIR", l.home.join("state")).env_remove("QH_CONFIG").env_remove("QH_SANDBOX")
+        .env("QH_SANDBOX_HELPER", env!("CARGO_BIN_EXE_qh")).spawn().unwrap();
+    let mut lines = std::io::BufReader::new(qh.stdout.take().unwrap()).lines();
+    let ports = lines.by_ref().map_while(Result::ok).find(|x| x.starts_with("ports ")).unwrap_or_default();
+    let get = |p: u32| -> String {
+        let Ok(mut s) = std::net::TcpStream::connect(("127.0.0.1", p as u16)) else { return "refused".into() };
+        let _ = s.set_read_timeout(Some(std::time::Duration::from_secs(3)));
+        let _ = s.write_all(b"GET / HTTP/1.0\r\n\r\n");
+        let mut out = String::new();
+        let _ = s.read_to_string(&mut out);
+        out
+    };
+    let (a, b) = (get(pa), get(pb));
+    let _ = qh.wait();
+    assert_eq!(ports, format!("ports [{pa}]"), "only the tab's own server, not the bridge or another tab's");
+    assert!(a.starts_with("HTTP/1.0 200"), "the tab's server from the host: {a}");
+    assert!(!b.contains("200"), "another tab's server reached from the host: {b}");
+}
+
 /// The real toolchains in the sandbox with the real HOME (its caches): cargo build with a fresh
 /// dependency, npm install, pytest, git commit. Needs internet; set QH_REALWORK=1 to run.
 #[test]

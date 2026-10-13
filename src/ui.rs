@@ -426,6 +426,16 @@ pub fn run(hub: Arc<Hub>, tx: Sender<Ui>, rx: Receiver<Ui>) -> std::io::Result<(
             Err(e) => app.err(&n, format!("team presence: {e}")),
         }
     }
+    // started outside every team project: the last one used stays connected in the background
+    if done.is_empty() {
+        if let Some(p) = recent_projects().into_iter().map(|(p, _)| p).find(|p| p.is_dir() && crate::team::enabled_for(p)) {
+            let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            match app.start_team_at(p.clone(), &active) {
+                Ok(_) => { app.last_team = p; app.note(&active, format!("team {name} · Ctrl+] to open")) }
+                Err(e) => app.err(&active, format!("team presence: {e}")),
+            }
+        }
+    }
     app.project = std::path::PathBuf::new(); // so the team on screen follows the active tab
     app.set_active(&active);
     let res = loop {
@@ -2427,7 +2437,11 @@ then it's `git push -u origin {branch}` and `gh pr create --fill`.");
 
     /// Connect the team of the project `tab` is in (its notes go to that tab).
     fn start_team_in(&self, tab: &str) -> Result<String, String> {
-        let cwd = self.hub.get(tab).map(|m| m.cwd()).unwrap_or_default();
+        self.start_team_at(self.hub.get(tab).map(|m| m.cwd()).unwrap_or_default(), tab)
+    }
+
+    /// Connect the team of the project at `cwd`, which needn't have a tab open (its notes go to `tab`).
+    fn start_team_at(&self, cwd: std::path::PathBuf, tab: &str) -> Result<String, String> {
         let (hub, a) = (self.hub.clone(), tab.to_string());
         let root = crate::team::github_repo(&cwd).map(|(r, _)| r).unwrap_or_else(|| cwd.clone());
         let summary = Box::new(move || {

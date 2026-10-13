@@ -530,6 +530,15 @@ Windows asks for admin once to add two hidden sandbox users. Until then qh asks 
         unsafe { (si.hStdInput, si.hStdOutput, si.hStdError) = (GetStdHandle(STD_INPUT_HANDLE), GetStdHandle(STD_OUTPUT_HANDLE), GetStdHandle(STD_ERROR_HANDLE)) };
     }
 
+    /// No error popups for the command and what it starts (they inherit the mode): a tool that dies
+    /// at start would otherwise put up a dialog on your screen and hang until someone clicks OK.
+    fn quiet_errors() {
+        #[link(name = "kernel32")]
+        extern "system" { fn SetErrorMode(mode: u32) -> u32; }
+        // SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX
+        unsafe { SetErrorMode(0x1 | 0x2 | 0x8000) };
+    }
+
     fn fail(what: &str, e: impl std::fmt::Display) -> i32 {
         eprintln!("qh sandbox: {what}: {e}");
         126
@@ -539,6 +548,7 @@ Windows asks for admin once to add two hidden sandbox users. Until then qh asks 
     /// that dies with this process (so a timeout or task_stop takes the whole tree), wait, pass on
     /// its exit code.
     pub fn launcher_main(a: &[OsString]) -> i32 {
+        quiet_errors();
         let (Some(which), Some(prog)) = (a.first(), a.get(1)) else { return fail("usage", "qh __winsbx on|off program args…") };
         let c = match load() { Ok(c) => c, Err(e) => return fail("can't read the sandbox users' secrets", e) };
         let i = usize::from(which == "on");
@@ -642,6 +652,7 @@ Windows asks for admin once to add two hidden sandbox users. Until then qh asks 
     /// `qh __winsbx-in <group sid> program args…`, as the sandbox user: run the command under a
     /// write-restricted copy of this token, wait, pass on its exit code.
     pub fn runner_main(a: &[OsString]) -> i32 {
+        quiet_errors();
         let (Some(group), Some(prog)) = (a.first(), a.get(1)) else { return fail("usage", "qh __winsbx-in sid program args…") };
         // the command runs as the same user: without this it could open this (unrestricted) process
         // and write through it. OWNER RIGHTS limits the owner to reading the DACL, so it can't be undone.

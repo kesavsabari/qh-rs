@@ -329,6 +329,71 @@ Reply with the words only.\n\nRequest: {req}");
     (!role.is_empty()).then_some(role)
 }
 
+/// A second opinion from another model: no tools, nothing added to the session, the tab pays.
+/// `model` empty = the configured second model.
+pub fn ask_other(hub: &Arc<Hub>, m: &Arc<Member>, model: &str, question: &str, context: &str) -> String {
+    let (p, mo) = if model.trim().is_empty() {
+        let (cp, cm) = { let s = lock(&m.set); (s.provider.clone(), s.model.clone()) };
+        match crate::route::other_model(&hub.cfg, &cp, &cm) {
+            Some(x) => x,
+            None => return "error: no other model to ask: name one, or set [routing] ask_model in config.toml".into(),
+        }
+    } else { crate::route::model_id(model.trim()) };
+    let r = call_as(hub, m, Some((&p, &mo)), &crate::route::ask_msgs(question, context), &[], true);
+    settle(hub, m);
+    let who = crate::providers::display(&p, &mo);
+    match r {
+        Ok(x) if !content(&x).trim().is_empty() => format!("second opinion from {who}:\n{}", content(&x).trim()),
+        Ok(_) => format!("error: {who} gave no answer"),
+        Err(e) => format!("error: {who}: {e}"),
+    }
+}
+
+/// The `fetch` tool: the fetch model picks lookups for `goal`; their raw outputs, not its words,
+/// go back to the main model. It sees only the lookup tools, and any other call is refused unrun.
+fn fetch(hub: &Arc<Hub>, m: &Arc<Member>, goal: &str) -> String {
+    const ROUNDS: usize = 4;
+    let (p, mo) = crate::route::model_id(&hub.cfg.fetch_model);
+    let who = crate::providers::display(&p, &mo);
+    let schemas = crate::route::fetch_schemas(&lock(&m.set).tools);
+    let mut cwd = m.cwd();
+    let mut msgs = crate::route::fetch_msgs(goal, &cwd);
+    let mut raw = vec![];
+    for _ in 0..ROUNDS {
+        if m.cancel.load(Relaxed) { break }
+        let msg = match call_as(hub, m, Some((&p, &mo)), &msgs, &schemas, true) {
+            Ok(x) => x,
+            Err(e) => { raw.push(format!("(fetch model {who} failed: {e})")); break }
+        };
+        msgs.push(msg.clone());
+        let calls = msg["tool_calls"].as_array().cloned().unwrap_or_default();
+        if calls.is_empty() { break }
+        for c in calls {
+            let name = c["function"]["name"].as_str().unwrap_or("").to_string();
+            let args = parse_args(&c["function"]["arguments"]);
+            let out = if !crate::route::fetch_allowed(&name) || !args.is_object() {
+                format!("error: {name} isn't allowed: lookups only ({})", crate::route::FETCH_TOOLS.join(", "))
+            } else if let Some(why) = crate::sandbox::guard(&name, &args, &cwd, &m.root, &hub.cfg) {
+                format!("error: not here: it {why}")
+            } else {
+                tools::call(&name, &args, &hub.cfg, &mut cwd, &hub.limits(m), &crate::sandbox::Ctx { root: m.root.clone(), proxy: None, tab: m.name.clone() })
+            };
+            // no notices here: the UI pins this result to the fetch line, and a note in between would unpin it
+            if !out.starts_with("error") {
+                raw.push(format!("### {name} {args}\n{out}"));
+            }
+            msgs.push(json!({"role": "tool", "tool_name": name, "content": out}));
+        }
+    }
+    settle(hub, m);
+    if raw.is_empty() {
+        return format!("{who} fetched nothing for this; look it up yourself with read_file / grep.");
+    }
+    let steps: Vec<&str> = raw.iter().filter_map(|r| r.strip_prefix("### ")?.split(' ').next()).collect();
+    format!("{} lookup{} by {who}: {} (raw outputs, its own words dropped)\n\n{}", steps.len(), if steps.len() == 1 { "" } else { "s" },
+            steps.join(", "), raw.join("\n\n"))
+}
+
 /// After a quiet call outside a turn: call() marked the session working.
 fn settle(hub: &Arc<Hub>, m: &Arc<Member>) {
     if !lock(&m.ctl).running {
@@ -447,11 +512,20 @@ an approach), or none>\nNEXT: <what this session is likely to do next, or none>\
 /// One model call. Local models take turns on the GPU, in arrival order; cloud models
 /// run in parallel.
 fn call(hub: &Arc<Hub>, m: &Arc<Member>, msgs: &[Value], schemas: &[Value], quiet: bool) -> Result<Value, Error> {
-    let local = { let s = lock(&m.set); crate::providers::is_local(&s.provider, &s.model) };
+    call_as(hub, m, None, msgs, schemas, quiet)
+}
+
+/// `call` on another model than the tab's (`over` = provider, model): a second opinion or a
+/// routed fetch. No thinking, no fallback; its cost still counts to the tab.
+fn call_as(hub: &Arc<Hub>, m: &Arc<Member>, over: Option<(&str, &str)>, msgs: &[Value], schemas: &[Value], quiet: bool) -> Result<Value, Error> {
+    let local = match over {
+        Some((p, mo)) => crate::providers::is_local(p, mo),
+        None => { let s = lock(&m.set); crate::providers::is_local(&s.provider, &s.model) }
+    };
     if !local {
         *lock(&m.status) = "working";
         hub.changed();
-        return call_locked(hub, m, msgs, schemas, quiet);
+        return call_locked(hub, m, over, msgs, schemas, quiet);
     }
     let _hold = hub.model.acquire(|| {
         *lock(&m.status) = "waiting-model";
@@ -460,23 +534,26 @@ fn call(hub: &Arc<Hub>, m: &Arc<Member>, msgs: &[Value], schemas: &[Value], quie
     *lock(&hub.holder) = m.name.clone();
     *lock(&m.status) = "working";
     hub.changed();
-    let r = call_locked(hub, m, msgs, schemas, quiet);
+    let r = call_locked(hub, m, over, msgs, schemas, quiet);
     lock(&hub.holder).clear();
     hub.changed();
     r
 }
 
-fn call_locked(hub: &Arc<Hub>, m: &Arc<Member>, msgs: &[Value], schemas: &[Value], quiet: bool) -> Result<Value, Error> {
-    let (think, model, provider) = {
-        let s = lock(&m.set);
-        let think = if !s.think { String::new() } else if s.effort.is_empty() { "on".into() } else { s.effort.clone() };
-        (think, s.model.clone(), s.provider.clone())
+fn call_locked(hub: &Arc<Hub>, m: &Arc<Member>, over: Option<(&str, &str)>, msgs: &[Value], schemas: &[Value], quiet: bool) -> Result<Value, Error> {
+    let (think, model, provider) = match over {
+        Some((p, mo)) => (String::new(), mo.to_string(), p.to_string()),
+        None => {
+            let s = lock(&m.set);
+            let think = if !s.think { String::new() } else if s.effort.is_empty() { "on".into() } else { s.effort.clone() };
+            (think, s.model.clone(), s.provider.clone())
+        }
     };
     let Some(prov) = crate::providers::resolve(&provider) else {
         return Err(Error::Other(format!("no provider {provider}; /provider lists them")));
     };
     let cfg = &hub.cfg;
-    let ctx = hub.ctx_for(m, true).0;
+    let ctx = if over.is_some() { cfg.ctx } else { hub.ctx_for(m, true).0 };
     let mut attempt = 0;
     let (r, t0, first) = loop {
         let t0 = Instant::now();
@@ -521,7 +598,7 @@ fn call_locked(hub: &Arc<Hub>, m: &Arc<Member>, msgs: &[Value], schemas: &[Value
         }
     };
     let r = match r {
-        Err(ref e) if outage(e).is_some() && !cfg.fallback_model.is_empty() && !m.cancel.load(Relaxed) => {
+        Err(ref e) if outage(e).is_some() && over.is_none() && !cfg.fallback_model.is_empty() && !m.cancel.load(Relaxed) => {
             let what = outage(e).unwrap_or_default();
             let Some(next) = next_fallback(&cfg.fallback_model, &provider, &model) else {
                 return Err(Error::Other(format!("{} {what}; no fallback_model left to try", crate::providers::display(&provider, &model))));
@@ -532,7 +609,7 @@ fn call_locked(hub: &Arc<Hub>, m: &Arc<Member>, msgs: &[Value], schemas: &[Value
                 let mut s = lock(&m.set);
                 (s.provider, s.model) = (fp, fm);
             }
-            return call_locked(hub, m, msgs, schemas, quiet);
+            return call_locked(hub, m, None, msgs, schemas, quiet);
         }
         Err(Error::Limited(why, _)) => return Err(Error::Other(format!(
             "{} is rate-limited: {why}\nWait a minute, pick another model with /model, or set fallback_model in config.toml to switch on its own.",
@@ -661,6 +738,14 @@ fn dispatch(hub: &Arc<Hub>, m: &Arc<Member>, name: &str, args: &Value) -> String
     if name == "ask_team" {
         return crate::team::ask_team(&m.name, &m.cwd(), args["question"].as_str().unwrap_or(""),
                                      args["to"].as_str().unwrap_or(""), args["deep"].as_bool().unwrap_or(false));
+    }
+    if name == "ask_model" {
+        // read-only: a question to another model, never asked about
+        return ask_other(hub, m, args["model"].as_str().unwrap_or(""), args["question"].as_str().unwrap_or(""),
+                         args["context"].as_str().unwrap_or(""));
+    }
+    if name == "fetch" && !hub.cfg.fetch_model.is_empty() {
+        return fetch(hub, m, args["goal"].as_str().unwrap_or(""));
     }
     if hub.mode_name() == "plan" && (tools::risky(name, &args, &hub.cfg) || matches!(name, "remember" | "send_message" | "spawn")) {
         return "error: plan mode is read-only. Finish exploring, then reply with a numbered plan; the user switches mode (Shift+Tab) to let you carry it out.".into();

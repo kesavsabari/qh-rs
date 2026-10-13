@@ -30,6 +30,10 @@ pub struct Config {
     pub keep_alive: String,
     /// tried in order when the model is rate-limited or down; a plain string is a list of one
     pub fallback_model: Vec<String>,
+    /// `[routing] ask_model`: where /ask-other and the ask_model tool go when no model is named
+    pub ask_model: String,
+    /// `[routing] fetch_model`: a cheap model that only runs read-only lookups for the main one (off when empty)
+    pub fetch_model: String,
     pub openrouter_key: String,
     pub allow: Vec<String>,
     pub webhooks: Vec<Webhook>,
@@ -138,6 +142,8 @@ pub fn load_defaults() -> Config {
         profile: "coding".into(),
         keep_alive: "30m".into(),
         fallback_model: vec![],
+        ask_model: String::new(),
+        fetch_model: String::new(),
         openrouter_key: String::new(),
         allow: vec![],
         webhooks: vec![],
@@ -200,6 +206,7 @@ pub fn load() -> Config {
         if let Some(v) = s("profile") { c.profile = v }
         if let Some(v) = s("keep_alive") { c.keep_alive = v }
         if let Some(v) = fallbacks(t.get("fallback_model")) { c.fallback_model = v }
+        routing(&mut c, &t);
         if let Some(v) = s("openrouter_key") { c.openrouter_key = v }
         if let Some(a) = t.get("allow").and_then(|v| v.as_array()) {
             c.allow = a.iter().filter_map(|v| v.as_str().map(String::from)).collect();
@@ -297,6 +304,13 @@ fn fallbacks(v: Option<&toml::Value>) -> Option<Vec<String>> {
     Some(v.into_iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
 }
 
+/// `[routing]`: which other models qh may use, all off unless set.
+fn routing(c: &mut Config, t: &toml::Table) {
+    let Some(r) = t.get("routing").and_then(|v| v.as_table()) else { return };
+    let s = |k: &str| r.get(k).and_then(|v| v.as_str()).map(|v| v.trim().to_string()).unwrap_or_default();
+    (c.ask_model, c.fetch_model) = (s("ask_model"), s("fetch_model"));
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -306,6 +320,16 @@ mod tests {
         assert_eq!(f("fallback_model = [\"a\", \" \", \"or:b\"]"), Some(vec!["a".to_string(), "or:b".to_string()]));
         assert_eq!(f("fallback_model = \"\""), Some(vec![]));
         assert_eq!(f("model = \"x\""), None);
+    }
+
+    #[test]
+    fn routing_is_off_unless_set() {
+        let mut c = super::load_defaults();
+        super::routing(&mut c, &"model = \"x\"".parse().unwrap());
+        assert!(c.ask_model.is_empty() && c.fetch_model.is_empty());
+        super::routing(&mut c, &"[routing]\nask_model = \" openai:gpt-5 \"\nfetch_model = \"ollama/qwen3:4b\"".parse().unwrap());
+        assert_eq!((c.ask_model.as_str(), c.fetch_model.as_str()), ("openai:gpt-5", "ollama/qwen3:4b"));
+        assert_eq!(crate::route::model_id(&c.fetch_model), (String::new(), "qwen3:4b".into()));
     }
 
     #[test]

@@ -667,10 +667,12 @@ Windows asks for admin once to add two hidden sandbox users. Until then qh asks 
         std_handles(&mut si);
         let (_desk, mut desk_name) = match private_desktop(&group.to_string_lossy()) { Ok(d) => d, Err(e) => return fail("can't make the command's desktop", e) };
         si.lpDesktop = desk_name.as_mut_ptr();
+        let ps = p.file_stem().is_some_and(|s| s.eq_ignore_ascii_case("powershell") || s.eq_ignore_ascii_case("pwsh"));
+        let dir = std::env::current_dir().ok().and_then(|c| if ps { cwd_alias(&c) } else { None }).map(|d| wz(plain(&d)));
         let mut pi: PROCESS_INFORMATION = unsafe { zeroed() };
         // SAFETY: live NUL-terminated buffers; the token is ours; inherits only std handles (all qh has here)
         let ok = unsafe { CreateProcessAsUserW(token.as_raw_handle(), app.as_ref().map_or(null(), |a| a.as_ptr()), cmdline.as_mut_ptr(),
-            null(), null(), 1, CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW, envb.as_ptr().cast(), null(), &si, &mut pi) };
+            null(), null(), 1, CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW, envb.as_ptr().cast(), dir.as_ref().map_or(null(), |d| d.as_ptr()), &si, &mut pi) };
         if ok == 0 { return fail(&format!("can't start {}", p.display()), last_err()) }
         let (process, _thread) = unsafe { (OwnedHandle::from_raw_handle(pi.hProcess), OwnedHandle::from_raw_handle(pi.hThread)) };
         let mut code = 1u32;
@@ -679,6 +681,27 @@ Windows asks for admin once to add two hidden sandbox users. Until then qh asks 
             GetExitCodeProcess(process.as_raw_handle(), &mut code);
         }
         code as i32
+    }
+
+    /// `cwd` through a junction in the sandbox user's own profile, for PowerShell: it takes a folder
+    /// as its location only if it can list every parent, and yours (C:\\Users\\you) is closed to the
+    /// sandbox, so a project inside it started PowerShell in C:\\. Codex does the same. One junction
+    /// per folder, checked before each use (a command could have pointed it elsewhere).
+    fn cwd_alias(cwd: &Path) -> Option<PathBuf> {
+        use std::hash::{Hash, Hasher};
+        use std::os::windows::process::CommandExt;
+        let real = cwd.canonicalize().ok()?;
+        let root = profile().join("qh-cwd");
+        if under(&real, profile()) { return None }
+        fs::create_dir_all(&root).ok()?;
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        norm(&real).hash(&mut h);
+        let link = root.join(format!("{:016x}", h.finish()));
+        if link.canonicalize().ok().as_deref() == Some(real.as_path()) { return Some(link) }
+        let _ = fs::remove_dir(&link); // a junction goes like an empty folder; its target stays
+        let ok = std::process::Command::new("cmd").raw_arg(format!("/d /c mklink /J \"{}\" \"{}\" >nul",
+            plain(&link).display(), plain(&real).display())).status().ok()?.success();
+        ok.then_some(link)
     }
 
     fn lock_self() -> io::Result<()> {

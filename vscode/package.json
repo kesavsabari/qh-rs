@@ -2,7 +2,7 @@
   "name": "qh",
   "displayName": "qh",
   "description": "qh, the terminal coding agent, inside VS Code: open it beside your code, send it your selection, review its changes in the diff view.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "kesavsabari",
   "license": "MIT",
   "repository": { "type": "git", "url": "https://github.com/kesavsabari/qh-rs" },

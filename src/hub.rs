@@ -272,6 +272,10 @@ session tests). Messages from other sessions start with [from <name>]. qh saves 
     /// System prompt plus the session's role, if it has one.
     pub fn system_msg(&self, name: &str, profile: &str, role: &str, cwd: &Path) -> String {
         let mut s = self.system_for(name, profile, cwd);
+        if let Some(n) = crate::ide::note() {
+            s += "\n";
+            s += n;
+        }
         if !role.is_empty() {
             s += &format!("\nYour role in this workspace: {role}. Stay on it; send other work to the session it belongs to.");
         }
@@ -318,6 +322,10 @@ session tests). Messages from other sessions start with [from <name>]. qh saves 
         }
         if !self.cfg.fetch_model.is_empty() && profile != "browser" {
             t.push(crate::route::fetch_schema());
+        }
+        // inside VS Code: the editor's context, problems, and opening files there
+        if crate::ide::active() && profile != "browser" {
+            t.extend(crate::ide::schemas());
         }
         t
     }

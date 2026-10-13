@@ -6,11 +6,88 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execFile } = require('child_process');
+const http = require('http');
+const crypto = require('crypto');
 
 let term;               // the qh terminal, while it runs
 const changed = new Set(); // files changed on disk while qh runs, not by your own saves
 const saved = new Map();   // file → when you last saved it in the editor
 let openItem, changesItem;
+let ide; // { server, port, token }: what qh asks about the editor
+let lastEditor; // the code you were last in: while you type to qh, its terminal has the focus
+
+// ---- the editor, for qh: localhost only, and only the qh this extension started knows the token ----
+const MAX_SEL = 6000;
+function absPath(p) {
+  if (!p) return undefined;
+  return path.isAbsolute(p) ? p : path.join(root() || '', p);
+}
+function rel(u) { return vscode.workspace.asRelativePath(u, false); }
+
+function ideContext() {
+  const ed = vscode.window.activeTextEditor || (lastEditor && vscode.window.visibleTextEditors.includes(lastEditor) ? lastEditor : vscode.window.visibleTextEditors[0]);
+  const out = [];
+  if (ed) {
+    const d = ed.document, s = ed.selection;
+    out.push(`file: ${rel(d.uri)} (${d.languageId}${d.isDirty ? ', unsaved changes' : ''}), cursor at line ${s.active.line + 1}`);
+    if (!s.isEmpty) {
+      let text = d.getText(s);
+      if (text.length > MAX_SEL) text = text.slice(0, MAX_SEL) + '\n…cut';
+      out.push(`selection: lines ${s.start.line + 1}-${s.end.line + 1}`, '```', text, '```');
+    } else out.push('selection: none');
+  } else out.push('file: none open');
+  const tabs = vscode.window.tabGroups.all.flatMap((g) => g.tabs).map((t) => t.input && t.input.uri ? rel(t.input.uri) : null).filter(Boolean);
+  if (tabs.length) out.push('open tabs: ' + [...new Set(tabs)].slice(0, 30).join(', '));
+  return out.join('\n');
+}
+
+function ideDiagnostics(p) {
+  const sev = ['error', 'warning', 'info', 'hint'];
+  const one = p ? [[vscode.Uri.file(absPath(p)), vscode.languages.getDiagnostics(vscode.Uri.file(absPath(p)))]] : vscode.languages.getDiagnostics();
+  const rows = [];
+  for (const [uri, list] of one) for (const d of list) {
+    if (d.severity > 1) continue; // errors and warnings
+    rows.push(`${rel(uri)}:${d.range.start.line + 1}:${d.range.start.character + 1} ${sev[d.severity]} ${d.message.split('\n')[0]}${d.source ? ` (${d.source})` : ''}`);
+  }
+  if (!rows.length) return p ? `no errors or warnings in ${p}` : 'no errors or warnings in the workspace';
+  return rows.slice(0, 100).join('\n') + (rows.length > 100 ? `\n…and ${rows.length - 100} more` : '');
+}
+
+async function ideOpen(p, line) {
+  const f = absPath(p);
+  if (!f || !fs.existsSync(f)) return `error: no file ${p}`;
+  const doc = await vscode.workspace.openTextDocument(f);
+  const ed = await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.One, preview: false });
+  if (line) {
+    const pos = new vscode.Position(Math.max(0, line - 1), 0);
+    ed.selection = new vscode.Selection(pos, pos);
+    ed.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
+  }
+  return `opened ${rel(doc.uri)}${line ? ' at line ' + line : ''}`;
+}
+
+function startIde() {
+  const token = crypto.randomBytes(24).toString('hex');
+  const server = http.createServer((req, res) => {
+    const reply = (code, text) => { res.writeHead(code, { 'Content-Type': 'text/plain; charset=utf-8' }); res.end(text); };
+    const auth = req.headers.authorization || '';
+    const want = Buffer.from(`Bearer ${token}`);
+    if (req.method !== 'POST' || auth.length !== want.length || !crypto.timingSafeEqual(Buffer.from(auth), want)) return reply(403, 'forbidden');
+    let body = '';
+    req.on('data', (c) => { body += c; if (body.length > 65536) req.destroy(); });
+    req.on('end', async () => {
+      let a = {};
+      try { a = JSON.parse(body || '{}'); } catch { return reply(400, 'bad json'); }
+      try {
+        if (req.url === '/ide_context') return reply(200, ideContext());
+        if (req.url === '/ide_diagnostics') return reply(200, ideDiagnostics(a.path));
+        if (req.url === '/ide_open') return reply(200, await ideOpen(a.path, a.line));
+        reply(404, 'no such tool');
+      } catch (e) { reply(500, String(e && e.message || e)); }
+    });
+  });
+  return new Promise((res) => server.listen(0, '127.0.0.1', () => res({ server, port: server.address().port, token })));
+}
 
 const cfg = (k) => vscode.workspace.getConfiguration('qh').get(k);
 const root = () => vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -45,6 +122,7 @@ async function offerInstall() {
 
 async function open() {
   if (term && term.exitStatus === undefined) { term.show(); return term; }
+  if (!ide) ide = await startIde();
   const exe = await findQh();
   if (!exe) { offerInstall(); return undefined; }
   term = vscode.window.createTerminal({
@@ -53,7 +131,7 @@ async function open() {
     cwd: root(),
     iconPath: new vscode.ThemeIcon('sparkle'),
     location: cfg('openIn') === 'panel' ? vscode.TerminalLocation.Panel : { viewColumn: vscode.ViewColumn.Beside },
-    env: { QH_EDITOR: 'vscode' },
+    env: { QH_EDITOR: 'vscode', QH_IDE_PORT: String(ide.port), QH_IDE_TOKEN: ide.token },
   });
   term.fresh = Date.now();
   changed.clear();
@@ -136,6 +214,7 @@ function activate(ctx) {
   changesItem.command = 'qh.reviewChanges';
   update();
   openItem.show();
+  lastEditor = vscode.window.activeTextEditor;
 
   const watcher = vscode.workspace.createFileSystemWatcher('**/*');
   ctx.subscriptions.push(
@@ -149,12 +228,13 @@ function activate(ctx) {
     watcher.onDidCreate(onDisk),
     vscode.workspace.onWillSaveTextDocument((e) => saved.set(e.document.uri.fsPath, Date.now())),
     vscode.workspace.onDidSaveTextDocument((d) => saved.set(d.uri.fsPath, Date.now())),
+    vscode.window.onDidChangeActiveTextEditor((e) => { if (e) lastEditor = e; }),
     vscode.window.onDidCloseTerminal((t) => { if (t === term) { term = undefined; changed.clear(); update(); } }),
   );
   // for tests and other extensions: what qh changed while it ran
   return { changedFiles: () => [...changed] };
 }
 
-function deactivate() {}
+function deactivate() { if (ide) ide.server.close(); }
 
 module.exports = { activate, deactivate };

@@ -3,411 +3,338 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>qh: a switchboard of agents, local, cloud and team</title>
-<meta name="description" content="qh is an open-source agent harness for local LLMs. One 5 MB binary, about 1,200 tokens of overhead, local or cloud models, your ChatGPT plan, and team mode for working on a project with friends. Windows, macOS and Linux.">
-<meta property="og:title" content="qh: a switchboard of agents, local and cloud">
-<meta property="og:description" content="An open-source agent harness for small local models. Multi-session TUI, browser tools, MIT.">
+<title>qh — a coding agent for your terminal</title>
+<meta name="description" content="qh is an open-source coding agent for your terminal: many sessions at once, any model (local Ollama, cloud, or your ChatGPT plan), and your whole team on one project over qh-link. One 5 MB binary for Windows, macOS and Linux.">
+<meta property="og:title" content="qh — a coding agent for your terminal">
+<meta property="og:description" content="Many sessions. Any model. Your whole team. One 5 MB binary, MIT licensed.">
 <meta property="og:image" content="img/qh-grid.webp">
+<meta name="theme-color" content="#f6f6f3">
 <link rel="icon" href="img/favicon.svg" type="image/svg+xml">
-<link rel="preload" href="fonts/big-shoulders-display-latin-800-normal.woff2" as="font" type="font/woff2" crossorigin>
-<link rel="stylesheet" href="style.css?v=19">
+<link rel="preload" href="fonts/Geist-Medium.woff2" as="font" type="font/woff2" crossorigin>
+<script>try{var t=localStorage.getItem("qh-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+<style>
+@font-face{font-family:Geist;src:url(fonts/Geist-Regular.woff2) format('woff2');font-weight:400;font-display:swap}
+@font-face{font-family:Geist;src:url(fonts/Geist-Medium.woff2) format('woff2');font-weight:500;font-display:swap}
+@font-face{font-family:'Geist Mono';src:url(fonts/GeistMono-Regular.woff2) format('woff2');font-weight:400;font-display:swap}
+@font-face{font-family:'Geist Mono';src:url(fonts/GeistMono-Medium.woff2) format('woff2');font-weight:500;font-display:swap}
+.root{--paper:#f6f6f3;--ink:#0e0e0d;--soft:#6b6b66;--body:#3d3d39;--faint:#9a9a94;--rule:#d9d9d3;--keyb:#c9c9c2;--keybg:#fbfbf9;--accent:#ff4d1c;
+  --fbg:#0e0e0d;--fink:#f6f6f3;--fsoft:#8a8a84;--fbody:#b9b9b2;--frule:#3a3a36;--frule2:#2a2a27;--fbtn:#5a5a55;--flink:#c9c9c2;transition:background .4s,color .4s}
+html[data-theme=dark] .root{--paper:#0d0d0c;--ink:#ecebe6;--soft:#9c9b94;--body:#c4c3bc;--faint:#6f6e68;--rule:#2a2a27;--keyb:#3a3a36;--keybg:#161614;--accent:#ff5a2a;
+  --fbg:#f1f0ea;--fink:#0e0e0d;--fsoft:#6b6b66;--fbody:#3d3d39;--frule:#d9d9d3;--frule2:#e2e2dc;--fbtn:#b9b9b2;--flink:#3d3d39}
+.sheet,.over,.sec,.band{transition:background .4s}
+.theme{background:none;border:0;padding:0;font:inherit;color:var(--soft);cursor:pointer}
+.theme:hover{color:var(--accent)}
+body{margin:0;background:#0e0e0d}
+a{color:var(--ink);text-decoration:none}
+a:hover{color:var(--accent)}
+.m{font-family:'Geist Mono',ui-monospace,monospace}
+.lab{font-family:'Geist Mono',ui-monospace,monospace;font-size:12px;color:var(--soft);letter-spacing:.01em}
+.h2{margin:0;font-weight:500;font-size:clamp(40px,5vw,96px);line-height:.95;letter-spacing:-.055em}
+.lead{margin:0;font-size:clamp(17px,1.4vw,21px);line-height:1.55;color:var(--body);max-width:620px}
+.wrap{max-width:1680px;margin:0 auto;padding:0 clamp(20px,3.2vw,56px)}
+.sec{display:grid;grid-template-columns:minmax(150px,1fr) minmax(0,3.4fr);gap:0 clamp(32px,4vw,88px);padding:clamp(110px,18vh,200px) 0 0}
+.rail .lab{position:sticky;top:96px;display:block;border-top:1px solid var(--ink);padding-top:14px}
+.body{min-width:0}
+.head{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,400px),1fr));gap:28px clamp(40px,5vw,96px);align-items:end;margin-bottom:clamp(44px,7vh,80px)}
+.list{display:flex;flex-direction:column;border-top:1px solid var(--ink)}
+.li{display:grid;grid-template-columns:minmax(0,240px) minmax(0,1fr);gap:8px 40px;padding:24px 0;border-bottom:1px solid var(--rule);transition:padding-left .35s cubic-bezier(.2,.8,.2,1)}
+.li:hover{padding-left:12px}
+.li b{font-weight:500;letter-spacing:-.01em}
+.li span{color:var(--body)}
+.key{display:inline-block;min-width:22px;padding:1px 7px;border:1px solid var(--keyb);border-radius:4px;font-family:'Geist Mono',monospace;font-size:12px;text-align:center;margin-right:3px;background:var(--keybg)}
+.big{font-weight:500;font-size:clamp(84px,10vw,200px);line-height:.82;letter-spacing:-.07em}
+.note{font-family:'Geist Mono',monospace;font-size:12px;color:var(--faint);line-height:1.6;margin:28px 0 0;max-width:960px}
+.over,.sec,.band{position:relative;z-index:1;background:var(--paper)}
+@keyframes blink{0%,49%{opacity:1}50%,100%{opacity:0}}
+@keyframes rise{from{opacity:0;transform:translateY(18px)}to{opacity:1;transform:none}}
+@keyframes cycle{0%,4%{opacity:0;transform:translateY(8px)}8%,29%{opacity:1;transform:none}33%,100%{opacity:0;transform:translateY(-8px)}}
+@keyframes run{from{left:-2%}to{left:102%}}
+@keyframes hop{0%,40%{top:0;opacity:0}45%{opacity:1}55%{top:0}75%{top:100%}85%{opacity:1}90%,100%{top:100%;opacity:0}}
+@keyframes draw{from{transform:scaleX(0)}to{transform:scaleX(1)}}
+@keyframes type{from{clip-path:inset(0 100% 0 0)}to{clip-path:inset(0 0 0 0)}}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
+@keyframes heroOut{to{transform:translateY(35vh);opacity:0}}
+@keyframes drift{from{transform:translateY(14%)}to{transform:translateY(-14%)}}
+@keyframes revealIn{from{opacity:.25;transform:translateY(60px)}to{opacity:1;transform:none}}
+@keyframes showUp{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:none}}
+.qh-cursor{animation:blink 1.1s steps(1) infinite}
+.qh-rise{opacity:0;animation:rise .9s cubic-bezier(.2,.8,.2,1) forwards}
+.qh-w{position:absolute;left:0;top:0;opacity:0;animation:cycle 9s infinite}
+.qh-line{transform-origin:left;transform:scaleX(0);animation:draw 1.2s cubic-bezier(.6,0,.2,1) forwards}
+.qh-dot{position:absolute;top:-3px;width:7px;height:7px;border-radius:50%;background:var(--ink);animation:run linear infinite}
+.qh-dot.hot{background:var(--accent)}
+.qh-hop{position:absolute;width:1px}
+.qh-hop i{position:absolute;left:-3px;width:7px;height:7px;border-radius:50%;background:var(--accent);opacity:0;animation:hop 6s ease-in-out infinite}
+.qh-msg{animation:type 1.4s steps(48) both}
+.live{animation:pulse 1.6s ease-in-out infinite}
+.hero-par{position:relative;z-index:0}
+.hero-qh{font-size:clamp(120px,min(30vw,62vh),900px)}
+.cyc{display:grid}
+.cyc>.qh-w{grid-area:1/1;position:static;white-space:nowrap;align-self:end}
+.float{position:fixed;top:0;left:0;right:0;z-index:20;display:flex;justify-content:space-between;align-items:center;padding:22px clamp(20px,3.2vw,56px);pointer-events:none;mix-blend-mode:difference;color:#fff}
+.float a{pointer-events:auto;color:#fff}
+.copy{transition:background .2s,color .2s}
+.copy:hover{background:var(--fink);color:var(--fbg)}
+@supports (animation-timeline: scroll()){
+  .sv{animation:rise linear both;animation-timeline:view();animation-range:entry 0% cover 22%}
+  .qh-msg{animation:type linear both;animation-timeline:view();animation-range:entry 20% cover 45%}
+  .hero-par{animation:heroOut linear both;animation-timeline:scroll(root);animation-range:0 100vh}
+  .drift{animation:drift linear both;animation-timeline:view()}
+  .reveal-in{animation:revealIn linear both;animation-timeline:view();animation-range:entry 0% cover 60%}
+  .float{animation:showUp linear both;animation-timeline:scroll(root);animation-range:80vh 100vh}
+}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}.qh-rise,.qh-w:first-child,.float{opacity:1}.qh-line{transform:none}.qh-w~.qh-w,.qh-dot,.qh-hop{display:none}}
+.stage{position:relative;height:clamp(340px,40vh,420px);margin-top:8px}
+.tl{position:absolute}
+.tline{position:absolute;height:1px;background:var(--rule)}
+.chan{position:absolute;height:0;border-top:1px dashed var(--keyb)}
+.vlink{position:absolute;top:110px;height:81px;width:1px;background:var(--rule)}
+.pk{position:absolute;width:10px;height:10px;border-radius:50%;transform:translate(-50%,-50%);opacity:0;animation:14s linear infinite}
+.pa{background:var(--ink);animation-name:pA}
+.pb{background:var(--paper);border:2px solid var(--ink);box-sizing:border-box;animation-name:pB}
+.pc{background:var(--accent);width:12px;height:12px;animation-name:pC}
+.chip{position:absolute;left:32%;top:146px;transform:translateX(-50%);font-size:12px;padding:5px 11px;border-radius:999px;white-space:nowrap;opacity:0;animation:14s linear infinite}
+.chip.wait{border:1px solid var(--accent);color:var(--accent);animation-name:waitc}
+.chip.ok{background:var(--ink);color:var(--paper);animation-name:okc}
+.caps{position:absolute;left:0;right:0;bottom:0;height:56px;border-top:1px solid var(--rule)}
+.cap{position:absolute;left:0;right:0;top:18px;margin:0;font-size:clamp(17px,1.5vw,22px);letter-spacing:-.02em;opacity:0;animation:capc 14s linear infinite}
+.cap .m{display:inline-block;width:28px;font-size:12px;color:var(--accent)}
+@keyframes pA{0%{left:18%;top:110px;opacity:0}2%{opacity:1}9%{left:38%;top:110px}11%{left:38%;top:150px}17%{left:62%;top:150px}19%{left:62%;top:110px}23%{left:80%;top:110px;opacity:1}25%,100%{left:80%;top:110px;opacity:0}}
+@keyframes pB{0%,25%{left:80%;top:110px;opacity:0}27%{opacity:1}31%{left:62%;top:110px}33%{left:62%;top:150px}39%{left:38%;top:150px}41%{left:38%;top:110px}48%{left:18%;top:110px;opacity:1}50%,100%{left:18%;top:110px;opacity:0}}
+@keyframes pC{0%,50%{left:80%;top:190px;opacity:0}52%{opacity:1}56%{left:62%;top:190px}58%{left:62%;top:150px}63%{left:38%;top:150px}65%{left:38%;top:190px}68%,78%{left:32%;top:190px;opacity:1}95%{left:6%;top:190px;opacity:1}97%,100%{left:6%;top:190px;opacity:0}}
+@keyframes waitc{0%,68%{opacity:0}70%,72%,76%{opacity:1}74%{opacity:.35}78%,100%{opacity:0}}
+@keyframes okc{0%,77%{opacity:0}79%,93%{opacity:1}96%,100%{opacity:0}}
+@keyframes capc{0%{opacity:0;transform:translateY(6px)}3%,22%{opacity:1;transform:none}25%,100%{opacity:0}}
+@media (max-width:640px){.tl{display:none}.stage{height:380px}.caps{height:80px}}
+@media (prefers-reduced-motion:reduce){.pk,.chip{display:none}.caps{position:static;height:auto;border:0}.stage{height:auto;min-height:240px;padding-top:240px}.cap{position:static;opacity:1;margin-top:8px}}
+@media (max-width:1000px){.hero-grid{grid-template-columns:1fr!important;align-content:center}.hero-qh{font-size:clamp(110px,min(46vw,36vh),420px)}}
+@media (max-width:900px){.sec{grid-template-columns:1fr}.rail .lab{position:static;margin-bottom:28px}}
+@media (max-width:640px){.li{grid-template-columns:1fr}.navl{display:none!important}}
+@media (prefers-color-scheme:dark){html:not([data-theme=light]) .root{--paper:#0d0d0c;--ink:#ecebe6;--soft:#9c9b94;--body:#c4c3bc;--faint:#6f6e68;--rule:#2a2a27;--keyb:#3a3a36;--keybg:#161614;--accent:#ff5a2a;
+  --fbg:#f1f0ea;--fink:#0e0e0d;--fsoft:#6b6b66;--fbody:#3d3d39;--frule:#d9d9d3;--frule2:#e2e2dc;--fbtn:#b9b9b2;--flink:#3d3d39}}
+</style>
 </head>
 <body>
-<a class="skip" href="#charges">Skip to content</a>
+<div class="root" style="background: var(--fbg); color: var(--ink); font-family: Geist, system-ui, sans-serif; font-size: 16px; line-height: 1.55">
 
-<header class="top">
-  <a class="plate" href="#" aria-label="qh home"><span>qh</span></a>
-  <nav aria-label="Sections">
-    <a href="#charges">Overhead</a>
-    <a href="#lines">Sessions</a>
-    <a href="#rules">Safety</a>
-    <a href="#calls">Evals</a>
-    <a href="#plans">Models</a>
-    <a href="#team">Team</a>
-    <a href="#new">New</a>
-    <a href="#next">Next</a>
-    <a href="#install">Install</a>
-    <a class="docs-link" href="docs/">Docs</a>
-    <a class="gh" href="https://github.com/kesavsabari/qh-rs">GitHub</a>
-  </nav>
-</header>
-
-<main>
-<section id="top" class="board" aria-labelledby="hero-title">
-  <div class="board-copy">
-    <h1 id="hero-title" class="strip strip-hero">A whole switchboard of agents in 1,200&nbsp;tokens.</h1>
-    <p class="lede">qh is a coding agent for your terminal, built so small local models do real work. It runs several sessions that ask, answer and hand work to each other, uses local models, cloud models or your ChatGPT plan, and lets you work on one project with friends.</p>
-    <div class="dial" role="group" aria-label="Install command">
-      <code id="cmd">curl -fsSL kesavsabari.github.io/qh/sh | sh</code>
-      <button class="copy" type="button" data-copy="curl -fsSL kesavsabari.github.io/qh/sh | sh" aria-describedby="cmd">
-        <svg aria-hidden="true" viewBox="0 0 20 20"><rect x="6" y="6" width="10" height="11" rx="1.5"/><path d="M4 13V4.5A1.5 1.5 0 0 1 5.5 3H13"/></svg>
-        <span>Copy</span>
-      </button>
-    </div>
-    <p class="dial-note">Windows (PowerShell): <code>irm kesavsabari.github.io/qh | iex</code></p>
-    <p class="dial-links"><a class="gh-plate" href="docs/">Read the docs</a> <a class="gh-plate" href="https://github.com/kesavsabari/qh-rs">Source on GitHub</a></p>
-    <p class="dial-note">Then run <code>qh</code> in a project folder: a short setup connects a local model, your ChatGPT plan or an API key. One 5&nbsp;MB binary, nothing else to install.</p>
-  </div>
-
-  <figure class="field" aria-label="Animated switchboard: four sessions; main asks tests which test fails, tests answers, docs and web work alongside, one trunk line carries one call at a time">
-    <svg viewBox="0 0 640 470" class="jacks" role="img" aria-hidden="true">
-
-      <g class="trunk-plate">
-        <rect x="24" y="18" width="592" height="40" rx="3" class="strip-bg"/>
-        <text x="40" y="44" class="strip-text">TRUNK · ONE GPU</text>
-        <circle cx="362" cy="38" r="9" class="lamp trunk-lamp"/>
-        <text x="380" y="44" class="strip-text holder" id="holder">idle</text>
-      </g>
-
-      <g class="line" data-line="1" transform="translate(0,96)">
-        <rect x="24" y="0" width="210" height="56" rx="3" class="strip-bg"/>
-        <text x="40" y="35" class="strip-text"><tspan class="num">01</tspan> MAIN</text>
-        <circle cx="270" cy="28" r="11" class="lamp"/>
-        <circle cx="318" cy="28" r="16" class="rim"/><circle cx="318" cy="28" r="9" class="hole"/>
-      </g>
-      <g class="line" data-line="2" transform="translate(0,186)">
-        <rect x="24" y="0" width="210" height="56" rx="3" class="strip-bg"/>
-        <text x="40" y="35" class="strip-text"><tspan class="num">02</tspan> TESTS</text>
-        <circle cx="270" cy="28" r="11" class="lamp"/>
-        <circle cx="318" cy="28" r="16" class="rim"/><circle cx="318" cy="28" r="9" class="hole"/>
-      </g>
-      <g class="line" data-line="3" transform="translate(0,276)">
-        <rect x="24" y="0" width="210" height="56" rx="3" class="strip-bg"/>
-        <text x="40" y="35" class="strip-text"><tspan class="num">03</tspan> DOCS</text>
-        <circle cx="270" cy="28" r="11" class="lamp"/>
-        <circle cx="318" cy="28" r="16" class="rim"/><circle cx="318" cy="28" r="9" class="hole"/>
-      </g>
-      <g class="line" data-line="4" transform="translate(0,366)">
-        <rect x="24" y="0" width="210" height="56" rx="3" class="strip-bg"/>
-        <text x="40" y="35" class="strip-text"><tspan class="num">04</tspan> WEB</text>
-        <circle cx="270" cy="28" r="11" class="lamp"/>
-        <circle cx="318" cy="28" r="16" class="rim"/><circle cx="318" cy="28" r="9" class="hole"/>
-      </g>
-
-      <!-- cords: main (y=124) <-> tests (y=214) -->
-      <g class="cord cord-ask">
-        <path d="M318 124 C 470 128, 470 210, 318 214" pathLength="100"/>
-        <circle cx="318" cy="124" r="7" class="plug"/><circle cx="318" cy="214" r="7" class="plug"/>
-      </g>
-      <g class="cord cord-answer">
-        <path d="M318 214 C 560 222, 560 116, 318 124" pathLength="100"/>
-        <circle cx="318" cy="214" r="7" class="plug"/><circle cx="318" cy="124" r="7" class="plug"/>
-      </g>
-    </svg>
-
-    <figcaption class="log" aria-live="off">
-      <ol id="calllog">
-        <li><span class="who">01 main → 02 tests</span> Which test in test_cart.py is failing?</li>
-        <li><span class="who">02 tests → 01 main</span> test_total() fails on <code>assert total([10, 20], 0.1) == 33.0</code>.</li>
-        <li><span class="who">01 main</span> edits cart.py, then the tests pass.</li>
-      </ol>
-      <p class="log-note">These are real messages from a recorded qh session. The page replays the call; the screenshot is below.</p>
-    </figcaption>
-  </figure>
-</section>
-
-<div class="belt" aria-label="Tools qh ships with">
-  <ul class="belt-track"><li><span class="jack-dot"></span>read_file</li><li><span class="jack-dot"></span>edit_file</li><li><span class="jack-dot"></span>write_file</li><li><span class="jack-dot"></span>rename_symbol</li><li><span class="jack-dot"></span>find_references</li><li><span class="jack-dot"></span>grep</li><li><span class="jack-dot"></span>bash</li><li><span class="jack-dot"></span>remember</li><li><span class="jack-dot"></span>web_fetch</li><li><span class="jack-dot"></span>browse</li><li><span class="jack-dot"></span>snapshot</li><li><span class="jack-dot"></span>click</li><li><span class="jack-dot"></span>type</li><li><span class="jack-dot"></span>screenshot</li><li><span class="jack-dot"></span>ask</li><li><span class="jack-dot"></span>send_message</li><li><span class="jack-dot"></span>spawn</li><li><span class="jack-dot"></span>/undo</li><li><span class="jack-dot"></span>/diff</li><li><span class="jack-dot"></span>/model</li><li><span class="jack-dot"></span>/role</li><li><span class="jack-dot"></span>todo</li><li><span class="jack-dot"></span>skill</li><li><span class="jack-dot"></span>/team</li><li><span class="jack-dot"></span>/provider</li><li><span class="jack-dot"></span>mcp</li><li><span class="jack-dot"></span>hooks</li><li><span class="jack-dot"></span>qh -p</li></ul>
-  <ul class="belt-track" aria-hidden="true"><li><span class="jack-dot"></span>read_file</li><li><span class="jack-dot"></span>edit_file</li><li><span class="jack-dot"></span>write_file</li><li><span class="jack-dot"></span>rename_symbol</li><li><span class="jack-dot"></span>find_references</li><li><span class="jack-dot"></span>grep</li><li><span class="jack-dot"></span>bash</li><li><span class="jack-dot"></span>remember</li><li><span class="jack-dot"></span>web_fetch</li><li><span class="jack-dot"></span>browse</li><li><span class="jack-dot"></span>snapshot</li><li><span class="jack-dot"></span>click</li><li><span class="jack-dot"></span>type</li><li><span class="jack-dot"></span>screenshot</li><li><span class="jack-dot"></span>ask</li><li><span class="jack-dot"></span>send_message</li><li><span class="jack-dot"></span>spawn</li><li><span class="jack-dot"></span>/undo</li><li><span class="jack-dot"></span>/diff</li><li><span class="jack-dot"></span>/model</li><li><span class="jack-dot"></span>/role</li><li><span class="jack-dot"></span>todo</li><li><span class="jack-dot"></span>skill</li><li><span class="jack-dot"></span>/team</li><li><span class="jack-dot"></span>/provider</li><li><span class="jack-dot"></span>mcp</li><li><span class="jack-dot"></span>hooks</li><li><span class="jack-dot"></span>qh -p</li></ul>
+<div class="float" aria-label="Quick links">
+<a href="#top" style="font-weight: 500; font-size: 15px; letter-spacing: -0.02em">qh</a>
+<a href="#install" class="m" style="font-size: 12px; border: 1px solid #fff; border-radius: 999px; padding: 9px 16px">install ↓</a>
 </div>
 
-<section id="charges" class="charges" aria-labelledby="charges-title">
-  <h2 id="charges-title" class="strip strip-section">Before you say a word</h2>
-  <div class="split">
-  <div class="split-text">
-  <p class="section-lede">A 9B model on an 8 GB card has a context window of 16–32k tokens. This is how much of it a harness uses up before your first message: the same model, the same "hi".</p>
-  <div class="charges-why">
-    <p>The saving comes from small, specific choices: a short system prompt, one-line tool descriptions, a repo map that skips ignored files and folds busy folders, and tools that only appear when they can matter: the browser's click and type after a page is open, session messaging once there is a second session. Big files come back as an outline until the model asks for lines, and compaction drops stale reads and old tool output before it ever summarises.</p>
-  </div>
-  </div>
-  <div class="split-visual">
-  <div class="tariff" role="img" aria-label="Context used on a 16,384-token window: qh about 1,200 tokens, a popular agent CLI about 14,000 tokens">
-    <div class="scale" aria-hidden="true">
-      <span style="--at:0">0</span><span style="--at:.25">4k</span><span style="--at:.5">8k</span><span style="--at:.75">12k</span><span style="--at:1">16k</span>
-    </div>
-    <div class="rate">
-      <div class="rate-label"><strong>qh</strong></div>
-      <div class="rate-bar"><i style="--w:.073"></i></div>
-      <div class="rate-num"><span class="num-strip">≈ 1,200</span></div>
-    </div>
-    <div class="rate other">
-      <div class="rate-label">a popular agent CLI</div>
-      <div class="rate-bar"><i style="--w:.855"></i></div>
-      <div class="rate-num"><span class="num-strip dim">≈ 14,000</span></div>
-    </div>
-  </div>
-    <p class="fine">qh measured 2026-10-10 on <code>qwen3.5:9b</code> (a laptop with an 8 GB NVIDIA GPU, Ollama), "hi" in an empty folder, reply included. Your numbers will vary with model, tools and project size.</p>
-  </div>
-  </div>
+<div class="sheet" style="position: relative; z-index: 1; background: var(--paper)">
+<div class="wrap">
+
+<section id="top" class="hero-par" style="height: 100svh; min-height: 620px; box-sizing: border-box; display: flex; flex-direction: column; padding: 26px 0 24px">
+<header class="qh-rise lab" style="display: flex; justify-content: space-between; align-items: center; gap: 24px; flex-wrap: wrap; animation-delay: .05s">
+<span>a coding agent for your terminal · 0.2.1</span>
+<nav style="display: flex; gap: clamp(16px, 2.4vw, 30px)">
+<span class="navl" style="display: flex; gap: clamp(16px, 2.4vw, 30px)">
+<a href="#team" style="color: var(--soft)">team</a>
+<a href="#sessions" style="color: var(--soft)">sessions</a>
+<a href="#safety" style="color: var(--soft)">safety</a>
+</span>
+<a href="docs/" style="color: var(--soft)">docs</a>
+<a href="https://github.com/kesavsabari/qh-rs" style="color: var(--soft)">github</a>
+<a href="#install">install</a>
+<button class="theme" type="button" id="theme" aria-label="Switch between light and dark">◐ dark</button>
+</nav>
+</header>
+<div class="hero-grid" style="flex: 1; min-height: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 32px clamp(48px, 6vw, 140px); align-items: center">
+<h1 class="qh-rise hero-qh" style="margin: 0; font-weight: 500; line-height: 0.78; letter-spacing: -0.075em; margin-left: -0.04em; padding-bottom: 0.2em; animation-delay: .2s">qh<span class="qh-cursor" style="display: inline-block; width: 0.07em; height: 0.62em; background: var(--accent); margin-left: 0.06em"></span></h1>
+<div style="display: flex; flex-direction: column; gap: clamp(24px, 3.4vh, 40px)">
+<div class="qh-rise" style="display: flex; flex-direction: column; gap: 4px; font-size: clamp(30px, 3.4vw, 68px); letter-spacing: -0.045em; line-height: 1.1; font-weight: 500; animation-delay: .4s">
+<span class="cyc">
+<span class="qh-w" style="animation-delay: 0s">Many sessions.</span>
+<span class="qh-w" style="animation-delay: 3s">Any model.</span>
+<span class="qh-w" style="animation-delay: 6s">Your whole team.</span>
+</span>
+</div>
+<p class="qh-rise lead" style="font-size: clamp(17px, 1.25vw, 21px); max-width: 600px; animation-delay: .55s">Built so small local models do real work. Sessions that ask, answer and hand work to each other, on local models, cloud models or your ChatGPT plan, with your friends on the same project.</p>
+<div class="qh-rise" style="display: flex; flex-wrap: wrap; gap: 14px 26px; align-items: center; animation-delay: .65s">
+<a href="#install" style="display: inline-flex; align-items: center; min-height: 48px; padding: 0 22px; background: var(--ink); color: var(--paper); font-family: 'Geist Mono', monospace; font-size: 13px">get qh ↓</a>
+<a href="docs/" class="m" style="font-size: 13px; border-bottom: 1px solid var(--ink); padding-bottom: 2px">read the docs</a>
+</div>
+</div>
+</div>
+<div class="qh-rise lab" style="display: flex; justify-content: space-between; gap: 16px; animation-delay: .9s"><span>scroll <span class="qh-cursor" style="color: var(--accent)">↓</span></span><span>windows · macos · linux</span></div>
 </section>
 
-<div class="band band-cream"><p class="band-line">A popular CLI spends 14,000 tokens before you type. qh spends 1,200.</p><div class="band-side"><span class="band-big"><span data-count="12" data-from="1">12</span>×</span><span>less overhead, measured on qwen3.5:9b</span></div></div>
+<section id="team" class="sec">
+<div class="rail"><span class="lab">01 — team</span></div>
+<div class="body">
+<div class="head sv">
+<h2 class="h2">Your agent<br>can ask theirs.</h2>
+<p class="lead">Friends on one project, each on their own computer. Agents ask each other's agents, hand work across, and nothing lands on your machine without your yes. It all travels over <b style="font-weight: 500; color: var(--ink)">qh-link</b>, an encrypted direct line between your machines; the project's GitHub repo is just where you find each other.</p>
+</div>
 
-<section id="weight" class="calls" aria-labelledby="weight-title">
-  <h2 id="weight-title" class="strip strip-section">Light on the line</h2>
-  <p class="section-lede">qh is written in Rust and ships as a single binary. The model gets the GPU and the RAM; the harness barely shows up in <code>top</code>.</p>
-  <div class="split">
-  <div class="split-text">
-  <table class="ledger" aria-describedby="weight-note">
-    <thead><tr><th scope="col">Harness</th><th scope="col" class="n">Install size</th><th scope="col" class="n">Memory, idle</th></tr></thead>
-    <tbody>
-      <tr><td><strong>qh</strong></td><td class="n hi"><span class="num-strip red">4.6 MB</span></td><td class="n hi"><span class="num-strip red">5 MB</span></td></tr>
-      <tr><td>Claude Code</td><td class="n">240 MB</td><td class="n">197 MB</td></tr>
-      <tr><td>Codex CLI</td><td class="n">430 MB</td><td class="n">334 MB</td></tr>
-      <tr><td>OpenCode</td><td class="n">178 MB</td><td class="n">697 MB</td></tr>
-    </tbody>
-  </table>
-  <p id="weight-note" class="fine ledger-note">Measured 2026-10-09 on a Linux laptop: Claude Code 2.1.292, Codex 0.161.0, OpenCode 1.18.35. Install size is the files on disk; memory is the TUI open and idle in tmux, two runs. Each tool does different things; this is weight, not capability.</p>
-  </div>
-  <div class="split-visual">
-  <h3 class="sub">Why it stays light</h3>
-  <ul class="rules-list compact">
-    <li>Streaming a 4,000-token reply costs 0.35 s of CPU, and 0.36 s with 50 tabs open.</li>
-    <li>9 MB of memory with 50 sessions open; starts in 3–5 ms.</li>
-    <li>Only the panes on screen are drawn, so open tabs cost nothing.</li>
-    <li>Streaming text is wrapped from the tail, not re-laid-out every token.</li>
-    <li>Frames are capped at 60 per second, however fast the model types.</li>
-  </ul>
-  </div>
-  </div>
+<div class="stage sv" role="img" aria-label="Two machines joined by qh-link: your agent asks Alex's agent, Alex's agent answers, Alex sends work that waits for you, you allow it and it runs on your machine.">
+<div class="lab" style="position: absolute; left: 0; top: 0">you · laptop</div>
+<div class="lab" style="position: absolute; left: 50%; top: 124px; transform: translateX(-50%); white-space: nowrap; color: var(--ink)"><span style="color: var(--accent)">●</span> qh-link · encrypted</div>
+<div class="lab" style="position: absolute; right: 0; top: 0">alex · mac</div>
+
+<div class="lab tl" style="top: 102px; left: 0">main</div>
+<div class="tline" style="top: 110px; left: 5%; width: 33%"><i class="qh-dot" style="animation-duration: 9s"></i></div>
+<div class="lab tl" style="top: 182px; left: 0">tests</div>
+<div class="tline" style="top: 190px; left: 5%; width: 33%"><i class="qh-dot" style="animation-duration: 12s; animation-delay: -5s"></i></div>
+
+<div class="vlink" style="left: 38%"></div>
+<div class="chan" style="top: 150px; left: 38%; width: 24%"></div>
+<div class="vlink" style="left: 62%"></div>
+
+<div class="lab tl" style="top: 102px; right: 0">api</div>
+<div class="tline" style="top: 110px; left: 62%; width: 33%"><i class="qh-dot" style="animation-duration: 10s; animation-delay: -3s"></i></div>
+<div class="lab tl" style="top: 182px; right: 0">docs</div>
+<div class="tline" style="top: 190px; left: 62%; width: 33%"><i class="qh-dot" style="animation-duration: 13s; animation-delay: -8s"></i></div>
+
+<i class="pk pa"></i>
+<i class="pk pb"></i>
+<i class="pk pc"></i>
+<span class="chip wait m">waiting for you</span>
+<span class="chip ok m">allowed ✓</span>
+
+<div class="caps">
+<p class="cap" style="animation-delay: 0s"><span class="m">1</span>Your agent asks Alex's agent how the API works.</p>
+<p class="cap" style="animation-delay: 3.5s"><span class="m">2</span>Alex's agent answers from their working copy: live, read-only.</p>
+<p class="cap" style="animation-delay: 7s"><span class="m">3</span>Alex sends work to your session. It waits for you.</p>
+<p class="cap" style="animation-delay: 10.5s"><span class="m">4</span>You allow it. It runs on your machine, with your model.</p>
+</div>
+</div>
+
+<div class="list sv" style="margin-top: clamp(48px, 8vh, 88px)">
+<div class="li"><b>One line to start</b><span>/team create shares the folder (private, secrets left out) and invites friends by GitHub name; they run qh join you/project.</span></div>
+<div class="li"><b>See the board</b><span>Who's online, what their agents are doing, and their sessions to read along.</span></div>
+<div class="li"><b>Requests wait for you</b><span>A teammate's work lands in Requests; it runs only when you accept, and you approve every edit it leads to.</span></div>
+<div class="li"><b>qh-link</b><span>A direct, encrypted line between teammates: same network, across the internet, or through a relay when nothing else gets through. Viewer, member or trusted, enforced by your own qh.</span></div>
+</div>
+</div>
 </section>
 
-<section id="lines" class="lines" aria-labelledby="lines-title">
-  <h2 id="lines-title" class="strip strip-section">Four lines, one operator</h2>
-  <div class="split">
-  <div class="split-text">
-  <p class="section-lede">Open sessions like lines on a board. Put four side by side, give each its own job, and let them talk: <code>ask</code> waits for an answer, <code>send_message</code> doesn't, and <code>spawn</code> starts a worker that reports back.</p>
-  <ul class="rules-list compact">
-    <li>Each session names its own job from your first real request, or set one with <code>/role</code>. Roles show in pane headers and in what other sessions see.</li>
-    <li>Work reports back: whoever hands a job over hears when it's done. Reports never trigger replies, so two sessions can't ping-pong.</li>
-    <li>Spawned workers stay workers; they can't spawn more of themselves.</li>
-    <li>One GPU carries one generation at a time; ⏳ shows who is waiting. <code>ask</code> keeps waiting while the other session is busy, however long the queue.</li>
-    <li>Each tab can run its own model: <code>/model</code> opens a searchable list of your local and Ollama cloud models.</li>
-    <li>Automatic call chains stop after six hops, and a file being edited by one session is locked for the others until its turn ends.</li>
-  </ul>
-  </div>
-  <aside class="needs keys-card" aria-labelledby="keys-title">
-    <h3 id="keys-title" class="sub">At the board</h3>
-  <dl>
-    <div><dt><kbd>Ctrl</kbd><kbd>N</kbd></dt><dd>open a new session</dd></div>
-    <div><dt><kbd>Ctrl</kbd><kbd>G</kbd></dt><dd>tabs ↔ 2×2 grid</dd></div>
-    <div><dt><kbd>Alt</kbd><kbd>1</kbd>…<kbd>9</kbd></dt><dd>pick the line you type into</dd></div>
-    <div><dt><kbd>Shift</kbd><kbd>Tab</kbd></dt><dd>ask → auto-edit → auto → plan</dd></div>
-    <div><dt><kbd>Ctrl</kbd><kbd>L</kbd></dt><dd>log of every call between sessions</dd></div>
-    <div><dt><kbd>Ctrl</kbd><kbd>W</kbd></dt><dd>hang up the active session</dd></div>
-  </dl>
-  </aside>
-  </div>
-  <figure class="shot">
-    <img src="img/qh-grid.webp" width="2454" height="1445" loading="lazy" decoding="async"
-         alt="qh in grid view with four sessions. main, on the cloud model gpt-oss:20b-cloud, asked tests which test fails; tests, on local qwen3.5:9b, ran the tests and answered that test_total fails; main then fixed cart.py. docs, local, suggested a README sentence; web, on the cloud model, browsed example.com.">
-    <figcaption>A live run: main and web on a cloud model, tests and docs on local qwen3.5:9b, talking to each other.</figcaption>
-  </figure>
 
-
+<section id="proof" class="sec">
+<div class="rail"><span class="lab">02 — proof</span></div>
+<div class="body">
+<div class="sv" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: 56px clamp(32px, 4vw, 72px)">
+<div><div class="big drift">12×</div><div style="margin-top: 22px; font-weight: 500">less overhead</div><div style="color: var(--body); margin-top: 4px">≈1,200 tokens before you say hello; a popular agent CLI spends ≈14,000.</div></div>
+<div><div class="big drift">4.6<span style="font-size: .3em; letter-spacing: -0.02em; margin-left: .15em">MB</span></div><div style="margin-top: 22px; font-weight: 500">the whole thing</div><div style="color: var(--body); margin-top: 4px">One Rust binary, 5 MB of memory idle. The GPU and RAM go to the model.</div></div>
+<div><div class="big drift">96%</div><div style="margin-top: 22px; font-weight: 500">on a 9B model</div><div style="color: var(--body); margin-top: 4px">18 tasks × 3 runs. A change stays only if this number goes up.</div></div>
+</div>
+<p class="note">Measured 2026-10-09/10 on a laptop with an 8 GB NVIDIA GPU, qwen3.5:9b on Ollama. Your numbers will vary; this is weight, not capability.</p>
+</div>
 </section>
 
-<div class="band band-brass"><p class="band-line">Four agents. One GPU.</p><div class="band-side"><span class="band-keys"><kbd>Ctrl</kbd><kbd>G</kbd></span><span>opens the 2×2 grid</span></div></div>
-
-<section id="kit" class="kit" aria-labelledby="kit-title">
-  <h2 id="kit-title" class="strip strip-section">What's wired in</h2>
-  <ul class="bento"><li class="tile wide"><svg aria-hidden="true" viewBox="0 0 20 20"><path d="M4 16l6-6m2-6a4 4 0 1 0 4 4l-3 3-3-3z"/></svg><h3>Repairs small-model slips</h3><p>Wrong argument names, "3" for 3, edits that only miss on whitespace: qh fixes them instead of failing the turn.</p></li><li class="tile "><svg aria-hidden="true" viewBox="0 0 20 20"><path d="M3 5l5-2 4 2 5-2v12l-5 2-4-2-5 2z M8 3v12 M12 5v12"/></svg><h3>Repo map</h3><p>About 400 tokens that tell the model where everything is.</p></li><li class="tile "><svg aria-hidden="true" viewBox="0 0 20 20"><path d="M4 4h12M4 8h12M6 12h8M8 16h4"/></svg><h3>Staged compaction</h3><p>Stale reads and old output go first; a summary only when needed.</p></li><li class="tile "><svg aria-hidden="true" viewBox="0 0 20 20"><rect x="3" y="4" width="14" height="12" rx="1.5"/><path d="M3 8h14"/></svg><h3>Its own browser</h3><p>Drives your system Chromium over the DevTools protocol, in its own profile. No Playwright.</p></li><li class="tile "><svg aria-hidden="true" viewBox="0 0 20 20"><path d="M7 5L3 9l4 4M3 9h9a5 5 0 0 1 0 10h-2"/></svg><h3>Undo anything</h3><p>/undo and /diff for every change in the session.</p></li><li class="tile wide"><svg aria-hidden="true" viewBox="0 0 20 20"><path d="M4 16V9M9 16V5M14 16v-4"/></svg><h3>An eval suite that decides</h3><p>15 coding and 3 browser tasks, three runs each. A change stays only if the pass rate goes up: 96% on qwen3.5:9b.</p></li><li class="tile "><svg aria-hidden="true" viewBox="0 0 20 20"><path d="M4 6h12M4 10h8M4 14h10"/></svg><h3>Reads in whole lines</h3><p>Long files are cut on line boundaries with "start=613 to continue", so the model never invents the rest.</p></li><li class="tile "><svg aria-hidden="true" viewBox="0 0 20 20"><path d="M3 10h10m-4-4 4 4-4 4M15 4v12"/></svg><h3>Headless mode</h3><p><code>qh -p "prompt"</code> for scripts and CI; <code>--stats</code> writes tokens and calls.</p></li><li class="tile wide"><svg aria-hidden="true" viewBox="0 0 20 20"><path d="M10 3a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM10 7v3l2 2"/></svg><h3>Catches the quiet failures</h3><p>A reminder when the model states an answer but never writes the file. Links in page snapshots show where they go, and 404s are flagged, so it clicks instead of guessing URLs.</p></li><li class="tile "><svg aria-hidden="true" viewBox="0 0 20 20"><path d="M4 5h12M4 10h12M4 15h7"/></svg><h3>Plan mode</h3><p>Read-only: it explores and writes a plan; switch mode to let it act.</p></li><li class="tile "><svg aria-hidden="true" viewBox="0 0 20 20"><path d="M5 4h7l3 3v9H5z M8 9h4M8 12h4"/></svg><h3>QH.md</h3><p>Project instructions it always follows. Reads AGENTS.md or CLAUDE.md too.</p></li><li class="tile "><svg aria-hidden="true" viewBox="0 0 20 20"><path d="M5 6l2 2 3-4M5 13l2 2 3-4M12 6h4M12 13h4"/></svg><h3>A checklist</h3><p>The todo tool keeps multi-step work on track, even on a 9B model.</p></li><li class="tile wide"><svg aria-hidden="true" viewBox="0 0 20 20"><path d="M7 3v4M13 3v4M5 7h10v3a5 5 0 0 1-10 0zM10 15v3"/></svg><h3>Plugs for everything</h3><p><b>MCP</b> servers add tools; <b>hooks</b> run your commands before or after any tool (format on edit, block a command, keep going until tests pass); <b>skills</b> load instructions only when a task needs them; a markdown file becomes your own <b>/command</b>.</p></li><li class="tile "><svg aria-hidden="true" viewBox="0 0 20 20"><path d="M4 6h12M4 10h12M4 14h6"/><path d="M14 13l2 2-2 2"/></svg><h3>Type / for everything</h3><p>Every command in a list as you type; pickers for models and providers.</p></li></ul>
+<section id="sessions" class="sec">
+<div class="rail"><span class="lab">03 — sessions</span></div>
+<div class="body">
+<div class="head sv">
+<h2 class="h2">Four lines,<br>one operator.</h2>
+<p class="lead">Open sessions like lines on a board, give each a job, and let them talk: one asks and waits, one hands off and moves on, one spawns a worker that reports back.</p>
+</div>
+<div class="list sv">
+<div class="li"><b>Jobs that report back</b><span>Whoever hands work over hears when it's done, and reports never trigger replies, so nothing ping-pongs.</span></div>
+<div class="li"><b>A model per line</b><span>Local models take turns on your GPU; cloud ones run at the same time.</span></div>
+<div class="li"><b>No collisions</b><span>A file one session is editing is locked for the others until it's done.</span></div>
+</div>
+<div class="sv" style="margin-top: 48px; display: flex; flex-direction: column; gap: 10px; max-width: 1100px" class="m">
+<div style="display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 16px; font-size: 14px"><span style="color: var(--faint)">01 main → 02 tests</span><span class="qh-msg">Which test in test_cart.py is failing?</span></div>
+<div style="display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 16px; font-size: 14px"><span style="color: var(--faint)">02 tests → 01 main</span><span class="qh-msg">test_total() fails on assert total([10, 20], 0.1) == 33.0.</span></div>
+<div style="display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 16px; font-size: 14px"><span style="color: var(--accent)">01 main</span><span class="qh-msg">edits cart.py, then the tests pass.</span></div>
+</div>
+<div class="sv" style="margin-top: 44px; display: flex; flex-wrap: wrap; gap: 18px 40px; font-size: 15px; color: var(--body)">
+<div><span class="key">Ctrl</span><span class="key">N</span> new line</div>
+<div><span class="key">Ctrl</span><span class="key">G</span> 2×2 grid</div>
+<div><span class="key">⇧</span><span class="key">Tab</span> ask → auto → plan</div>
+</div>
+</div>
 </section>
 
-<section id="rules" class="rules" aria-labelledby="rules-title">
-  <h2 id="rules-title" class="strip strip-section">The operator's rules</h2>
-  <div class="rules-grid">
-    <figure class="shot shot-small">
-      <img src="img/qh-confirm.webp" width="2454" height="1445" loading="lazy" decoding="async"
-           alt="qh's approval card in red: docs wants to run rm cart.py, with the warning that it touches 1 file main wrote, and allow or deny keys.">
-      <figcaption>Even in auto mode a delete asks, and it says whose work it would destroy.</figcaption>
-    </figure>
-    <ul class="rules-list">
-      <li><strong>It asks before it writes.</strong> Edits, new files, renames and shell commands wait for your yes. Read-only commands like <code>ls</code> and <code>git status</code> go straight through.</li>
-      <li><strong>Four modes, one key.</strong> <kbd>Shift</kbd><kbd>Tab</kbd> cycles ask → auto-edit → auto → plan (read-only). Even in auto, <code>rm</code>, <code>sudo</code>, <code>git push</code>, <code>curl | sh</code> and pay or delete clicks still ask.</li>
-      <li><strong>Agents can't wreck each other's work.</strong> If a dangerous command would touch files another session wrote, the card turns red and names that session and the files.</li>
-      <li><strong>Everything can be undone.</strong> <code>/undo</code> reverts the last change and <code>/diff</code> shows the whole session.</li>
-      <li><strong>"Always" stays narrow.</strong> It approves a command or folder for the current session only. In a chain, every part needs its own rule, and anything with <code>$(…)</code> or a redirect always asks.</li>
-      <li><strong>The browser is its own.</strong> It runs a separate Chromium profile, refuses <code>file://</code> and your local network, never types into password fields, and won't type into buttons or links.</li>
-    </ul>
-  </div>
+<section id="safety" class="sec">
+<div class="rail"><span class="lab">04 — safety</span></div>
+<div class="body">
+<div class="head sv">
+<h2 class="h2">The operator's<br>rules.</h2>
+<p class="lead">Every command runs in your system's own sandbox, so auto mode is safe to leave on. Anything that crosses a line still asks you.</p>
+</div>
+<div class="list sv">
+<div class="li"><b>Sandboxed commands</b><span>They write only in the project, can't read secrets, and reach the network through an allowlist, on Linux, macOS and Windows.</span></div>
+<div class="li"><b>Dangerous still asks</b><span>Even in auto: rm, sudo, git push, curl | sh.</span></div>
+<div class="li"><b>Secrets stay yours</b><span>~/.ssh, .env and keys are never read without your yes.</span></div>
+<div class="li"><b>Everything undoes</b><span>/undo reverts the last change; /diff shows the whole session.</span></div>
+</div>
+</div>
 </section>
 
-<section id="calls" class="calls" aria-labelledby="calls-title">
-  <h2 id="calls-title" class="strip strip-section">Test calls</h2>
-  <p class="section-lede">qh ships with an eval suite of 15 coding tasks and 3 browser tasks, each run three times. Every change to the harness was kept only if the numbers went up, and every fix came from reading a failure transcript, not a guess.</p>
-  <div class="split">
-  <div class="split-text">
-  <table class="ledger" aria-describedby="ledger-note">
-    <thead><tr><th scope="col">Suite</th><th scope="col" class="n">Pass rate</th></tr></thead>
-    <tbody>
-      <tr><td>15 coding tasks × 3</td><td class="n"><span class="num-strip">96%</span></td></tr>
-      <tr><td>3 browser tasks × 3</td><td class="n"><span class="num-strip">100%</span></td></tr>
-      <tr><td>All 18 tasks, two full runs in a row</td><td class="n hi"><span class="num-strip red">96%</span></td></tr>
-    </tbody>
-  </table>
-  <p id="ledger-note" class="fine ledger-note">Pass rate on all 18 tasks × 3 runs, <code>qwen3.5:9b</code>, measured on one laptop; your results will vary with model and hardware.</p>
-  </div>
-  <div class="split-visual">
-  <h3 class="sub">What moved the number</h3>
-  <ul class="rules-list compact">
-    <li>The model often calls <code>bash</code> with <code>command</code> instead of <code>cmd</code>; qh maps the wrong name back instead of failing.</li>
-    <li>Edits that only miss on whitespace are matched anyway and re-indented, followed by a syntax check.</li>
-    <li>Renames go through <code>rename_symbol</code>, so a caller can't be forgotten.</li>
-    <li>Reads stop on whole lines and say where to continue; the model used to fill in rows it never saw.</li>
-  </ul>
-  <p class="fine">Run them yourself: <code>python3 evals/run.py --runs 3 --save</code>. The tasks are small, so treat these as regression numbers, not a benchmark.</p>
-  </div>
-  </div>
-</section>
 
-<div class="band band-red"><p class="band-line"><span data-count="96" data-from="60">96</span>% on a 9B model.</p><div class="band-side"><span>pass rate on 18 tasks × 3 runs, qwen3.5:9b, self-measured</span></div></div>
 
-<section id="plans" class="lines" aria-labelledby="mix-title">
-  <h2 id="mix-title" class="strip strip-section">Bring your own model, or your own plan</h2>
-  <div class="split">
-  <div class="split-text">
-  <p class="section-lede">The first time you run qh, a short setup asks what you want to use: tick any mix, connect each in one step, pick a default. Every tab can then run its own model.</p>
-  <ul class="rules-list compact">
-    <li><strong>Your ChatGPT plan.</strong> <code>qh login chatgpt</code> signs in with ChatGPT Plus or Pro, so qh uses the subscription you already pay for, no API key.</li>
-    <li><strong>Ollama, local or cloud.</strong> Local models run free and private on your GPU; sign the Ollama app in and its big <code>-cloud</code> models run without a big GPU.</li>
-    <li><strong>Coding plans.</strong> GLM (Z.ai), Kimi Code and MiniMax subscriptions plug in with their plan key.</li>
-    <li><code>/model</code> opens one searchable list: your Ollama models, Ollama's cloud models, and every provider you've added, with context size and price.</li>
-    <li>Cloud tabs run in parallel; local tabs take turns on the GPU, in arrival order.</li>
-    <li>Each tab gets its model's own context window. Cloud windows are capped (64k by default) because every request resends the whole conversation.</li>
-    <li>Paid models show a running cost next to the token meter.</li>
-    <li><code>/provider</code> lists every provider with its status: pick one to sign in, or add, test and remove a key. Keys are checked straight away, never kept if they're wrong, and stored in a file only you can read. OpenRouter, OpenAI, Groq, DeepSeek, Mistral, Anthropic (API key), LM Studio and llama.cpp are built in; anything OpenAI-compatible can be added.</li>
-    <li>Models without native tool calling still work: qh switches to a text protocol for them.</li>
-    <li>With no <code>ctx</code> in the config, qh sizes the local window to your GPU: free VRAM over what one token of cache costs. <code>/tier</code> shows the sums.</li>
-  </ul>
-  </div>
-  <figure class="shot">
-    <img src="img/qh-models.webp" width="2454" height="1445" loading="lazy" decoding="async"
-         alt="qh's model picker over a grid of sessions: local qwen3.5:9b at the top, then Ollama cloud models such as deepseek, glm, gpt-oss and kimi marked with a cloud symbol.">
-    <figcaption><code>/model</code>: every model you can use in one list, grouped by where it runs.</figcaption>
-  </figure>
-  </div>
-</section>
+<div class="band" style="padding: clamp(110px, 18vh, 200px) 0 clamp(80px, 12vh, 140px)">
+<a href="docs/updates/" style="display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 12px 32px; padding: 22px 0; border-top: 1px solid var(--ink); border-bottom: 1px solid var(--rule)">
+<span style="font-size: clamp(18px, 1.8vw, 24px); letter-spacing: -0.02em"><span style="color: var(--accent)">●</span> 0.2.1 is out: a Windows sandbox, auto mode by default, and a second opinion from another model.</span>
+<span class="m" style="font-size: 13px; color: var(--soft)">what's new ↗</span>
+</a>
+</div>
 
-<section id="map" class="lines" aria-labelledby="map-title">
-  <h2 id="map-title" class="strip strip-section">See the whole board</h2>
-  <div class="split">
-  <div class="split-text">
-  <p class="section-lede"><kbd>Ctrl</kbd><kbd>B</kbd> opens a live map of the workspace: every session, its status, role and model, the messages moving between them, and the folders they write to.</p>
-  <ul class="rules-list compact">
-    <li>A dot runs along a line when one session messages another; lines fade as the conversation moves on.</li>
-    <li>Press <kbd>F</kbd> for the folder layer. A folder two sessions are writing to turns red, before anyone overwrites anyone.</li>
-    <li>Each session works in its own folder, and workers start where the session that spawned them is.</li>
-    <li>Arrows or a click pick a session; <kbd>Enter</kbd> jumps to its tab. Mouse wheel and clicks work across the app.</li>
-  </ul>
-  </div>
-  <figure class="shot">
-    <img src="img/qh-map.webp" width="2454" height="1445" loading="lazy" decoding="async"
-         alt="qh's map view: nodes for main, tests, docs and web with their status and model; lines from main and docs to the project folder, marked in red as shared.">
-    <figcaption>main and docs both wrote to the project folder, so the map flags it as shared.</figcaption>
-  </figure>
-  </div>
-</section>
+</div>
+</div>
 
-<section id="team" class="lines" aria-labelledby="team-title">
-  <h2 id="team-title" class="strip strip-section">A party line for your team</h2>
-  <div class="split">
-  <div class="split-text">
-  <p class="section-lede">Work on one project with friends, each on your own computer. See who's online, what their agents are doing, read their sessions and send work into them. No server and no sign-up: the project's GitHub repo is the switchboard, and everyone who can push to it is on the team.</p>
-  <ul class="rules-list compact">
-    <li><strong>Start in one line.</strong> <code>/team create</code> puts the folder on GitHub (private by default, secrets like <code>.env</code> left out) and invites friends by username. They run <code>qh join you/project</code>.</li>
-    <li><strong>See the board.</strong> The status bar shows <code>👥 you · alex ● · sam ○ 2h ago</code>; notes appear when someone joins or leaves; <code>/team</code> lists everyone's sessions.</li>
-    <li><strong>Read and write.</strong> Open a teammate's session to follow along, or send a message into it. It runs on their machine only after they allow it, and they approve every edit it leads to.</li>
-    <li><strong>Roles per person.</strong> A viewer only watches; anyone else's work waits in Requests for your yes; a trusted teammate's agent also gets its questions answered without asking. Your own qh enforces it, on your machine.</li>
-    <li><strong>Encrypted.</strong> Sessions, messages and file names are sealed with a key only the team holds, so even a public repo shows outsiders nothing but noise.</li>
-    <li><strong>Picks up where you left off.</strong> Next day, <code>qh</code> in the project reconnects by itself.</li>
-  </ul>
-  </div>
-  <aside class="needs keys-card" aria-labelledby="team-keys-title">
-    <h3 id="team-keys-title" class="sub">Team commands</h3>
-  <dl>
-    <div><dt><code>/team create</code></dt><dd>share this project, invite friends</dd></div>
-    <div><dt><code>qh join</code></dt><dd>join a friend's project</dd></div>
-    <div><dt><code>/team</code></dt><dd>who's online, read or write sessions</dd></div>
-    <div><dt><code>/team invite</code></dt><dd>add a friend by GitHub username</dd></div>
-    <div><dt><code>/team role</code></dt><dd>viewer, member or trusted, per person</dd></div>
-    <div><dt><code>/team private</code></dt><dd>or <code>public</code>: who sees the code</dd></div>
-    <div><dt><code>/team off</code></dt><dd>stop sharing</dd></div>
-  </dl>
-  </aside>
-  </div>
-  <figure class="reel" aria-labelledby="reel-title">
-    <div class="reel-screen">
-      <div class="reel-bar"><span class="reel-lamp" aria-hidden="true"></span><span>two people, one project · recorded live, waits sped up</span></div>
-      <video id="team-reel" muted loop playsinline preload="none" poster="img/team-demo.webp" width="1464" height="830"
-             data-wide="img/team-demo.mp4" data-narrow="img/team-demo-phone.mp4" data-narrow-poster="img/team-demo-phone.webp"
-             aria-label="Recording: Alice and Bob each run qh on one project; Bob reads Alice's session, sends a message she allows, then she makes him a viewer and his next message is refused."></video>
-    </div>
-    <figcaption>
-      <h3 id="reel-title" class="sub">Alice and Bob, on the line</h3>
-      <ol class="reel-steps">
-        <li data-t="2"><button type="button"><b>Both go online.</b> <code>/team on</code>: Bob is let in and gets the team key.</button></li>
-        <li data-t="8.9"><button type="button"><b>Alice works.</b> She asks her agent what the repo is.</button></li>
-        <li data-t="16.5"><button type="button"><b>Bob reads along.</b> <code>/team open alice main</code> shows her session.</button></li>
-        <li data-t="22.1"><button type="button"><b>Bob sends work in.</b> His message waits for Alice.</button></li>
-        <li data-t="27.6"><button type="button"><b>Alice allows it.</b> It runs on her machine, with her model.</button></li>
-        <li data-t="36.4"><button type="button"><b>Alice makes Bob a viewer.</b> His next message is refused.</button></li>
-      </ol>
-    </figcaption>
-  </figure>
-</section>
-
-<div class="band band-brass"><p class="band-line">Your team, on one board. No server.</p><div class="band-side"><span class="band-keys"><code>/team</code></span><span>who's online, and what they're doing</span></div></div>
-
-<section id="new" class="news" aria-labelledby="new-title">
-  <h2 id="new-title" class="strip strip-section">Fresh off the wire</h2>
-  <p class="section-lede">What changed in the newest qh. Already on an older one? <code>qh update</code> brings it in.</p>
-  <div class="upd-box" data-updates="latest"><p class="fine">Read <a href="https://github.com/kesavsabari/qh-rs/blob/main/CHANGELOG.md">what's new on GitHub</a>.</p></div>
-  <p class="fine"><a href="docs/updates/">Every update so far</a></p>
-</section>
-
-<section id="next" class="kit" aria-labelledby="next-title">
-  <h2 id="next-title" class="strip strip-section">Lines being laid</h2>
-  <p class="section-lede">Planned, not built yet. Nothing here ships until it's measured.</p>
-  <ul class="bento"><li class="tile wide"><svg aria-hidden="true" viewBox="0 0 20 20"><path d="M4 16V9M9 16V5M14 16v-4"/></svg><h3>A harder benchmark, in public</h3><p>A 60-task suite in Rust, TypeScript and Go, plus a public benchmark subset, with the same tasks run through other agents on the same model.</p></li><li class="tile "><svg aria-hidden="true" viewBox="0 0 20 20"><path d="M4 4h12v12H4zM4 10h12"/></svg><h3>Review by hunk</h3><p>Accept or reject each change, and rewind files and conversation together.</p></li><li class="tile "><svg aria-hidden="true" viewBox="0 0 20 20"><path d="M10 3l6 3v4c0 4-3 6-6 7-3-1-6-3-6-7V6z"/></svg><h3>Sandboxed commands</h3><p>Commands that can only touch the project, so auto mode is safe to leave on.</p></li><li class="tile wide"><svg aria-hidden="true" viewBox="0 0 20 20"><circle cx="5" cy="5" r="2"/><circle cx="15" cy="7" r="2"/><circle cx="8" cy="15" r="2"/><path d="M7 5.5l6 1M6 7l1.5 6M13.5 8.5l-4 5"/></svg><h3>Teams beyond GitHub</h3><p>Team mode on GitLab and Gitea, and removing a member rotates the team key.</p></li></ul>
-</section>
-
-<section id="install" class="install" aria-labelledby="install-title">
-  <h2 id="install-title" class="strip strip-section">Get a line</h2>
-  <div class="split">
-  <ol class="steps">
-    <li><span class="step-n">1</span><div><p>Install qh. Windows, in PowerShell:</p><div class="dial dial-sm"><code>irm kesavsabari.github.io/qh | iex</code><button class="copy" type="button" data-copy="irm kesavsabari.github.io/qh | iex"><svg aria-hidden="true" viewBox="0 0 20 20"><rect x="6" y="6" width="10" height="11" rx="1.5"/><path d="M4 13V4.5A1.5 1.5 0 0 1 5.5 3H13"/></svg><span>Copy</span></button></div></div></li>
-    <li><span class="step-n">2</span><div><p>Linux and macOS:</p><div class="dial dial-sm"><code>curl -fsSL kesavsabari.github.io/qh/sh | sh</code><button class="copy" type="button" data-copy="curl -fsSL kesavsabari.github.io/qh/sh | sh"><svg aria-hidden="true" viewBox="0 0 20 20"><rect x="6" y="6" width="10" height="11" rx="1.5"/><path d="M4 13V4.5A1.5 1.5 0 0 1 5.5 3H13"/></svg><span>Copy</span></button></div></div></li>
-    <li><span class="step-n">3</span><div><p>Open the board in your project; setup runs the first time.</p><div class="dial dial-sm"><code>cd my-project &amp;&amp; qh</code><button class="copy" type="button" data-copy="cd my-project && qh"><svg aria-hidden="true" viewBox="0 0 20 20"><rect x="6" y="6" width="10" height="11" rx="1.5"/><path d="M4 13V4.5A1.5 1.5 0 0 1 5.5 3H13"/></svg><span>Copy</span></button></div></div></li>
-  </ol>
-  <aside class="needs" aria-labelledby="needs-title">
-    <h3 id="needs-title" class="sub">What you need</h3>
-    <dl>
-      <div><dt>Models</dt><dd><a href="https://ollama.com">Ollama</a> (local or cloud), a ChatGPT plan, or an API key</dd></div>
-      <div><dt>Tested on</dt><dd><code>qwen3.5:9b</code></dd></div>
-      <div><dt>GPU</dt><dd>for local models: a GPU (about 8 GB for a 7–9B model); none for cloud models</dd></div>
-      <div><dt>Team mode</dt><dd>git and a GitHub account</dd></div>
-      <div><dt>Browser</dt><dd>optional: Chromium, Chrome or Brave already installed</dd></div>
-      <div><dt>OS</dt><dd>Windows, macOS and Linux, native</dd></div>
-    </dl>
-  </aside>
-  </div>
-  <p class="fine">Browser tools use the Chrome, Edge, Brave or Chromium you already have. Every release is built and tested on Windows, macOS and Linux. Full guide: <a href="docs/">the docs</a>.</p>
-</section>
-<section id="faq" class="faq" aria-labelledby="faq-title">
-  <h2 id="faq-title" class="strip strip-section">Operator, a question</h2>
-  <div class="faq-list"><details><summary>Which models work?</summary><p>Ollama models (local, or Ollama's cloud after <code>ollama signin</code>), your ChatGPT plan (Go, Plus or Pro), OpenRouter, OpenAI, Anthropic, Groq, DeepSeek, Mistral, the GLM, Kimi and MiniMax coding plans, LM Studio, llama.cpp and anything OpenAI-compatible. It's tuned and tested on qwen3.5:9b; each tab can use a different model.</p></details><details><summary>How much GPU do I need?</summary><p>None, if you use cloud models or your ChatGPT plan. For local models qh sizes the context to whatever GPU you have: about 8 GB runs a 7–9B model like qwen3.5:9b with a 32k context; more memory fits bigger models or longer contexts; smaller cards still work with a shorter context. <code>/tier</code> shows what it picked.</p></details><details><summary>Does anything leave my machine?</summary><p>Not with a local model. qh talks to Ollama on localhost. Only web_fetch and the browser tools reach the internet, and only when the model calls them. If you pick a cloud model, that tab's conversation goes to the provider. In team mode, what you share is encrypted so only your team can read it.</p></details><details><summary>Does it work on Windows?</summary><p>Yes, natively. Install with one PowerShell line. Commands run in Git Bash if you have it, otherwise PowerShell.</p></details><details><summary>Can strangers join my team?</summary><p>No. Only people with push access to the project's GitHub repo can take part, and a message into your session never runs until you allow it.</p></details><details><summary>Can several sessions run at once?</summary><p>Yes, as many tabs as you like, four side by side in the grid. Local sessions share one GPU and take turns; cloud sessions run at the same time.</p></details><details><summary>Why Rust?</summary><p>One 5 MB file to install, a few megabytes of memory, and a UI that stays fast with fifty sessions open, so the GPU and RAM go to the model. The numbers are in "Light on the line" above.</p></details><details><summary>How do I update?</summary><p>qh tells you when a new version is out: the bottom line says "Update available! Run: qh update". It only installs releases signed with the qh release key. Before 0.1.4, run the install command again.</p></details><details><summary>Is it free?</summary><p>Yes. qh is open source under the MIT license. You pay only for any cloud model you choose to use.</p></details></div>
-</section>
-
-</main>
-<div class="cta-band"><p class="cta-line">Plug in your first line.</p><div class="dial"><code>curl -fsSL kesavsabari.github.io/qh/sh | sh</code><button class="copy" type="button" data-copy="curl -fsSL kesavsabari.github.io/qh/sh | sh"><svg aria-hidden="true" viewBox="0 0 20 20"><rect x="6" y="6" width="10" height="11" rx="1.5"/><path d="M4 13V4.5A1.5 1.5 0 0 1 5.5 3H13"/></svg><span>Copy</span></button></div></div>
-
-<footer class="foot">
-  <a class="plate" href="#" aria-label="Back to top"><span>qh</span></a>
-  <p>MIT licensed. <a href="docs/">Docs</a> · <a href="https://github.com/kesavsabari/qh-rs">Source on GitHub</a>.</p>
+<footer id="install" class="reveal" style="position: sticky; bottom: 0; z-index: 0; min-height: 100vh; box-sizing: border-box; background: var(--fbg); color: var(--fink); display: flex; flex-direction: column; justify-content: space-between; gap: 48px; padding: clamp(84px, 12vh, 120px) clamp(20px, 3.2vw, 56px) clamp(28px, 5vh, 48px)">
+<div class="lab" style="color: var(--fsoft)">05 — get a line</div>
+<div class="reveal-in">
+<div style="font-weight: 500; font-size: clamp(56px, 10vw, 200px); line-height: .88; letter-spacing: -0.065em">Plug in your<br>first line<span class="qh-cursor" style="display: inline-block; width: 0.08em; height: 0.7em; background: var(--accent); margin-left: 0.08em"></span></div>
+<div style="margin-top: clamp(36px, 6vh, 64px); display: flex; flex-direction: column; border-top: 1px solid var(--frule)">
+<div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 16px; padding: 18px 0; border-bottom: 1px solid var(--frule)">
+<code class="m" style="font-size: clamp(14px, 1.8vw, 22px); color: var(--fink); overflow-wrap: anywhere"><span style="color: var(--accent)">$</span> curl -fsSL kesavsabari.github.io/qh/sh | sh</code>
+<button class="copy m" type="button" data-copy="curl -fsSL kesavsabari.github.io/qh/sh | sh" style="font-size: 12px; min-height: 44px; padding: 0 18px; border: 1px solid var(--fink); background: transparent; color: var(--fink); cursor: pointer">copy</button>
+</div>
+<div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 16px; padding: 18px 0; border-bottom: 1px solid var(--frule)">
+<code class="m" style="font-size: clamp(13px, 1.4vw, 17px); color: var(--fbody); overflow-wrap: anywhere">windows: irm kesavsabari.github.io/qh | iex</code>
+<button class="copy m" type="button" data-copy="irm kesavsabari.github.io/qh | iex" style="font-size: 12px; min-height: 44px; padding: 0 18px; border: 1px solid var(--fbtn); background: transparent; color: var(--fink); cursor: pointer">copy</button>
+</div>
+</div>
+<p class="m" style="margin: 20px 0 0; font-size: 13px; color: var(--fbody)">then: cd my-project &amp;&amp; qh · works with your ChatGPT plan, Ollama (local or cloud), coding plans or any API key</p>
+</div>
+<div class="lab" style="color: var(--fsoft); display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px; border-top: 1px solid var(--frule2); padding-top: 22px"><span>qh · MIT licensed · windows · macos · linux</span><span><a href="docs/" style="color: var(--flink)">every feature &amp; faq: docs</a> · <a href="https://github.com/kesavsabari/qh-rs" style="color: var(--flink)">github</a> · <a href="#top" style="color: var(--flink)">top ↑</a></span></div>
 </footer>
 
-<script src="board.js?v=17" defer></script>
-<script src="updates.js?v=1" defer></script>
+</div>
+
+<script>
+// copy buttons
+document.querySelectorAll('[data-copy]').forEach(b => b.addEventListener('click', () => {
+  navigator.clipboard.writeText(b.dataset.copy).then(() => { b.textContent = 'copied'; setTimeout(() => (b.textContent = 'copy'), 1600); });
+}));
+// light / dark: the system's until you pick, then remembered
+const html = document.documentElement, tb = document.getElementById('theme');
+const dark = () => html.dataset.theme ? html.dataset.theme === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
+const label = () => { tb.textContent = dark() ? '◑ light' : '◐ dark'; };
+label();
+tb.addEventListener('click', () => { const t = dark() ? 'light' : 'dark'; html.dataset.theme = t; try { localStorage.setItem('qh-theme', t); } catch (e) {} label(); });
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', label);
+// heavy, smooth wheel scrolling: each frame moves 5% of the way to where the wheel asked for
+if (!matchMedia('(prefers-reduced-motion: reduce)').matches) {
+  const se = document.scrollingElement || html;
+  let target = 0, cur = 0, raf = 0;
+  const step = () => {
+    cur += (target - cur) * 0.05;
+    if (Math.abs(target - cur) < 0.5) { cur = target; se.scrollTop = cur; raf = 0; return; }
+    se.scrollTop = cur; raf = requestAnimationFrame(step);
+  };
+  addEventListener('wheel', e => {
+    if (e.ctrlKey || Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;
+    if (!raf) target = cur = se.scrollTop;
+    target = Math.max(0, Math.min(se.scrollHeight - innerHeight, target + e.deltaY * (e.deltaMode === 1 ? 32 : 0.85)));
+    e.preventDefault();
+    if (!raf) raf = requestAnimationFrame(step);
+  }, { passive: false });
+  // links within the page glide too
+  document.querySelectorAll('a[href^="#"]').forEach(a => a.addEventListener('click', e => {
+    const el = a.getAttribute('href') === '#top' ? html : document.querySelector(a.getAttribute('href'));
+    if (!el) return;
+    e.preventDefault();
+    target = el === html ? 0 : Math.min(se.scrollHeight - innerHeight, el.getBoundingClientRect().top + se.scrollTop);
+    cur = se.scrollTop;
+    if (!raf) raf = requestAnimationFrame(step);
+  }));
+}
+</script>
 </body>
 </html>

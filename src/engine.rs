@@ -521,13 +521,13 @@ fn call_locked(hub: &Arc<Hub>, m: &Arc<Member>, msgs: &[Value], schemas: &[Value
         }
     };
     let r = match r {
-        Err(ref e @ (Error::Connect(_) | Error::Limited(..))) if !cfg.fallback_model.is_empty() && !m.cancel.load(Relaxed) => {
-            let what = if matches!(e, Error::Limited(..)) { "is rate-limited" } else { "is unreachable" };
-            let (fp, fm) = crate::providers::parse_model(&cfg.fallback_model);
-            if (fp.as_str(), fm.as_str()) == (provider.as_str(), model.as_str()) {
-                return Err(Error::Other(format!("{} {what}", crate::providers::display(&provider, &model))));
-            }
-            hub.emit(&m.name, Event::Notice(format!("{} {what}, falling back to {}", crate::providers::display(&provider, &model), cfg.fallback_model)));
+        Err(ref e) if outage(e).is_some() && !cfg.fallback_model.is_empty() && !m.cancel.load(Relaxed) => {
+            let what = outage(e).unwrap_or_default();
+            let Some(next) = next_fallback(&cfg.fallback_model, &provider, &model) else {
+                return Err(Error::Other(format!("{} {what}; no fallback_model left to try", crate::providers::display(&provider, &model))));
+            };
+            let (fp, fm) = crate::providers::parse_model(next);
+            hub.emit(&m.name, Event::Notice(format!("{} {what}; {} answers instead", crate::providers::display(&provider, &model), crate::providers::display(&fp, &fm))));
             {
                 let mut s = lock(&m.set);
                 (s.provider, s.model) = (fp, fm);
@@ -566,6 +566,30 @@ fn call_locked(hub: &Arc<Hub>, m: &Arc<Member>, msgs: &[Value], schemas: &[Value
         hub.emit(&m.name, Event::Notice(w));
     }
     Ok(r.msg)
+}
+
+/// Why a call failed in a way another model may not: rate limit, outage (5xx), unreachable.
+fn outage(e: &Error) -> Option<String> {
+    match e {
+        Error::Limited(..) => Some("is rate-limited".into()),
+        Error::Connect(_) => Some("is unreachable".into()),
+        Error::Other(m) => {
+            let l = m.to_lowercase();
+            if let Some(c) = l.strip_prefix("http ").and_then(|r| r.get(..3)).filter(|c| c.starts_with('5')) {
+                return Some(format!("is down (HTTP {c})"));
+            }
+            ["timed out", "connection reset", "connection refused", "unexpected eof", "overloaded"].iter()
+                .any(|k| l.contains(k)).then(|| "is unreachable".into())
+        }
+        Error::Cancelled => None,
+    }
+}
+
+/// The fallback after the model now in use, in config order; the first when it isn't one.
+fn next_fallback<'a>(list: &'a [String], provider: &str, model: &str) -> Option<&'a str> {
+    let same = |f: &String| { let (p, m) = crate::providers::parse_model(f); p == provider && m == model };
+    let from = list.iter().position(same).map_or(0, |i| i + 1);
+    list[from..].iter().find(|f| !same(f)).map(String::as_str)
 }
 
 fn read_only(hub: &Hub, name: &str, a: &Value) -> bool {
@@ -824,5 +848,31 @@ mod guard_tests {
         let out = dispatch(&hub, &m, "write_file", &json!({"path": "src/ok.rs", "content": "// ok"}));
         assert!(root.join("src/ok.rs").exists() && lock(&asked).len() == 3, "{out}");
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod fallback_tests {
+    use super::*;
+
+    #[test]
+    fn outages_and_limits_fall_back_other_errors_do_not() {
+        assert_eq!(outage(&Error::Other("HTTP 503: busy".into())).as_deref(), Some("is down (HTTP 503)"));
+        assert_eq!(outage(&Error::Other("HTTP 500: oops".into())).as_deref(), Some("is down (HTTP 500)"));
+        assert!(outage(&Error::Connect("refused".into())).is_some());
+        assert!(outage(&Error::Other("read: timed out".into())).is_some());
+        assert!(outage(&Error::Limited("slow down".into(), None)).is_some());
+        assert!(outage(&Error::Other("HTTP 400: bad request".into())).is_none());
+        assert!(outage(&Error::Cancelled).is_none());
+    }
+
+    #[test]
+    fn fallbacks_are_walked_in_order_once() {
+        let l = ["b".to_string(), "c".to_string()];
+        assert_eq!(next_fallback(&l, "", "a"), Some("b"));
+        assert_eq!(next_fallback(&l, "", "b"), Some("c"));
+        assert_eq!(next_fallback(&l, "", "c"), None);
+        assert_eq!(next_fallback(&["a".to_string(), "b".to_string()], "", "a"), Some("b"));
+        assert_eq!(next_fallback(&[], "", "a"), None);
     }
 }

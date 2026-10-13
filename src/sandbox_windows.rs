@@ -136,8 +136,8 @@ fn under(p: &Path, root: &Path) -> bool {
 }
 
 /// Toolchains under the profile that commands may read and run (Python/Node/Git installs, cargo,
-/// rustup, scoop shims). Never the profile itself, .ssh, .aws, or AppData\Roaming as a whole.
-const TOOLCHAIN: &[&str] = &[".cargo", ".rustup", ".gitconfig", "scoop", ".pyenv", "AppData/Local/Programs",
+/// rustup, scoop shims, git's own config: git stops on a config file it can't read). Never the profile itself, .ssh, .aws, or AppData\Roaming as a whole.
+const TOOLCHAIN: &[&str] = &[".cargo", ".rustup", ".gitconfig", ".config/git", "scoop", ".pyenv", "AppData/Local/Programs",
     "AppData/Roaming/npm", "AppData/Roaming/nvm", "AppData/Local/Volta"];
 
 /// Every ACE a command needs as (kind, path, is_dir), allows first. Only existing paths; nothing in or
@@ -155,6 +155,11 @@ fn plan(p: &Policy, home: &Path, profile: &Path) -> Vec<(Kind, PathBuf, bool)> {
         if let Ok(m) = path.metadata() {
             if !denied(&path) { v.push((Kind::Read, path, m.is_dir())) }
         }
+    }
+    // cargo locks these on every registry access; the folder they're in stays read-only
+    for f in [".package-cache", ".package-cache-mutate"] {
+        let path = home.join(".cargo").join(f);
+        if path.is_file() && !denied(&path) { v.push((Kind::Write, path, false)) }
     }
     let granted: Vec<PathBuf> = v.iter().map(|g| g.1.clone()).collect();
     for d in &p.deny_read {
@@ -534,6 +539,12 @@ Windows asks for admin once to add two hidden sandbox users. Until then qh asks 
             return fail(&format!("can't start the command as {}{fix}", USERS[i]), e);
         }
         let (process, thread) = unsafe { (OwnedHandle::from_raw_handle(pi.hProcess), OwnedHandle::from_raw_handle(pi.hThread)) };
+        // locked while still suspended: a command already running as this user can't slip in before
+        // the runner locks itself (our handles were opened before, so we keep full access)
+        if let Err(e) = lock([process.as_raw_handle(), thread.as_raw_handle()]) {
+            unsafe { TerminateProcess(process.as_raw_handle(), 1) };
+            return fail("can't protect the runner", e);
+        }
         // the job exists before the runner resumes, so nothing it starts escapes; best effort, since
         // the logon service may have put it in a job that can't nest (old Windows)
         let job = unsafe { CreateJobObjectW(null(), null()) };
@@ -588,13 +599,18 @@ Windows asks for admin once to add two hidden sandbox users. Until then qh asks 
     }
 
     fn lock_self() -> io::Result<()> {
+        lock(unsafe { [GetCurrentProcess(), GetCurrentThread()] })
+    }
+
+    /// SYSTEM gets everything, the owner (the sandbox user) only reads the DACL.
+    fn lock(handles: [HANDLE; 2]) -> io::Result<()> {
         let w = wz("D:P(A;;GA;;;SY)(A;;RC;;;OW)");
         let mut sd: PSECURITY_DESCRIPTOR = null_mut();
         if unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(w.as_ptr(), 1, &mut sd, null_mut()) } == 0 { return Err(last_err()) }
         let _sd = Local(sd);
         let (mut present, mut dacl, mut def) = (0, null_mut(), 0);
         if unsafe { GetSecurityDescriptorDacl(sd, &mut present, &mut dacl, &mut def) } == 0 { return Err(last_err()) }
-        for h in unsafe { [GetCurrentProcess(), GetCurrentThread()] } {
+        for h in handles {
             let e = unsafe { SetSecurityInfo(h, SE_KERNEL_OBJECT, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
                 null_mut(), null_mut(), dacl, null()) };
             if e != ERROR_SUCCESS { return Err(win_err("SetSecurityInfo", e)) }
@@ -988,7 +1004,7 @@ mod tests {
             std::fs::create_dir_all(d).unwrap();
         }
         std::fs::create_dir_all(t.join("elsewhere")).unwrap();
-        for f in [home.join(".cargo/credentials.toml"), proj.join(".git/config"), proj.join(".env"), t.join("elsewhere/.netrc")] {
+        for f in [home.join(".cargo/credentials.toml"), home.join(".cargo/.package-cache"), proj.join(".git/config"), proj.join(".env"), t.join("elsewhere/.netrc")] {
             std::fs::write(f, "x").unwrap();
         }
         let p = Policy {
@@ -1004,6 +1020,7 @@ mod tests {
             (Kind::Write, "proj", true),
             (Kind::Read, "home/.cargo", true),
             (Kind::Read, "home/AppData/Roaming/npm", true),
+            (Kind::Write, "home/.cargo/.package-cache", false),
             (Kind::DenyRead, "home/.cargo/credentials.toml", false),
             (Kind::DenyRead, "proj/.env", false),
             (Kind::DenyRead, "elsewhere/.netrc", false), // outside the profile: Users may read it

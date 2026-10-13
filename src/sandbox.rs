@@ -408,13 +408,15 @@ pub fn unavailable() -> Option<String> {
     Some("no sandbox for this operating system".into())
 }
 
-/// The network a session's commands get: `[sandbox] network`, and the allowlist proxy when it runs
-/// (Windows can't reach it from an AppContainer, so there it means off).
+/// The network a session's commands get: `[sandbox] network`, and the allowlist proxy when it runs.
+/// On Windows the online sandbox user's firewall filters let it reach only the proxy, and only on
+/// one of sandbox_windows::PROXY_PORTS: "open" means the proxy there, and a proxy elsewhere means off.
 fn net(ctx: &Ctx, cfg: &Config) -> Net {
+    let win_port = |p: &u16| !cfg!(windows) || crate::sandbox_windows::PROXY_PORTS.contains(p);
     match (cfg.sandbox_network.as_str(), &ctx.proxy) {
-        ("open", _) => Net::Open,
+        ("open", _) if !cfg!(windows) => Net::Open,
         ("off", _) => Net::Off,
-        (_, Some((port, _))) if !cfg!(windows) => Net::Proxy { port: *port },
+        (_, Some((port, _))) if win_port(port) => Net::Proxy { port: *port },
         _ => Net::Off,
     }
 }
@@ -484,7 +486,7 @@ pub fn run(ctx: &Ctx, cfg: &Config, script: &str, outside: bool, secs: u64, cwd:
         env = proxy_env(port);
     }
     let snap = Snapshot::take(&ctx.root);
-    let r = run_os(&p, ctx, cfg, &prog, &args, &env, secs, cwd);
+    let r = command_os(&p, ctx, cfg, &prog, &args, &env).and_then(|c| crate::platform::run_timeout(c, None, secs, cwd));
     let fixed = snap.restore();
     let (mut o, killed) = r?;
     if !fixed.is_empty() {
@@ -532,20 +534,12 @@ pub fn spawn(ctx: &Ctx, cfg: &Config, script: &str, outside: bool, cwd: &Path)
     if let Net::Proxy { port } = p.net {
         env = proxy_env(port);
     }
-    #[cfg(unix)]
-    {
-        let c = command_os(&p, ctx, cfg, &prog, &args, &env)?;
-        let snap = Snapshot::take(&ctx.root);
-        Ok((go(c)?, Ran::Sandboxed, Some(snap)))
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (p, env, go);
-        Err(std::io::Error::other("background commands can't run in the Windows sandbox yet: run it in the foreground, or unsandboxed"))
-    }
+    let c = command_os(&p, ctx, cfg, &prog, &args, &env)?;
+    let snap = Snapshot::take(&ctx.root);
+    Ok((go(c)?, Ran::Sandboxed, Some(snap)))
 }
 
-#[cfg(unix)]
+/// The sandboxed command for `prog args…`, with `env` added and secrets taken out.
 fn command_os(p: &Policy, ctx: &Ctx, cfg: &Config, prog: &Path, args: &[&str], env: &[(String, String)])
               -> std::io::Result<std::process::Command> {
     #[cfg(target_os = "linux")]
@@ -561,7 +555,9 @@ fn command_os(p: &Policy, ctx: &Ctx, cfg: &Config, prog: &Path, args: &[&str], e
         let a: Vec<&std::ffi::OsStr> = args.iter().map(std::ffi::OsStr::new).collect();
         crate::sandbox_macos::command(p, prog.as_os_str(), &a)
     };
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(windows)]
+    let mut c = { let _ = ctx; crate::sandbox_windows::command(p, prog, args)? };
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     return { let _ = (p, ctx, prog, args); Err(std::io::Error::other("no sandbox for this operating system")) };
     #[allow(unreachable_code)]
     {
@@ -570,50 +566,6 @@ fn command_os(p: &Policy, ctx: &Ctx, cfg: &Config, prog: &Path, args: &[&str], e
             c.env_remove(k);
         }
         Ok(c)
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn run_os(p: &Policy, ctx: &Ctx, cfg: &Config, prog: &Path, args: &[&str], env: &[(String, String)], secs: u64, cwd: &Path)
-          -> std::io::Result<(std::process::Output, bool)> {
-    #[cfg(target_os = "linux")]
-    {
-        let sock = ctx.proxy.as_ref().and_then(|(_, s)| s.clone());
-        let join = crate::sandbox_linux::tab_netns(&ctx.tab, &p.net, sock.as_deref());
-        let Some(mut c) = crate::sandbox_linux::command(p, sock.as_deref(), join, prog, args) else {
-            return Err(std::io::Error::other("the sandbox helper can't run"));
-        };
-        c.envs(env.iter().map(|(k, v)| (k, v)));
-        for k in scrubbed(cfg) {
-            c.env_remove(k);
-        }
-        crate::platform::run_timeout(c, None, secs, cwd)
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = ctx;
-        let a: Vec<&std::ffi::OsStr> = args.iter().map(std::ffi::OsStr::new).collect();
-        let mut c = crate::sandbox_macos::command(p, prog.as_os_str(), &a);
-        c.envs(env.iter().map(|(k, v)| (k, v)));
-        for k in scrubbed(cfg) {
-            c.env_remove(k);
-        }
-        crate::platform::run_timeout(c, None, secs, cwd)
-    }
-    #[cfg(windows)]
-    {
-        let _ = ctx;
-        let gone = scrubbed(cfg);
-        let mut full: Vec<(std::ffi::OsString, std::ffi::OsString)> = std::env::vars_os()
-            .filter(|(k, _)| !gone.iter().any(|g| g.eq_ignore_ascii_case(&k.to_string_lossy()))).collect();
-        full.extend(env.iter().map(|(k, v)| (k.into(), v.into())));
-        let a: Vec<std::ffi::OsString> = args.iter().map(|x| x.into()).collect();
-        crate::sandbox_windows::run_timeout(p, prog, &a, &full, secs, cwd)
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
-    {
-        let _ = (p, ctx, cfg, prog, args, env, secs, cwd);
-        Err(std::io::Error::other("no sandbox for this operating system"))
     }
 }
 
@@ -640,12 +592,17 @@ protected paths aren't guarded, and commands run with your full access.".into();
     #[cfg(target_os = "linux")]
     let os = crate::sandbox_linux::describe();
     #[cfg(not(target_os = "linux"))]
-    let os = match unavailable() { Some(why) => format!("not enforced: {why}"), None => if cfg!(windows) { "AppContainer (QH_SANDBOX_APPCONTAINER=1, experimental)".into() } else { "Seatbelt (sandbox-exec)".into() } };
+    let os = match unavailable() {
+        Some(why) => format!("not enforced: {why}"),
+        None if cfg!(windows) => "sandbox users qh-sbx-off / qh-sbx-on (write-restricted tokens, firewall filters); `qh sandbox remove` undoes them".into(),
+        None => "Seatbelt (sandbox-exec)".into(),
+    };
     let net = match p.net {
         Net::Open => "open ([sandbox] network = \"open\")".to_string(),
         Net::Proxy { port } => format!("through the allowlist proxy on 127.0.0.1:{port}: package registries and git hosts, \
-plus [sandbox] allow_hosts; any other host asks"),
-        Net::Off if cfg!(windows) && cfg.sandbox_network == "allowlist" => "off inside the sandbox (an AppContainer can't reach the local proxy)".into(),
+plus [sandbox] allow_hosts; any other host asks{}", if cfg.sandbox_network == "open" { " (on Windows \"open\" still goes through it)" } else { "" }),
+        Net::Off if cfg!(windows) && cfg.sandbox_network != "off" && ctx.proxy.is_some() =>
+            "off: the proxy isn't on one of the ports the sandbox user may reach (another qh holds them all?)".into(),
         Net::Off if cfg.sandbox_network == "allowlist" => "through the allowlist proxy, started with the first command".into(),
         Net::Off => "off".into(),
     };

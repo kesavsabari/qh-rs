@@ -22,8 +22,11 @@ strip = true
 panic = "abort"
 
 [target.'cfg(windows)'.dependencies]
-# already in the tree via rustix; the AppContainer sandbox (src/sandbox_windows.rs)
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Isolation", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_Threading"] }
+# already in the tree via rustix; the sandbox users (src/sandbox_windows.rs): ACLs, tokens, WFP, DPAPI, UAC
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_NetworkManagement_NetManagement",
+    "Win32_NetworkManagement_WindowsFilteringPlatform", "Win32_Security", "Win32_Security_Authorization",
+    "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_JobObjects",
+    "Win32_System_Registry", "Win32_System_Rpc", "Win32_System_Threading", "Win32_UI_Shell"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2" # already in the tree; the Linux sandbox's syscalls (Landlock, seccomp, namespaces)

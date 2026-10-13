@@ -1,12 +1,16 @@
-//! Native-Windows sandbox for the model's shell commands (safety plan S4, AppContainer spike).
+//! Native-Windows sandbox for the model's shell commands (safety plan S4): two hidden local users.
 //!
-//! Commands run in one AppContainer ("qh.sandbox"). No admin needed, and the OS does the confining:
-//! the container can only open objects whose DACL names its SID (or ALL APPLICATION PACKAGES, which
-//! Windows gives to System32 and Program Files), so the user's home, ~/.ssh included, stays unreadable
-//! unless granted; and without capability SIDs it has no network at all.
-//! Grants are ordinary ACEs for the container SID, added once per path and recorded for `reset()`.
-//! The ACE handling (check-before-set, deny ACEs via SetEntriesInAclW) and the attribute-list wrapper
-//! follow ideas from Codex's codex-rs/windows-sandbox-rs (Apache-2.0); no code is vendored.
+//! `qh sandbox setup` asks for admin once (UAC) and makes the group `qh-sandbox` with two members,
+//! `qh-sbx-off` (no network) and `qh-sbx-on` (only qh's allowlist proxy on 127.0.0.1), as persistent
+//! WFP filters keyed to each user. Their random passwords are kept with DPAPI for the current user.
+//! A command then goes qh → `qh __winsbx` (a launcher, as you: it owns the job that kills the tree)
+//! → `qh __winsbx-in` (CreateProcessWithLogonW, as the sandbox user) → the shell, under a
+//! write-restricted token whose writes must also pass for the group: so it writes only where qh
+//! granted the group (project, temp, package caches), not everywhere Users may. Your profile is
+//! closed to other users; secrets inside a grant (or outside the profile) get deny ACEs, and so do
+//! the protected paths. `qh sandbox remove` takes it all back.
+//! The design is Codex's (codex-rs/windows-sandbox-rs, Apache-2.0): sandbox users, WFP filters,
+//! write-restricted tokens, OWNER RIGHTS to keep the runner untouchable. No code is vendored.
 //!
 //! Only the pure helpers (quoting, environment block, choosing what to grant) build on other systems,
 //! for their unit tests.
@@ -15,8 +19,13 @@ use crate::sandbox::Policy;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
-/// What one ACE does for the container. Ordered so allows are applied before the denies that carve
-/// exceptions out of them.
+/// Ports qh's proxy tries first when the sandbox users exist: the online user may reach only these.
+pub const PROXY_PORTS: std::ops::RangeInclusive<u16> = 47610..=47625;
+const GROUP: &str = "qh-sandbox";
+const USERS: [&str; 2] = ["qh-sbx-off", "qh-sbx-on"];
+
+/// What one ACE does for the sandbox group. Ordered so allows are applied before the denies that
+/// carve exceptions out of them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum Kind {
     /// modify (read, write, run, delete) — but not WRITE_DAC, so commands can't edit our ACEs away
@@ -132,8 +141,10 @@ const TOOLCHAIN: &[&str] = &[".cargo", ".rustup", ".gitconfig", "scoop", ".pyenv
     "AppData/Roaming/npm", "AppData/Roaming/nvm", "AppData/Local/Volta"];
 
 /// Every ACE a command needs as (kind, path, is_dir), allows first. Only existing paths; nothing in or
-/// under `deny_read` is granted, and a secret inside a granted folder gets a deny of its own.
-fn plan(p: &Policy, home: &Path) -> Vec<(Kind, PathBuf, bool)> {
+/// under `deny_read` is granted. A secret gets a deny of its own when something granted holds it or
+/// it lies outside `profile` (your real profile is closed to the sandbox users already; elsewhere
+/// Users may read).
+fn plan(p: &Policy, home: &Path, profile: &Path) -> Vec<(Kind, PathBuf, bool)> {
     let denied = |x: &Path| p.deny_read.iter().any(|d| under(x, d));
     let mut v = vec![];
     for w in &p.write {
@@ -148,7 +159,7 @@ fn plan(p: &Policy, home: &Path) -> Vec<(Kind, PathBuf, bool)> {
     let granted: Vec<PathBuf> = v.iter().map(|g| g.1.clone()).collect();
     for d in &p.deny_read {
         if let Ok(m) = d.metadata() {
-            if granted.iter().any(|g| under(d, g)) { v.push((Kind::DenyRead, d.clone(), m.is_dir())) }
+            if granted.iter().any(|g| under(d, g)) || !under(d, profile) { v.push((Kind::DenyRead, d.clone(), m.is_dir())) }
         }
     }
     for pr in &p.protect {
@@ -167,8 +178,27 @@ fn plan(p: &Policy, home: &Path) -> Vec<(Kind, PathBuf, bool)> {
     v
 }
 
+/// A password for a sandbox user from 32 random bytes: every character class, so any policy takes it.
+fn password(r: &[u8; 32]) -> String {
+    const C: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789-_.+=@#%";
+    format!("Qh7#{}", r.iter().map(|b| C[*b as usize % C.len()] as char).collect::<String>())
+}
+
+/// `GIT_CONFIG_*` entries that trust every repo: the project belongs to you, not the sandbox user,
+/// and git refuses another user's repo ("dubious ownership"). Appended after any the caller set.
+fn git_trust(count: Option<&str>) -> Vec<(String, String)> {
+    let n: usize = count.and_then(|c| c.trim().parse().ok()).unwrap_or(0);
+    vec![(format!("GIT_CONFIG_KEY_{n}"), "safe.directory".into()), (format!("GIT_CONFIG_VALUE_{n}"), "*".into()),
+         ("GIT_CONFIG_COUNT".into(), (n + 1).to_string())]
+}
+
+#[cfg(not(windows))]
+pub fn ready() -> bool {
+    false
+}
+
 #[cfg(windows)]
-pub use win::{reset, run_timeout, unavailable};
+pub use win::{admin_main, command, launcher_main, offer_once, ready, remove, reset, runner_main, setup, unavailable};
 
 #[cfg(windows)]
 mod win {
@@ -176,43 +206,51 @@ mod win {
     use crate::sandbox::Net;
     use std::ffi::c_void;
     use std::fs;
-    use std::io::{self, Read, Write};
+    use std::io::{self, Write};
     use std::mem::{size_of_val, zeroed};
     use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
-    use std::os::windows::process::ExitStatusExt;
-    use std::process::{ExitStatus, Output};
     use std::ptr::{self, null, null_mut};
     use std::sync::{Mutex, OnceLock};
-    use std::time::{Duration, Instant};
-    use windows_sys::core::{HRESULT, PWSTR};
-    use windows_sys::Win32::Foundation::{LocalFree, SetHandleInformation, ERROR_ALREADY_EXISTS,
-        ERROR_SUCCESS, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, S_OK, WAIT_OBJECT_0};
-    use windows_sys::Win32::Security::Authorization::{ConvertStringSidToSidW, GetNamedSecurityInfoW,
-        SetEntriesInAclW, SetNamedSecurityInfoW, DENY_ACCESS, EXPLICIT_ACCESS_W, GRANT_ACCESS, NO_MULTIPLE_TRUSTEE,
-        SE_FILE_OBJECT, TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN, TRUSTEE_W};
-    use windows_sys::Win32::Security::Isolation::{CreateAppContainerProfile, DeriveAppContainerSidFromAppContainerName};
-    use windows_sys::Win32::Security::{AddAce, EqualSid, FreeSid, GetAce, InitializeAcl, ACCESS_ALLOWED_ACE, ACE_HEADER,
-        ACL, CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, INHERITED_ACE, INHERIT_ONLY_ACE, NO_INHERITANCE,
-        OBJECT_INHERIT_ACE, PSECURITY_DESCRIPTOR, PSID, SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES};
+    use windows_sys::core::{GUID, PWSTR};
+    use windows_sys::Win32::Foundation::{LocalFree, ERROR_ALIAS_EXISTS, ERROR_CANCELLED, ERROR_SUCCESS, HANDLE,
+        INVALID_HANDLE_VALUE, FWP_E_ALREADY_EXISTS, FWP_E_FILTER_NOT_FOUND, FWP_E_NOT_FOUND,
+        FWP_E_PROVIDER_NOT_FOUND, FWP_E_SUBLAYER_NOT_FOUND};
+    use windows_sys::Win32::NetworkManagement::NetManagement::{NetLocalGroupAdd, NetLocalGroupAddMembers,
+        NetLocalGroupDel, NetUserAdd, NetUserDel, NetUserSetInfo, LOCALGROUP_INFO_1, LOCALGROUP_MEMBERS_INFO_3,
+        NERR_GroupExists, NERR_UserExists, UF_DONT_EXPIRE_PASSWD, UF_PASSWD_CANT_CHANGE, UF_SCRIPT, USER_INFO_1,
+        USER_INFO_1003, USER_PRIV_USER};
+    use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform as wfp;
+    use windows_sys::Win32::Security::Authorization::{ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+        ConvertStringSidToSidW, GetNamedSecurityInfoW, SetEntriesInAclW, SetNamedSecurityInfoW, SetSecurityInfo, DENY_ACCESS,
+        EXPLICIT_ACCESS_W, GRANT_ACCESS, NO_MULTIPLE_TRUSTEE, SE_FILE_OBJECT, SE_KERNEL_OBJECT, TRUSTEE_IS_SID,
+        TRUSTEE_IS_UNKNOWN, TRUSTEE_W};
+    use windows_sys::Win32::Security::Cryptography::{CryptProtectData, CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN,
+        CRYPT_INTEGER_BLOB};
+    use windows_sys::Win32::Security::{AddAce, CreateRestrictedToken, EqualSid, GetAce, GetSecurityDescriptorDacl,
+        GetSecurityDescriptorLength, GetTokenInformation, InitializeAcl, LookupAccountNameW, TokenGroups, TokenUser,
+        ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, DISABLE_MAX_PRIVILEGE,
+        INHERITED_ACE, INHERIT_ONLY_ACE, NO_INHERITANCE, OBJECT_INHERIT_ACE, PROTECTED_DACL_SECURITY_INFORMATION,
+        PSECURITY_DESCRIPTOR, PSID, SID_AND_ATTRIBUTES, TOKEN_ADJUST_DEFAULT, TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE,
+        TOKEN_GROUPS, TOKEN_QUERY, TOKEN_USER, WRITE_RESTRICTED};
     use windows_sys::Win32::Storage::FileSystem::{DELETE, FILE_APPEND_DATA, FILE_DELETE_CHILD, FILE_EXECUTE,
         FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_READ_DATA, FILE_READ_EA,
         FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FILE_WRITE_EA, WRITE_DAC, WRITE_OWNER};
-    use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicAccountingInformation,
-        JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
-        JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE};
-    use windows_sys::Win32::System::Pipes::CreatePipe;
-    use windows_sys::Win32::System::Threading::{CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
-        InitializeProcThreadAttributeList, ResumeThread, TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject,
-        CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT,
-        LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-        PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, STARTF_USESTDHANDLES, STARTUPINFOEXW};
+    use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
+    use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE};
+    use windows_sys::Win32::System::Registry::{RegDeleteKeyValueW, RegSetKeyValueW, HKEY_LOCAL_MACHINE, REG_DWORD};
+    use windows_sys::Win32::System::Threading::{CreateProcessAsUserW, CreateProcessWithLogonW, GetCurrentProcess,
+        GetCurrentThread, GetExitCodeProcess, OpenProcessToken, ResumeThread, TerminateProcess, WaitForSingleObject,
+        CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, INFINITE, PROCESS_INFORMATION,
+        STARTF_USESTDHANDLES, STARTUPINFOW};
+    use windows_sys::Win32::UI::Shell::{GetUserProfileDirectoryW, IsUserAnAdmin, ShellExecuteExW, SEE_MASK_NOASYNC,
+        SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
 
-    const NAME: &str = "qh.sandbox";
     // winnt.h; kept local so windows-sys needn't pull in Win32_System_SystemServices
     const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
     const ACCESS_DENIED_ACE_TYPE: u8 = 1;
-    const SE_GROUP_ENABLED: u32 = 4;
-    const HR_ALREADY_EXISTS: HRESULT = (0x8007_0000 | ERROR_ALREADY_EXISTS) as HRESULT; // HRESULT_FROM_WIN32
+    const SE_GROUP_LOGON_ID: u32 = 0xC000_0000;
+    const RPC_C_AUTHN_DEFAULT: u32 = 0xFFFF_FFFF;
 
     const MODIFY: u32 = FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE;
     const READ_RUN: u32 = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE;
@@ -230,19 +268,11 @@ mod win {
         io::Error::last_os_error()
     }
 
-    fn hr_err(what: &str, hr: HRESULT) -> io::Error {
-        io::Error::other(format!("{what} failed: HRESULT 0x{:08X}", hr as u32))
+    fn win_err(what: &str, e: u32) -> io::Error {
+        io::Error::other(format!("{what} failed: {}", io::Error::from_raw_os_error(e as i32)))
     }
 
-    /// A SID from CreateAppContainerProfile / DeriveAppContainerSidFromAppContainerName.
-    pub(super) struct Sid(pub(super) PSID);
-    impl Drop for Sid {
-        fn drop(&mut self) {
-            unsafe { FreeSid(self.0) };
-        }
-    }
-
-    /// Memory the system LocalAlloc'd for us (security descriptors, ACLs, string SIDs).
+    /// Memory the system LocalAlloc'd for us (security descriptors, ACLs, SIDs, strings).
     struct Local(*mut c_void);
     impl Drop for Local {
         fn drop(&mut self) {
@@ -250,40 +280,101 @@ mod win {
         }
     }
 
-    /// The container's SID, making the profile the first time.
-    fn container_sid() -> io::Result<Sid> {
-        let (name, display) = (wz(NAME), wz("qh sandbox"));
-        let mut sid: PSID = null_mut();
-        // SAFETY: NUL-terminated strings; no capabilities; on success `sid` is ours to FreeSid
-        let hr = unsafe { CreateAppContainerProfile(name.as_ptr(), display.as_ptr(), display.as_ptr(), null(), 0, &mut sid) };
-        match hr {
-            S_OK => Ok(Sid(sid)),
-            HR_ALREADY_EXISTS => derive_sid(),
-            _ => Err(hr_err("CreateAppContainerProfile", hr)),
+    fn sid_from(s: &str) -> io::Result<Local> {
+        let (w, mut sid) = (wz(s), null_mut());
+        // SAFETY: NUL-terminated string; the SID is LocalFree'd by `Local`
+        if unsafe { ConvertStringSidToSidW(w.as_ptr(), &mut sid) } == 0 { return Err(last_err()) }
+        Ok(Local(sid))
+    }
+
+    fn sid_string(sid: PSID) -> io::Result<String> {
+        let mut s: PWSTR = null_mut();
+        if unsafe { ConvertSidToStringSidW(sid, &mut s) } == 0 { return Err(last_err()) }
+        let _f = Local(s.cast());
+        let n = (0..).take_while(|&i| unsafe { *s.add(i) } != 0).count();
+        Ok(String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(s, n) }))
+    }
+
+    /// A local account's or group's SID as a string.
+    fn lookup(name: &str) -> io::Result<String> {
+        let (w, mut sid, mut dom) = (wz(name), vec![0u64; 16], vec![0u16; 256]);
+        let (mut cb, mut cd, mut use_) = ((sid.len() * 8) as u32, dom.len() as u32, 0);
+        if unsafe { LookupAccountNameW(null(), w.as_ptr(), sid.as_mut_ptr().cast(), &mut cb, dom.as_mut_ptr(), &mut cd, &mut use_) } == 0 {
+            return Err(io::Error::other(format!("{name}: {}", last_err())));
         }
+        sid_string(sid.as_mut_ptr().cast())
     }
 
-    /// The SID for our name; it's a hash of the name, so this works with or without the profile.
-    fn derive_sid() -> io::Result<Sid> {
-        let name = wz(NAME);
-        let mut sid: PSID = null_mut();
-        let hr = unsafe { DeriveAppContainerSidFromAppContainerName(name.as_ptr(), &mut sid) };
-        if hr == S_OK { Ok(Sid(sid)) } else { Err(hr_err("DeriveAppContainerSidFromAppContainerName", hr)) }
+    /// Your real profile folder, from the process token (USERPROFILE can be pointed elsewhere).
+    fn profile() -> &'static Path {
+        static P: OnceLock<PathBuf> = OnceLock::new();
+        P.get_or_init(|| {
+            let mut tok = null_mut();
+            let mut buf = vec![0u16; 1024];
+            let mut n = buf.len() as u32;
+            // SAFETY: the token handle is closed by OwnedHandle; buf holds n u16s
+            let ok = unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut tok) } != 0 && {
+                let _t = unsafe { OwnedHandle::from_raw_handle(tok) };
+                (unsafe { GetUserProfileDirectoryW(tok, buf.as_mut_ptr(), &mut n) }) != 0
+            };
+            if !ok { return crate::platform::home() }
+            PathBuf::from(String::from_utf16_lossy(&buf[..buf.iter().position(|&c| c == 0).unwrap_or(0)]))
+        })
     }
 
-    /// Capability SIDs for `net`. Net::Proxy gets none: AppContainer loopback isolation blocks
-    /// 127.0.0.1 too (only a loopback exemption, which needs admin, would open it), so on Windows the
-    /// proxy is unreachable and Proxy means the same as Off.
-    fn caps(net: &Net) -> io::Result<Vec<Local>> {
-        if *net != Net::Open { return Ok(vec![]) }
-        // internetClient, privateNetworkClientServer (well-known capability SIDs)
-        ["S-1-15-3-1", "S-1-15-3-3"].iter().map(|s| {
-            let (w, mut sid) = (wz(s), null_mut());
-            // SAFETY: NUL-terminated string; the SID is LocalFree'd by `Local`
-            if unsafe { ConvertStringSidToSidW(w.as_ptr(), &mut sid) } == 0 { return Err(last_err()) }
-            Ok(Local(sid))
-        }).collect()
+    /// qh's sandbox state in the real profile, whatever LOCALAPPDATA says.
+    fn dir() -> PathBuf {
+        profile().join(r"AppData\Local\qh")
     }
+
+    fn secrets_file() -> PathBuf {
+        dir().join("sandbox-users.dat")
+    }
+
+    pub fn ready() -> bool {
+        secrets_file().is_file()
+    }
+
+    /// (group SID, offline password, online password), from the DPAPI blob.
+    struct Creds { group: String, pw: [String; 2] }
+
+    fn dpapi(data: &[u8], protect: bool) -> io::Result<Vec<u8>> {
+        let inb = CRYPT_INTEGER_BLOB { cbData: data.len() as u32, pbData: data.as_ptr() as *mut u8 };
+        let mut out = CRYPT_INTEGER_BLOB { cbData: 0, pbData: null_mut() };
+        // SAFETY: `inb` points at `data`; `out` is LocalAlloc'd by the call and freed below
+        let ok = unsafe {
+            if protect { CryptProtectData(&inb, null(), null(), null(), null(), CRYPTPROTECT_UI_FORBIDDEN, &mut out) }
+            else { CryptUnprotectData(&inb, null_mut(), null(), null(), null(), CRYPTPROTECT_UI_FORBIDDEN, &mut out) }
+        };
+        if ok == 0 { return Err(last_err()) }
+        let _f = Local(out.pbData.cast());
+        Ok(unsafe { std::slice::from_raw_parts(out.pbData, out.cbData as usize) }.to_vec())
+    }
+
+    fn load() -> io::Result<Creds> {
+        let raw = dpapi(&fs::read(secrets_file())?, false)?;
+        let t = String::from_utf8_lossy(&raw).to_string();
+        let l: Vec<&str> = t.lines().collect();
+        if l.len() < 3 { return Err(io::Error::other("sandbox users: the stored secrets are damaged; run `qh sandbox setup` again")) }
+        Ok(Creds { group: l[0].into(), pw: [l[1].into(), l[2].into()] })
+    }
+
+    /// Why commands can't be sandboxed here, or None once `qh sandbox setup` has run.
+    pub fn unavailable() -> Option<String> {
+        (!ready()).then(|| "not set up on this PC: commands run unsandboxed (the secret, write and environment guards \
+still apply). Run `qh sandbox setup` (asks for admin once) to run them as a locked-down sandbox user.".into())
+    }
+
+    /// Once, the first time qh starts on a PC without the sandbox users: how to set them up.
+    pub fn offer_once() -> Option<String> {
+        let mark = dir().join("sandbox-offered");
+        if ready() || mark.exists() { return None }
+        let _ = fs::create_dir_all(dir()).and_then(|_| fs::write(&mark, ""));
+        Some("Commands run unsandboxed on this PC. `/sandbox setup` (or `qh sandbox setup`) sandboxes them: \
+Windows asks for admin once to add two hidden sandbox users. Until then qh asks before commands.".into())
+    }
+
+    // ---- ACLs: grants for the group, recorded so `remove` can take them back ----
 
     /// The DACL of `path`; the pointer lives as long as the returned descriptor.
     fn read_dacl(path: &Path) -> io::Result<(Local, *mut ACL)> {
@@ -312,7 +403,7 @@ mod win {
 
     /// Does `dacl` already hold an ACE of type `ty` for `sid` covering `mask` and `flags`?
     /// Inherited ones count; inherit-only ones don't apply to the object itself.
-    pub(super) unsafe fn has_ace(dacl: *const ACL, sid: PSID, ty: u8, mask: u32, flags: u32) -> bool {
+    unsafe fn has_ace(dacl: *const ACL, sid: PSID, ty: u8, mask: u32, flags: u32) -> bool {
         if dacl.is_null() { return false }
         for i in 0..(*dacl).AceCount as u32 {
             let mut ace = null_mut();
@@ -356,7 +447,7 @@ mod win {
     }
 
     fn grants_file() -> PathBuf {
-        crate::platform::state_base().join("sandbox-grants.txt")
+        dir().join("sandbox-grants.txt")
     }
 
     fn record(path: &Path) -> io::Result<()> {
@@ -371,13 +462,16 @@ mod win {
 
     fn grant(p: &Policy, sid: PSID) -> io::Result<()> {
         let home = std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_else(crate::platform::home);
+        let mut v = plan(p, &home, profile());
+        // the runner is qh itself, started as the sandbox user: it must be able to run this file
+        if let Ok(exe) = std::env::current_exe() { v.push((Kind::Read, exe, false)) }
         let mut done = DONE.lock().unwrap_or_else(|e| e.into_inner());
-        for (k, path, dir) in plan(p, &home) {
+        for (k, path, dir) in v {
             let key = (k, norm(&path));
             if done.contains(&key) { continue }
             match add_ace(&path, sid, k, dir) {
                 Ok(()) => { done.insert(key); }
-                Err(_) if k == Kind::Read => {} // best effort: that tool just won't run inside
+                Err(_) if k == Kind::Read && dir => {} // best effort: that tool just won't run inside
                 // a deny that didn't land must not run the command; a failed write grant would only confuse
                 Err(e) => return Err(io::Error::new(e.kind(), format!("sandbox: can't set access on {}: {e}", path.display()))),
             }
@@ -385,40 +479,232 @@ mod win {
         Ok(())
     }
 
-    /// Run `program args…` in the AppContainer with `env` (the complete environment block) in `cwd`,
-    /// stdin closed, stdout/stderr captured; kill the whole process tree after `secs`.
-    /// Returns (output, killed) like crate::platform::run_timeout. `cwd` must be inside a grant.
-    pub fn run_timeout(p: &Policy, program: &Path, args: &[OsString], env: &[(OsString, OsString)], secs: u64,
-                       cwd: &Path) -> io::Result<(Output, bool)> {
-        let sid = container_sid()?;
+    /// The command that runs `program args…` as a sandbox user: `qh __winsbx on|off program args…`,
+    /// after the grants `p` needs are in place. The caller adds the environment and runs it.
+    pub fn command(p: &Policy, program: &Path, args: &[&str]) -> io::Result<std::process::Command> {
+        let c = load()?;
+        let sid = sid_from(&c.group)?;
         grant(p, sid.0)?;
-        spawn(&p.net, sid.0, program, args, env, secs, cwd)
+        let mut cmd = std::process::Command::new(std::env::current_exe()?);
+        cmd.arg("__winsbx").arg(if p.net == Net::Off { "off" } else { "on" }).arg(program).args(args);
+        cmd.envs(git_trust(std::env::var("GIT_CONFIG_COUNT").ok().as_deref()));
+        Ok(cmd)
     }
 
-    /// Some(reason) when the AppContainer can't be used here; None when it works. Probed once.
-    pub fn unavailable() -> Option<String> {
-        static U: OnceLock<Option<String>> = OnceLock::new();
-        U.get_or_init(|| {
-            // the spike's answer (CI, 2026-10-12): Git Bash, qh's shell on Windows, dies at start in an
-            // AppContainer (0xc0000142) and PowerShell loses its cmdlets, so it stays opt-in for now
-            if std::env::var("QH_SANDBOX_APPCONTAINER").as_deref() != Ok("1") {
-                return Some("not yet on Windows: commands run unsandboxed (the secret, write and environment guards still \
-apply). An AppContainer can't run Git Bash; sandbox users are planned.".into());
-            }
-            let sys = PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into())).join("System32");
-            let env: Vec<_> = std::env::vars_os().collect();
-            let args = ["/c".into(), "exit 0".into()];
-            // no grants: System32 is open to every AppContainer
-            match container_sid().and_then(|sid| spawn(&Net::Off, sid.0, &sys.join("cmd.exe"), &args, &env, 30, &sys)) {
-                Ok((o, false)) if o.status.success() => None,
-                Ok((o, killed)) => Some(format!("AppContainer probe {}: {}", if killed { "timed out".into() } else { o.status.to_string() },
-                    String::from_utf8_lossy(&o.stderr).trim())),
-                Err(e) => Some(format!("AppContainer unavailable: {e}")),
-            }
-        }).clone()
+    fn std_handles(si: &mut STARTUPINFOW) {
+        si.cb = size_of::<STARTUPINFOW>() as u32;
+        si.dwFlags = STARTF_USESTDHANDLES;
+        // SAFETY: plain getters; std made these inheritable when it started us
+        unsafe { (si.hStdInput, si.hStdOutput, si.hStdError) = (GetStdHandle(STD_INPUT_HANDLE), GetStdHandle(STD_OUTPUT_HANDLE), GetStdHandle(STD_ERROR_HANDLE)) };
     }
 
-    /// Remove every ACE qh added (for `qh sandbox reset`); returns how many paths were cleaned.
+    fn fail(what: &str, e: impl std::fmt::Display) -> i32 {
+        eprintln!("qh sandbox: {what}: {e}");
+        126
+    }
+
+    /// `qh __winsbx on|off program args…`, as you: start the runner as that sandbox user in a job
+    /// that dies with this process (so a timeout or task_stop takes the whole tree), wait, pass on
+    /// its exit code.
+    pub fn launcher_main(a: &[OsString]) -> i32 {
+        let (Some(which), Some(prog)) = (a.first(), a.get(1)) else { return fail("usage", "qh __winsbx on|off program args…") };
+        let c = match load() { Ok(c) => c, Err(e) => return fail("can't read the sandbox users' secrets", e) };
+        let i = usize::from(which == "on");
+        let Ok(exe) = std::env::current_exe() else { return fail("can't find qh", last_err()) };
+        let mut args: Vec<OsString> = vec!["__winsbx-in".into(), c.group.clone().into(), prog.clone()];
+        args.extend(a[2..].iter().cloned());
+        let mut cmdline = command_line(exe.as_os_str(), &args);
+        let env: Vec<_> = std::env::vars_os().collect();
+        let (envb, cwd, app) = (env_block(&env), wz(plain(&std::env::current_dir().unwrap_or_default())), wz(&exe));
+        let (user, domain, pw) = (wz(USERS[i]), wz("."), wz(&c.pw[i]));
+        let mut si: STARTUPINFOW = unsafe { zeroed() };
+        std_handles(&mut si);
+        let mut pi: PROCESS_INFORMATION = unsafe { zeroed() };
+        // SAFETY: all pointers are to live NUL-terminated buffers; no profile is loaded (faster, and
+        // nothing is left under C:\Users)
+        let ok = unsafe { CreateProcessWithLogonW(user.as_ptr(), domain.as_ptr(), pw.as_ptr(), 0, app.as_ptr(), cmdline.as_mut_ptr(),
+            CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW, envb.as_ptr().cast(), cwd.as_ptr(), &si, &mut pi) };
+        if ok == 0 {
+            let e = last_err();
+            let fix = match e.raw_os_error() {
+                Some(1326 | 1327 | 1331) => " (the sandbox user's login was refused: run `qh sandbox setup` again)",
+                Some(1058) => " (the Secondary Logon service is disabled: set it to Manual in services.msc)",
+                _ => "",
+            };
+            return fail(&format!("can't start the command as {}{fix}", USERS[i]), e);
+        }
+        let (process, thread) = unsafe { (OwnedHandle::from_raw_handle(pi.hProcess), OwnedHandle::from_raw_handle(pi.hThread)) };
+        // the job exists before the runner resumes, so nothing it starts escapes; best effort, since
+        // the logon service may have put it in a job that can't nest (old Windows)
+        let job = unsafe { CreateJobObjectW(null(), null()) };
+        let _job = (!job.is_null()).then(|| unsafe { OwnedHandle::from_raw_handle(job) });
+        if !job.is_null() {
+            let mut lim: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { zeroed() };
+            lim.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            unsafe {
+                SetInformationJobObject(job, JobObjectExtendedLimitInformation, ptr::from_ref(&lim).cast(), size_of_val(&lim) as u32);
+                AssignProcessToJobObject(job, process.as_raw_handle());
+            }
+        }
+        if unsafe { ResumeThread(thread.as_raw_handle()) } == u32::MAX {
+            unsafe { TerminateProcess(process.as_raw_handle(), 1) };
+            return fail("can't resume the runner", last_err());
+        }
+        let mut code = 1u32;
+        unsafe {
+            WaitForSingleObject(process.as_raw_handle(), INFINITE);
+            GetExitCodeProcess(process.as_raw_handle(), &mut code);
+        }
+        code as i32
+    }
+
+    /// `qh __winsbx-in <group sid> program args…`, as the sandbox user: run the command under a
+    /// write-restricted copy of this token, wait, pass on its exit code.
+    pub fn runner_main(a: &[OsString]) -> i32 {
+        let (Some(group), Some(prog)) = (a.first(), a.get(1)) else { return fail("usage", "qh __winsbx-in sid program args…") };
+        // the command runs as the same user: without this it could open this (unrestricted) process
+        // and write through it. OWNER RIGHTS limits the owner to reading the DACL, so it can't be undone.
+        if let Err(e) = lock_self() { return fail("can't protect the runner", e) }
+        let token = match restricted(&group.to_string_lossy()) { Ok(t) => t, Err(e) => return fail("can't make the restricted token", e) };
+        let mut cmdline = command_line(prog, &a[2..]);
+        let p = PathBuf::from(prog);
+        let app = p.is_absolute().then(|| wz(&p)); // else CreateProcess looks on PATH
+        let env: Vec<_> = std::env::vars_os().collect();
+        let envb = env_block(&env);
+        let mut si: STARTUPINFOW = unsafe { zeroed() };
+        std_handles(&mut si);
+        let mut pi: PROCESS_INFORMATION = unsafe { zeroed() };
+        // SAFETY: live NUL-terminated buffers; the token is ours; inherits only std handles (all qh has here)
+        let ok = unsafe { CreateProcessAsUserW(token.as_raw_handle(), app.as_ref().map_or(null(), |a| a.as_ptr()), cmdline.as_mut_ptr(),
+            null(), null(), 1, CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW, envb.as_ptr().cast(), null(), &si, &mut pi) };
+        if ok == 0 { return fail(&format!("can't start {}", p.display()), last_err()) }
+        let (process, _thread) = unsafe { (OwnedHandle::from_raw_handle(pi.hProcess), OwnedHandle::from_raw_handle(pi.hThread)) };
+        let mut code = 1u32;
+        unsafe {
+            WaitForSingleObject(process.as_raw_handle(), INFINITE);
+            GetExitCodeProcess(process.as_raw_handle(), &mut code);
+        }
+        code as i32
+    }
+
+    fn lock_self() -> io::Result<()> {
+        let w = wz("D:P(A;;GA;;;SY)(A;;RC;;;OW)");
+        let mut sd: PSECURITY_DESCRIPTOR = null_mut();
+        if unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(w.as_ptr(), 1, &mut sd, null_mut()) } == 0 { return Err(last_err()) }
+        let _sd = Local(sd);
+        let (mut present, mut dacl, mut def) = (0, null_mut(), 0);
+        if unsafe { GetSecurityDescriptorDacl(sd, &mut present, &mut dacl, &mut def) } == 0 { return Err(last_err()) }
+        for h in unsafe { [GetCurrentProcess(), GetCurrentThread()] } {
+            let e = unsafe { SetSecurityInfo(h, SE_KERNEL_OBJECT, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                null_mut(), null_mut(), dacl, null()) };
+            if e != ERROR_SUCCESS { return Err(win_err("SetSecurityInfo", e)) }
+        }
+        Ok(())
+    }
+
+    /// TokenUser / TokenGroups into a u64-aligned buffer.
+    fn token_info(tok: HANDLE, class: i32) -> io::Result<Vec<u64>> {
+        let mut n = 0;
+        unsafe { GetTokenInformation(tok, class, null_mut(), 0, &mut n) };
+        let mut buf = vec![0u64; (n as usize).div_ceil(8).max(1)];
+        if unsafe { GetTokenInformation(tok, class, buf.as_mut_ptr().cast(), n, &mut n) } == 0 { return Err(last_err()) }
+        Ok(buf)
+    }
+
+    /// This process's token, write-restricted to the sandbox group, the user, the logon session and
+    /// Everyone (the NUL device and other such objects), with no privileges but traverse.
+    fn restricted(group: &str) -> io::Result<OwnedHandle> {
+        let mut tok = null_mut();
+        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY | TOKEN_ADJUST_DEFAULT, &mut tok) } == 0 {
+            return Err(last_err());
+        }
+        let tok = unsafe { OwnedHandle::from_raw_handle(tok) };
+        let (user, groups) = (token_info(tok.as_raw_handle(), TokenUser)?, token_info(tok.as_raw_handle(), TokenGroups)?);
+        let (g, everyone) = (sid_from(group)?, sid_from("S-1-1-0")?);
+        let mut sids = vec![g.0, everyone.0, unsafe { (*(user.as_ptr() as *const TOKEN_USER)).User.Sid }];
+        // SAFETY: TOKEN_GROUPS with GroupCount entries, inside `groups`
+        unsafe {
+            let tg = groups.as_ptr() as *const TOKEN_GROUPS;
+            let list = std::slice::from_raw_parts((*tg).Groups.as_ptr(), (*tg).GroupCount as usize);
+            sids.extend(list.iter().filter(|x| x.Attributes & SE_GROUP_LOGON_ID == SE_GROUP_LOGON_ID).map(|x| x.Sid));
+        }
+        let mut sa: Vec<SID_AND_ATTRIBUTES> = sids.iter().map(|&s| SID_AND_ATTRIBUTES { Sid: s, Attributes: 0 }).collect();
+        let mut out = null_mut();
+        if unsafe { CreateRestrictedToken(tok.as_raw_handle(), DISABLE_MAX_PRIVILEGE | WRITE_RESTRICTED, 0, null(), 0, null(),
+            sa.len() as u32, sa.as_mut_ptr(), &mut out) } == 0 { return Err(last_err()) }
+        Ok(unsafe { OwnedHandle::from_raw_handle(out) })
+    }
+
+    // ---- setup and remove ----
+
+    fn is_admin() -> bool {
+        unsafe { IsUserAnAdmin() != 0 }
+    }
+
+    /// Run `qh __winsbx-admin <args>` elevated (the UAC prompt) and wait; its exit code.
+    fn elevated(args: &str) -> io::Result<i32> {
+        let (verb, exe, params) = (wz("runas"), wz(std::env::current_exe()?), wz(format!("__winsbx-admin {args}")));
+        let mut sei: SHELLEXECUTEINFOW = unsafe { zeroed() };
+        sei.cbSize = size_of::<SHELLEXECUTEINFOW>() as u32;
+        sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC;
+        (sei.lpVerb, sei.lpFile, sei.lpParameters, sei.nShow) = (verb.as_ptr(), exe.as_ptr(), params.as_ptr(), 0);
+        if unsafe { ShellExecuteExW(&mut sei) } == 0 {
+            let e = last_err();
+            return Err(if e.raw_os_error() == Some(ERROR_CANCELLED as i32) { io::Error::other("the admin prompt was declined") } else { e });
+        }
+        if sei.hProcess.is_null() || sei.hProcess == INVALID_HANDLE_VALUE { return Err(io::Error::other("no admin process to wait for")) }
+        let h = unsafe { OwnedHandle::from_raw_handle(sei.hProcess) };
+        let mut code = 1u32;
+        unsafe {
+            WaitForSingleObject(h.as_raw_handle(), INFINITE);
+            GetExitCodeProcess(h.as_raw_handle(), &mut code);
+        }
+        Ok(code as i32)
+    }
+
+    /// The admin step for `setup`/`remove`, here if we already are admin, else through UAC. Its errors
+    /// come back in `<dir>\sandbox-admin.log` (an elevated window closes before anyone reads it).
+    fn as_admin(what: &str) -> Result<(), String> {
+        let log = dir().join("sandbox-admin.log");
+        let _ = fs::remove_file(&log);
+        let arg = format!("{what} \"{}\"", dir().display());
+        let code = if is_admin() { admin_main(&[what.into(), dir().into_os_string()]) } else { elevated(&arg).map_err(|e| e.to_string())? };
+        let msg = fs::read_to_string(&log).unwrap_or_default();
+        let _ = fs::remove_file(&log);
+        if code == 0 { Ok(()) } else { Err(if msg.trim().is_empty() { format!("the admin step failed (exit {code})") } else { msg.trim().into() }) }
+    }
+
+    /// `qh sandbox setup`: make (or repair) the sandbox users. Safe to run again: passwords are renewed.
+    pub fn setup() -> Result<String, String> {
+        let d = dir();
+        fs::create_dir_all(&d).map_err(|e| e.to_string())?;
+        let pw = [password(&crate::oauth::random()), password(&crate::oauth::random())];
+        // the passwords go to the admin step in a file in your own profile (other users can't read
+        // it), which it deletes; the command line would show them to every process
+        let hand = d.join("sandbox-setup.tmp");
+        fs::write(&hand, format!("{}\n{}\n", pw[0], pw[1])).map_err(|e| e.to_string())?;
+        let r = as_admin("setup");
+        let _ = fs::remove_file(&hand);
+        r?;
+        let group = lookup(GROUP).map_err(|e| e.to_string())?;
+        let blob = dpapi(format!("{group}\n{}\n{}\n", pw[0], pw[1]).as_bytes(), true).map_err(|e| e.to_string())?;
+        fs::write(secrets_file(), blob).map_err(|e| e.to_string())?;
+        DONE.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        Ok(format!("sandbox users ready: commands now run as {} (no network) or {} (only qh's allowlist proxy), \
+writing only in the project, temp and package caches. Restart qh for auto mode. `qh sandbox remove` undoes it.", USERS[0], USERS[1]))
+    }
+
+    /// `qh sandbox remove`: the ACEs, the users and group, the firewall filters, the stored secrets.
+    pub fn remove() -> Result<String, String> {
+        let n = reset().map_err(|e| format!("taking back folder permissions: {e}"))?;
+        as_admin("remove")?;
+        for f in [secrets_file(), dir().join("sandbox-offered")] {
+            let _ = fs::remove_file(f);
+        }
+        Ok(format!("removed the sandbox users, their firewall filters and stored passwords, and their access to {n} folders"))
+    }
+
+    /// Remove every ACE qh gave the sandbox group (`qh sandbox reset`); how many paths were cleaned.
     /// Paths that fail stay listed so a later reset can retry them.
     pub fn reset() -> io::Result<usize> {
         let f = grants_file();
@@ -427,7 +713,8 @@ apply). An AppContainer can't run Git Bash; sandbox users are planned.".into());
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
             Err(e) => return Err(e),
         };
-        let sid = derive_sid()?;
+        let group = load().map(|c| c.group).or_else(|_| lookup(GROUP))?;
+        let sid = sid_from(&group)?;
         let (mut seen, mut n, mut left) = (std::collections::BTreeSet::new(), 0, String::new());
         for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
             if !seen.insert(line.to_lowercase()) { continue }
@@ -471,267 +758,184 @@ apply). An AppContainer can't run Git Bash; sandbox users are planned.".into());
         Ok(true)
     }
 
-    /// A PROC_THREAD_ATTRIBUTE_LIST in a pointer-aligned buffer.
-    struct AttrList(Vec<usize>);
-    impl AttrList {
-        fn new(n: u32) -> io::Result<Self> {
-            let mut size = 0;
-            // SAFETY: a null list only asks for the size (that call reports ERROR_INSUFFICIENT_BUFFER)
-            unsafe { InitializeProcThreadAttributeList(null_mut(), n, 0, &mut size) };
-            let mut buf = vec![0usize; size.div_ceil(size_of::<usize>()).max(1)];
-            if unsafe { InitializeProcThreadAttributeList(buf.as_mut_ptr().cast(), n, 0, &mut size) } == 0 {
-                return Err(last_err());
-            }
-            Ok(AttrList(buf))
-        }
-        fn ptr(&mut self) -> LPPROC_THREAD_ATTRIBUTE_LIST {
-            self.0.as_mut_ptr().cast()
-        }
-        /// SAFETY: `v` (n bytes) must stay alive and unmoved until CreateProcessW returns.
-        unsafe fn set(&mut self, attr: u32, v: *const c_void, n: usize) -> io::Result<()> {
-            if UpdateProcThreadAttribute(self.ptr(), 0, attr as usize, v, n, null_mut(), null()) == 0 { return Err(last_err()) }
-            Ok(())
-        }
-    }
-    impl Drop for AttrList {
-        fn drop(&mut self) {
-            unsafe { DeleteProcThreadAttributeList(self.ptr()) };
-        }
-    }
-
-    fn owned(h: HANDLE) -> io::Result<OwnedHandle> {
-        if h.is_null() || h == INVALID_HANDLE_VALUE { return Err(last_err()) }
-        Ok(unsafe { OwnedHandle::from_raw_handle(h) })
-    }
-
-    /// An anonymous pipe as (read, write); neither end inheritable yet.
-    fn pipe() -> io::Result<(OwnedHandle, OwnedHandle)> {
-        let (mut r, mut w) = (null_mut(), null_mut());
-        if unsafe { CreatePipe(&mut r, &mut w, null(), 0) } == 0 { return Err(last_err()) }
-        Ok(unsafe { (OwnedHandle::from_raw_handle(r), OwnedHandle::from_raw_handle(w)) })
-    }
-
-    /// Jobs whose processes outlived their command (background jobs). Closing a job kills what's in it
-    /// (KILL_ON_JOB_CLOSE), so they live until qh exits, like the process groups on Linux mostly do.
-    static KEEP: Mutex<Vec<OwnedHandle>> = Mutex::new(Vec::new());
-
-    fn drain(f: fs::File) -> std::sync::mpsc::Receiver<Option<Vec<u8>>> {
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let (mut f, mut buf) = (f, [0u8; 8192]);
-            while let Ok(n) = f.read(&mut buf) {
-                if n == 0 { break }
-                let _ = tx.send(Some(buf[..n].to_vec()));
-            }
-            let _ = tx.send(None);
-        });
-        rx
-    }
-
-    fn spawn(net: &Net, sid: PSID, program: &Path, args: &[OsString], env: &[(OsString, OsString)], secs: u64,
-             cwd: &Path) -> io::Result<(Output, bool)> {
-        let caps = caps(net)?;
-        let mut sa: Vec<SID_AND_ATTRIBUTES> = caps.iter().map(|c| SID_AND_ATTRIBUTES { Sid: c.0, Attributes: SE_GROUP_ENABLED }).collect();
-        let sc = SECURITY_CAPABILITIES { AppContainerSid: sid, Capabilities: if sa.is_empty() { null_mut() } else { sa.as_mut_ptr() },
-            CapabilityCount: sa.len() as u32, Reserved: 0 };
-        let (out_r, out_w) = pipe()?;
-        let (err_r, err_w) = pipe()?;
-        let nul: OwnedHandle = fs::File::open("NUL")?.into(); // stdin: EOF at once
-        let inherit: [HANDLE; 3] = [nul.as_raw_handle(), out_w.as_raw_handle(), err_w.as_raw_handle()];
-
-        // the job exists before the process, which starts suspended, so no child can escape it
-        let job = owned(unsafe { CreateJobObjectW(null(), null()) })?;
-        let mut lim: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { zeroed() };
-        lim.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        if unsafe { SetInformationJobObject(job.as_raw_handle(), JobObjectExtendedLimitInformation,
-            ptr::from_ref(&lim).cast(), size_of_val(&lim) as u32) } == 0 { return Err(last_err()) }
-
-        let mut attrs = AttrList::new(2)?;
-        // SAFETY: `sc`, `sa` (via sc.Capabilities) and `inherit` outlive CreateProcessW below
-        unsafe {
-            attrs.set(PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, ptr::from_ref(&sc).cast(), size_of_val(&sc))?;
-            // only these three handles reach the child, whatever else is inheritable in qh right now
-            attrs.set(PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherit.as_ptr().cast(), size_of_val(&inherit))?;
-        }
-        for h in inherit {
-            if unsafe { SetHandleInformation(h, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) } == 0 { return Err(last_err()) }
-        }
-        let mut si: STARTUPINFOEXW = unsafe { zeroed() };
-        si.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
-        si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
-        (si.StartupInfo.hStdInput, si.StartupInfo.hStdOutput, si.StartupInfo.hStdError) = (inherit[0], inherit[1], inherit[2]);
-        si.lpAttributeList = attrs.ptr();
-        let prog = plain(program);
-        let mut cmdline = command_line(prog.as_os_str(), args);
-        let app = prog.is_absolute().then(|| wz(&prog)); // else CreateProcessW searches for it
-        let (envb, dir) = (env_block(env), wz(plain(cwd)));
-        let mut pi: PROCESS_INFORMATION = unsafe { zeroed() };
-        // SAFETY: all pointers are to live, NUL-terminated buffers; `si` is a STARTUPINFOEXW as
-        // EXTENDED_STARTUPINFO_PRESENT promises
-        let ok = unsafe { CreateProcessW(app.as_ref().map_or(null(), |a| a.as_ptr()), cmdline.as_mut_ptr(), null(), null(), 1,
-            EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW | CREATE_SUSPENDED,
-            envb.as_ptr().cast(), dir.as_ptr(), &si.StartupInfo, &mut pi) };
-        let err = last_err();
-        // the child has its own copies now; ours would keep the pipes open forever
-        drop((attrs, nul, out_w, err_w));
-        if ok == 0 { return Err(err) }
-        let (process, thread) = unsafe { (OwnedHandle::from_raw_handle(pi.hProcess), OwnedHandle::from_raw_handle(pi.hThread)) };
-        let ph = process.as_raw_handle();
-        if unsafe { AssignProcessToJobObject(job.as_raw_handle(), ph) } == 0 || unsafe { ResumeThread(thread.as_raw_handle()) } == u32::MAX {
-            let e = last_err();
-            unsafe { TerminateProcess(ph, 1) };
-            return Err(e);
-        }
-        let (out, errs) = (drain(fs::File::from(out_r)), drain(fs::File::from(err_r)));
-
-        let ms = secs.saturating_mul(1000).min(u32::MAX as u64 - 1) as u32; // u32::MAX is INFINITE
-        let killed = unsafe { WaitForSingleObject(ph, ms) } != WAIT_OBJECT_0;
-        if killed {
-            unsafe {
-                TerminateJobObject(job.as_raw_handle(), 1);
-                WaitForSingleObject(ph, 5000);
-            }
-        }
-        let mut code = 1u32;
-        unsafe { GetExitCodeProcess(ph, &mut code) };
-        if !killed {
-            let mut acct: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { zeroed() };
-            let ok = unsafe { QueryInformationJobObject(job.as_raw_handle(), JobObjectBasicAccountingInformation,
-                ptr::from_mut(&mut acct).cast(), size_of_val(&acct) as u32, null_mut()) };
-            if ok != 0 && acct.ActiveProcesses > 0 { KEEP.lock().unwrap_or_else(|e| e.into_inner()).push(job) }
-        }
-        // a background process left running may hold the pipe open: take what's there and go
-        let collect = |rx: std::sync::mpsc::Receiver<Option<Vec<u8>>>| {
-            let mut v = vec![];
-            let end = Instant::now() + Duration::from_millis(if killed { 300 } else { 2000 });
-            while let Ok(Some(chunk)) = rx.recv_timeout(end.saturating_duration_since(Instant::now())) {
-                v.extend(chunk);
-            }
-            v
+    /// `qh __winsbx-admin setup|remove <state dir>`, elevated. Errors go to `<dir>\sandbox-admin.log`.
+    pub fn admin_main(a: &[OsString]) -> i32 {
+        let (Some(what), Some(d)) = (a.first().and_then(|x| x.to_str()), a.get(1).map(PathBuf::from)) else { return 2 };
+        let r = match what {
+            "setup" => admin_setup(&d),
+            "remove" => admin_remove(),
+            _ => Err(io::Error::other("usage: qh __winsbx-admin setup|remove <dir>")),
         };
-        Ok((Output { status: ExitStatus::from_raw(code), stdout: collect(out), stderr: collect(errs) }, killed))
+        match r {
+            Ok(()) => 0,
+            Err(e) => { let _ = fs::write(d.join("sandbox-admin.log"), e.to_string()); 1 }
+        }
     }
 
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-        use std::process::Command;
+    const HIDE: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\SpecialAccounts\UserList";
 
-        /// grants and reset() are machine-wide: one test at a time
-        static SERIAL: Mutex<()> = Mutex::new(());
-
-        fn sys(exe: &str) -> PathBuf {
-            PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into())).join("System32").join(exe)
+    fn admin_setup(d: &Path) -> io::Result<()> {
+        let hand = d.join("sandbox-setup.tmp");
+        let t = fs::read_to_string(&hand)?;
+        let _ = fs::remove_file(&hand);
+        let pw: Vec<&str> = t.lines().collect();
+        if pw.len() < 2 { return Err(io::Error::other("no passwords handed over")) }
+        let (g, comment) = (wz(GROUP), wz("qh: sandbox users for the model's commands"));
+        let info = LOCALGROUP_INFO_1 { lgrpi1_name: g.as_ptr() as PWSTR, lgrpi1_comment: comment.as_ptr() as PWSTR };
+        let e = unsafe { NetLocalGroupAdd(null(), 1, ptr::from_ref(&info).cast(), null_mut()) };
+        if e != 0 && e != NERR_GroupExists && e != ERROR_ALIAS_EXISTS { return Err(win_err("NetLocalGroupAdd", e)) }
+        let mut sids = vec![];
+        for (u, p) in USERS.iter().zip(&pw) {
+            let (name, pass) = (wz(u), wz(p));
+            let info = USER_INFO_1 { usri1_name: name.as_ptr() as PWSTR, usri1_password: pass.as_ptr() as PWSTR, usri1_password_age: 0,
+                usri1_priv: USER_PRIV_USER, usri1_home_dir: null_mut(), usri1_comment: comment.as_ptr() as PWSTR,
+                usri1_flags: UF_SCRIPT | UF_DONT_EXPIRE_PASSWD | UF_PASSWD_CANT_CHANGE, usri1_script_path: null_mut() };
+            let e = unsafe { NetUserAdd(null(), 1, ptr::from_ref(&info).cast(), null_mut()) };
+            if e == NERR_UserExists {
+                let info = USER_INFO_1003 { usri1003_password: pass.as_ptr() as PWSTR };
+                let e = unsafe { NetUserSetInfo(null(), name.as_ptr(), 1003, ptr::from_ref(&info).cast(), null_mut()) };
+                if e != 0 { return Err(win_err(&format!("resetting {u}'s password"), e)) }
+            } else if e != 0 {
+                return Err(win_err(&format!("NetUserAdd {u}"), e));
+            }
+            let m = LOCALGROUP_MEMBERS_INFO_3 { lgrmi3_domainandname: name.as_ptr() as PWSTR };
+            unsafe { NetLocalGroupAddMembers(null(), g.as_ptr(), 3, ptr::from_ref(&m).cast(), 1) }; // already a member is fine
+            // off the sign-in screen
+            let (k, zero) = (wz(HIDE), 0u32);
+            unsafe { RegSetKeyValueW(HKEY_LOCAL_MACHINE, k.as_ptr(), name.as_ptr(), REG_DWORD, ptr::from_ref(&zero).cast(), 4) };
+            sids.push(lookup(u)?);
         }
+        firewall(&sids[0], &sids[1])
+    }
 
-        /// …\qh-sbx-<pid>-<tag>\{a,b}, canonical like the real policy's paths
-        fn dirs(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
-            let root = std::env::temp_dir().join(format!("qh-sbx-{}-{tag}", std::process::id()));
-            let _ = fs::remove_dir_all(&root);
-            fs::create_dir_all(root.join("a")).unwrap();
-            fs::create_dir_all(root.join("b")).unwrap();
-            let root = fs::canonicalize(root).unwrap();
-            (root.clone(), root.join("a"), root.join("b"))
+    fn admin_remove() -> io::Result<()> {
+        let fw = firewall_remove();
+        for u in USERS {
+            let name = wz(u);
+            unsafe {
+                NetUserDel(null(), name.as_ptr());
+                RegDeleteKeyValueW(HKEY_LOCAL_MACHINE, wz(HIDE).as_ptr(), name.as_ptr());
+            }
         }
+        unsafe { NetLocalGroupDel(null(), wz(GROUP).as_ptr()) };
+        fw
+    }
 
-        /// the caller's environment with TEMP/TMP pointed at `tmp` (the real %TEMP% isn't granted)
-        fn env_with_tmp(tmp: &Path) -> Vec<(OsString, OsString)> {
-            let mut e: Vec<_> = std::env::vars_os().filter(|(k, _)| !k.eq_ignore_ascii_case("TEMP") && !k.eq_ignore_ascii_case("TMP")).collect();
-            e.push(("TEMP".into(), plain(tmp).into()));
-            e.push(("TMP".into(), plain(tmp).into()));
-            e
+    // ---- WFP: per-user firewall filters, persistent across reboots ----
+
+    const PROVIDER: GUID = GUID::from_u128(0x6a1f_3c52_8e0d_4b7a_9f21_57c3_0d4e_a100);
+    const SUBLAYER: GUID = GUID::from_u128(0x6a1f_3c52_8e0d_4b7a_9f21_57c3_0d4e_a101);
+    /// filter keys are FILTER_BASE + 0..N_FILTERS
+    const FILTER_BASE: u128 = 0x6a1f_3c52_8e0d_4b7a_9f21_57c3_0d4e_b000;
+    const N_FILTERS: u128 = 32;
+
+    struct Engine(HANDLE);
+    impl Drop for Engine {
+        fn drop(&mut self) {
+            unsafe { wfp::FwpmEngineClose0(self.0) };
         }
+    }
 
-        fn cmd(p: &Policy, script: &str, cwd: &Path, secs: u64) -> (Output, bool) {
-            run_timeout(p, &sys("cmd.exe"), &["/c".into(), script.into()], &env_with_tmp(cwd), secs, cwd).unwrap()
+    fn fwp(what: &str, e: u32, ok: &[i32]) -> io::Result<()> {
+        if e == 0 || ok.contains(&(e as i32)) { Ok(()) } else { Err(io::Error::other(format!("{what} failed: 0x{e:08X}"))) }
+    }
+
+    /// Open the engine and run `f` in one transaction: all filters or none.
+    fn in_txn(f: impl FnOnce(HANDLE) -> io::Result<()>) -> io::Result<()> {
+        let mut h = null_mut();
+        fwp("FwpmEngineOpen0", unsafe { wfp::FwpmEngineOpen0(null(), RPC_C_AUTHN_DEFAULT, null(), null(), &mut h) }, &[])?;
+        let e = Engine(h);
+        fwp("FwpmTransactionBegin0", unsafe { wfp::FwpmTransactionBegin0(e.0, 0) }, &[])?;
+        match f(e.0) {
+            Ok(()) => fwp("FwpmTransactionCommit0", unsafe { wfp::FwpmTransactionCommit0(e.0) }, &[]),
+            Err(err) => { unsafe { wfp::FwpmTransactionAbort0(e.0) }; Err(err) }
         }
+    }
 
-        fn show(what: &str, o: &Output) -> String {
-            format!("{what}: {} stdout={:?} stderr={:?}", o.status, String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))
-        }
+    fn display(name: &[u16]) -> wfp::FWPM_DISPLAY_DATA0 {
+        wfp::FWPM_DISPLAY_DATA0 { name: name.as_ptr() as PWSTR, description: null_mut() }
+    }
 
-        #[test]
-        fn container_confines_cmd() {
-            let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-            let (root, a, b) = dirs("cmd");
-            fs::write(b.join("secret.txt"), "TOPSECRET").unwrap();
-            fs::create_dir_all(a.join(".git").join("hooks")).unwrap();
-            fs::write(a.join(".git").join("hooks").join("keep"), "k").unwrap();
-            let p = Policy { write: vec![a.clone()], protect: vec![a.join(".git").join("hooks")], ..Default::default() };
+    fn val8(v: u8) -> wfp::FWP_VALUE0 {
+        wfp::FWP_VALUE0 { r#type: wfp::FWP_UINT8, Anonymous: wfp::FWP_VALUE0_0 { uint8: v } }
+    }
 
-            let (o, _) = cmd(&p, "echo x> f.txt", &a, 30);
-            assert!(o.status.success() && a.join("f.txt").is_file(), "{}", show("write A", &o));
-            let (o, _) = cmd(&p, "type f.txt", &a, 30);
-            assert!(o.status.success() && String::from_utf8_lossy(&o.stdout).contains('x'), "{}", show("read A", &o));
-            let (o, _) = cmd(&p, r"echo x> ..\b\f.txt", &a, 30);
-            assert!(!b.join("f.txt").exists(), "{}", show("write B", &o));
-            let (o, _) = cmd(&p, r"type ..\b\secret.txt", &a, 30);
-            assert!(!o.status.success() && !String::from_utf8_lossy(&o.stdout).contains("TOPSECRET"), "{}", show("read B", &o));
-            // protect via deny ACEs didn't hold in the first CI run: reported while the AppContainer is a spike
-            let (o, _) = cmd(&p, r"echo x> .git\hooks\pre-commit", &a, 30);
-            eprintln!("SPIKE protect write blocked: {} ({})", !a.join(".git").join("hooks").join("pre-commit").exists(), show("write protect", &o));
-            let (o, _) = cmd(&p, r"del /q .git\hooks\keep", &a, 30);
-            eprintln!("SPIKE protect delete blocked: {} ({})", a.join(".git").join("hooks").join("keep").exists(), show("delete in protect", &o));
-            let (o, _) = cmd(&p, "ren .git git2", &a, 30);
-            eprintln!("SPIKE protect rename blocked: {} ({})", a.join(".git").join("hooks").is_dir(), show("rename protect's parent", &o));
+    fn val16(v: u16) -> wfp::FWP_VALUE0 {
+        wfp::FWP_VALUE0 { r#type: wfp::FWP_UINT16, Anonymous: wfp::FWP_VALUE0_0 { uint16: v } }
+    }
 
-            let (o, _) = cmd(&p, "curl.exe -s --max-time 5 https://example.com", &a, 30);
-            assert!(!o.status.success(), "{}", show("curl Net::Off", &o));
-            let open = Policy { net: Net::Open, ..p.clone() };
-            let (o, _) = cmd(&open, "curl.exe -s -o NUL -w %{http_code} --max-time 10 https://example.com", &a, 30);
-            eprintln!("SPIKE {}", show("curl Net::Open (expect 200)", &o));
-
-            let t0 = Instant::now();
-            let (_, killed) = cmd(&p, "for /l %i in (1,0,2) do @rem", &a, 2);
-            assert!(killed && t0.elapsed() < Duration::from_secs(20), "timeout: killed={killed} after {:?}", t0.elapsed());
-
-            let (o, killed) = cmd(&p, "for /l %i in (1,1,4000) do @echo 0123456789012345678901234567890123456789012345678", &a, 120);
-            assert!(!killed && o.stdout.len() == 4000 * 51, "big output: {} bytes", o.stdout.len());
-
-            let sid = container_sid().unwrap();
-            assert!(reset().unwrap() >= 2); // A and the protect path at least
-            // .git may have been renamed away above (the protect gap the spike reports)
-            for path in [a.clone(), a.join(".git").join("hooks")].iter().filter(|p| p.exists()) {
-                let (_sd, dacl) = read_dacl(path).unwrap();
-                for ty in [ACCESS_ALLOWED_ACE_TYPE, ACCESS_DENIED_ACE_TYPE] {
-                    assert!(!unsafe { has_ace(dacl, sid.0, ty, 0, 0) }, "ACE left on {}", path.display());
+    /// The offline user: no connection out or in. The online user: out only to loopback on
+    /// PROXY_PORTS. Both may accept connections from loopback (a dev server your browser opens).
+    /// DNS lookups go through the DNS Client service, not the user, so names still resolve.
+    fn firewall(off: &str, on: &str) -> io::Result<()> {
+        use wfp::*;
+        let (connect, accept) = ([FWPM_LAYER_ALE_AUTH_CONNECT_V4, FWPM_LAYER_ALE_AUTH_CONNECT_V6],
+                                 [FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4, FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6]);
+        let name = wz("qh sandbox");
+        in_txn(|h| {
+            let mut provider: FWPM_PROVIDER0 = unsafe { zeroed() };
+            (provider.providerKey, provider.displayData, provider.flags) = (PROVIDER, display(&name), FWPM_PROVIDER_FLAG_PERSISTENT);
+            fwp("FwpmProviderAdd0", unsafe { FwpmProviderAdd0(h, &provider, null_mut()) }, &[FWP_E_ALREADY_EXISTS])?;
+            let mut pk = PROVIDER;
+            let mut sub: FWPM_SUBLAYER0 = unsafe { zeroed() };
+            (sub.subLayerKey, sub.displayData, sub.flags, sub.providerKey, sub.weight) =
+                (SUBLAYER, display(&name), FWPM_SUBLAYER_FLAG_PERSISTENT, &mut pk, 0x8000);
+            fwp("FwpmSubLayerAdd0", unsafe { FwpmSubLayerAdd0(h, &sub, null_mut()) }, &[FWP_E_ALREADY_EXISTS])?;
+            delete_filters(h)?;
+            let mut n = 0u128;
+            for (u, sid) in [off, on].iter().enumerate() {
+                // matches connections made by this account: an SD granting it FWP_ACTRL_MATCH_FILTER
+                let w = wz(format!("O:LSD:(A;;CC;;;{sid})"));
+                let (mut sd, mut len) = (null_mut(), 0);
+                if unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(w.as_ptr(), 1, &mut sd, &mut len) } == 0 { return Err(last_err()) }
+                let _sd = Local(sd);
+                let mut blob = FWP_BYTE_BLOB { size: unsafe { GetSecurityDescriptorLength(sd) }, data: sd.cast() };
+                let mut range = FWP_RANGE0 { valueLow: val16(*PROXY_PORTS.start()), valueHigh: val16(*PROXY_PORTS.end()) };
+                let user = FWPM_FILTER_CONDITION0 { fieldKey: FWPM_CONDITION_ALE_USER_ID, matchType: FWP_MATCH_EQUAL,
+                    conditionValue: FWP_CONDITION_VALUE0 { r#type: FWP_SECURITY_DESCRIPTOR_TYPE, Anonymous: FWP_CONDITION_VALUE0_0 { sd: &mut blob } } };
+                let lo = FWPM_FILTER_CONDITION0 { fieldKey: FWPM_CONDITION_FLAGS, matchType: FWP_MATCH_FLAGS_ALL_SET,
+                    conditionValue: FWP_CONDITION_VALUE0 { r#type: FWP_UINT32, Anonymous: FWP_CONDITION_VALUE0_0 { uint32: FWP_CONDITION_FLAG_IS_LOOPBACK } } };
+                let port = FWPM_FILTER_CONDITION0 { fieldKey: FWPM_CONDITION_IP_REMOTE_PORT, matchType: FWP_MATCH_RANGE,
+                    conditionValue: FWP_CONDITION_VALUE0 { r#type: FWP_RANGE_TYPE, Anonymous: FWP_CONDITION_VALUE0_0 { rangeValue: &mut range } } };
+                // (layer, permit, conditions): in one sublayer the heavier matching filter decides
+                let mut rules: Vec<(GUID, bool, Vec<FWPM_FILTER_CONDITION0>)> = vec![];
+                for l in connect.iter().chain(&accept) { rules.push((*l, false, vec![user])) }
+                for l in accept { rules.push((l, true, vec![user, lo])) }
+                if u == 1 {
+                    for l in connect { rules.push((l, true, vec![user, lo, port])) }
+                }
+                for (layer, permit, mut conds) in rules {
+                    let mut f: FWPM_FILTER0 = unsafe { zeroed() };
+                    f.filterKey = GUID::from_u128(FILTER_BASE + n);
+                    n += 1;
+                    (f.displayData, f.flags, f.providerKey, f.layerKey, f.subLayerKey) =
+                        (display(&name), FWPM_FILTER_FLAG_PERSISTENT, &mut pk, layer, SUBLAYER);
+                    f.weight = val8(if permit { 10 } else { 1 });
+                    (f.numFilterConditions, f.filterCondition) = (conds.len() as u32, conds.as_mut_ptr());
+                    f.action.r#type = if permit { FWP_ACTION_PERMIT } else { FWP_ACTION_BLOCK };
+                    let mut id = 0;
+                    fwp("FwpmFilterAdd0", unsafe { FwpmFilterAdd0(h, &f, null_mut(), &mut id) }, &[])?;
                 }
             }
-            let _ = fs::remove_dir_all(root);
-        }
+            debug_assert!(n <= N_FILTERS);
+            Ok(())
+        })
+    }
 
-        /// The spike's key question: do Git Bash (MSYS2) and PowerShell work inside the container?
-        /// Reports only (run with --nocapture to see it); never fails the suite.
-        #[test]
-        fn spike_shells() {
-            let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-            let (root, a, _) = dirs("shells");
-            let p = Policy { write: vec![a.clone()], ..Default::default() };
-            let bash = ["ProgramFiles", "ProgramW6432"].iter().filter_map(std::env::var_os)
-                .map(|b| PathBuf::from(b).join(r"Git\bin\bash.exe")).find(|b| b.is_file());
-            match bash {
-                Some(bash) => {
-                    let args = ["-c".into(), "echo hi > f.txt && cat f.txt && ls / > /dev/null && git --version && echo BASH-OK".into()];
-                    let r = run_timeout(&p, &bash, &args, &env_with_tmp(&a), 60, &a);
-                    let host = Command::new(&bash).args(&args).current_dir(&a).output().map(|o| o.status.success());
-                    eprintln!("SPIKE git-bash {}: {}", bash.display(), match r {
-                        Ok((o, k)) => format!("works={} killed={k} {}", String::from_utf8_lossy(&o.stdout).contains("BASH-OK"), show("", &o)),
-                        Err(e) => format!("spawn failed: {e}"),
-                    });
-                    eprintln!("SPIKE git-bash outside the container succeeds: {host:?}");
-                }
-                None => eprintln!("SPIKE git-bash: not installed"),
-            }
-            let ps = sys(r"WindowsPowerShell\v1.0\powershell.exe");
-            let args = ["-NoProfile".into(), "-NonInteractive".into(), "-Command".into(),
-                "Set-Content f2.txt hi; Get-Content f2.txt; 'PS-OK'".into()];
-            eprintln!("SPIKE powershell: {}", match run_timeout(&p, &ps, &args, &env_with_tmp(&a), 60, &a) {
-                Ok((o, k)) => format!("works={} killed={k} {}", String::from_utf8_lossy(&o.stdout).contains("PS-OK"), show("", &o)),
-                Err(e) => format!("spawn failed: {e}"),
-            });
-            let _ = reset();
-            let _ = fs::remove_dir_all(root);
+    fn delete_filters(h: HANDLE) -> io::Result<()> {
+        for i in 0..N_FILTERS {
+            let k = GUID::from_u128(FILTER_BASE + i);
+            fwp("FwpmFilterDeleteByKey0", unsafe { wfp::FwpmFilterDeleteByKey0(h, &k) }, &[FWP_E_FILTER_NOT_FOUND, FWP_E_NOT_FOUND])?;
         }
+        Ok(())
+    }
+
+    fn firewall_remove() -> io::Result<()> {
+        in_txn(|h| {
+            delete_filters(h)?;
+            fwp("FwpmSubLayerDeleteByKey0", unsafe { wfp::FwpmSubLayerDeleteByKey0(h, &SUBLAYER) }, &[FWP_E_SUBLAYER_NOT_FOUND, FWP_E_NOT_FOUND])?;
+            fwp("FwpmProviderDeleteByKey0", unsafe { wfp::FwpmProviderDeleteByKey0(h, &PROVIDER) }, &[FWP_E_PROVIDER_NOT_FOUND, FWP_E_NOT_FOUND])
+        })
     }
 }
 
@@ -783,16 +987,18 @@ mod tests {
                   home.join("AppData/Roaming/secretapp"), proj.join(".git/hooks")] {
             std::fs::create_dir_all(d).unwrap();
         }
-        for f in [home.join(".cargo/credentials.toml"), proj.join(".git/config"), proj.join(".env")] {
+        std::fs::create_dir_all(t.join("elsewhere")).unwrap();
+        for f in [home.join(".cargo/credentials.toml"), proj.join(".git/config"), proj.join(".env"), t.join("elsewhere/.netrc")] {
             std::fs::write(f, "x").unwrap();
         }
         let p = Policy {
             write: vec![proj.clone(), t.join("missing")],
-            deny_read: vec![home.join(".ssh"), home.join(".cargo/credentials.toml"), home.join(".rustup"), proj.join(".env")],
+            deny_read: vec![home.join(".ssh"), home.join(".cargo/credentials.toml"), home.join(".rustup"), proj.join(".env"),
+                            t.join("elsewhere/.netrc")],
             protect: vec![proj.join(".git/hooks"), proj.join(".git/config"), proj.join(".qh"), home.join(".bashrc")],
             ..Default::default()
         };
-        let got: Vec<(Kind, String, bool)> = plan(&p, &home).into_iter()
+        let got: Vec<(Kind, String, bool)> = plan(&p, &home, &home).into_iter()
             .map(|(k, path, d)| (k, path.strip_prefix(&t).unwrap().to_string_lossy().replace('\\', "/"), d)).collect();
         let want: Vec<(Kind, String, bool)> = [
             (Kind::Write, "proj", true),
@@ -800,11 +1006,22 @@ mod tests {
             (Kind::Read, "home/AppData/Roaming/npm", true),
             (Kind::DenyRead, "home/.cargo/credentials.toml", false),
             (Kind::DenyRead, "proj/.env", false),
+            (Kind::DenyRead, "elsewhere/.netrc", false), // outside the profile: Users may read it
             (Kind::DenyWrite, "proj/.git/hooks", true),
             (Kind::DenyDelete, "proj/.git", true),
             (Kind::DenyWrite, "proj/.git/config", false),
         ].iter().map(|(k, p, d)| (*k, p.to_string(), *d)).collect();
         assert_eq!(got, want);
         let _ = std::fs::remove_dir_all(&t);
+    }
+
+    #[test]
+    fn sandbox_windows_password_and_git_trust() {
+        let p = password(&[200; 32]);
+        assert!(p.len() == 36 && p.chars().any(|c| c.is_ascii_uppercase()) && p.chars().any(|c| c.is_ascii_lowercase())
+            && p.chars().any(|c| c.is_ascii_digit()) && p.chars().any(|c| !c.is_ascii_alphanumeric()));
+        assert_eq!(git_trust(None)[2], ("GIT_CONFIG_COUNT".into(), "1".into()));
+        let t = git_trust(Some("2"));
+        assert_eq!((t[0].0.as_str(), t[1].1.as_str(), t[2].1.as_str()), ("GIT_CONFIG_KEY_2", "*", "3"));
     }
 }

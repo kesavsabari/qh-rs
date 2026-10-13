@@ -28,6 +28,13 @@ pub struct Proxy {
 /// Start a proxy. `decide(host, port)` is called for every new connection/request before anything is
 /// forwarded, on that connection's thread; it may block for a long time. true = forward, false = refuse.
 pub fn start(decide: Decide) -> io::Result<Proxy> {
+    // Windows' online sandbox user may reach only these ports (its firewall filters)
+    #[cfg(windows)]
+    let l = match crate::sandbox_windows::PROXY_PORTS.filter(|_| crate::sandbox_windows::ready()).find_map(|p| TcpListener::bind(("127.0.0.1", p)).ok()) {
+        Some(l) => l,
+        None => TcpListener::bind("127.0.0.1:0")?,
+    };
+    #[cfg(not(windows))]
     let l = TcpListener::bind("127.0.0.1:0")?;
     let port = l.local_addr()?.port();
     serve(move || l.accept().map(|(s, _)| Box::new(s) as Box<dyn Stream>), decide.clone());

@@ -407,6 +407,12 @@ fn tool_once(args: &[String]) -> i32 {
         if i > 0 {
             println!("--qh-seq--");
         }
+        // the tab's ports the browser may open (forwarded out of its namespace on Linux), for the tests
+        #[cfg(target_os = "linux")]
+        if name == "--tab-ports" {
+            println!("ports {:?}", sandbox_linux::tab_ports(tab));
+            continue;
+        }
         if let Some(why) = sandbox::guard(name, a, &cwd, &cwd, &cfg) {
             println!("refused: it {why}");
             code = 3;

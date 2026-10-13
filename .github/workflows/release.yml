@@ -37,6 +37,13 @@ jobs:
           src=target/${{ matrix.target }}/release/qh
           [ -f "$src.exe" ] && src="$src.exe"
           cp "$src" "${{ matrix.asset }}"
+      # an untagged run (workflow_dispatch) is a test build: keep the binary as a run artifact
+      - uses: actions/upload-artifact@v4
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+          retention-days: 7
       - uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
         with:

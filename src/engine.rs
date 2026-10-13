@@ -740,7 +740,12 @@ fn dispatch(hub: &Arc<Hub>, m: &Arc<Member>, name: &str, args: &Value) -> String
                                      args["to"].as_str().unwrap_or(""), args["deep"].as_bool().unwrap_or(false));
     }
     if name == "ask_model" {
-        // read-only: a question to another model, never asked about
+        // read-only: a question to another model, never asked about. It can't see files: without the
+        // code in `context` it can only guess (seen live: "couldn't tell without inspecting calc.py")
+        if args["context"].as_str().is_none_or(|c| c.trim().is_empty()) {
+            return "error: context is empty. The other model has no tools and sees nothing but what you send: read the \
+relevant files first, then call ask_model again with the code, error or plan pasted into context.".into();
+        }
         return ask_other(hub, m, args["model"].as_str().unwrap_or(""), args["question"].as_str().unwrap_or(""),
                          args["context"].as_str().unwrap_or(""));
     }

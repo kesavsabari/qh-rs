@@ -62,10 +62,11 @@ fn clip(s: &str, n: usize) -> String {
 }
 
 pub fn ask_schema() -> Value {
-    schema("ask_model", "Ask another model for a second opinion when you're stuck or unsure: it sees only your question and \
-context (paste the code, error or plan it needs), has no tools, and answers with agreements, disagreements and risks. \
-model is optional (\"provider:model\"); the default is the configured second model.",
-           &[("question", "string"), ("context", "string"), ("model", "string")], &["question"])
+    schema("ask_model", "Ask another model for a second opinion when you're stuck or unsure. It has no tools and can't see \
+files: it sees only your question and context, so read the relevant files first and paste the code, error or plan it \
+needs into context. It answers with agreements, disagreements and risks. model is optional (\"provider:model\"); the \
+default is the configured second model.",
+           &[("question", "string"), ("context", "string"), ("model", "string")], &["question", "context"])
 }
 
 /// What the fetch model may call: lookups only. Anything else it asks for is refused, never run.

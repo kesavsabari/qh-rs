@@ -210,7 +210,8 @@ or online instead of saying you lack access. Answer directly when no tool is nee
     } else {
         format!("You are a terse coding agent working in {}.
 Use tools to inspect before editing. Prefer edit_file over write_file.
-Keep replies short. When done, say what changed in one or two lines.", cwd.display())
+Keep replies short. When done, say what changed in one or two lines.
+past_sessions lists, searches and reads this folder's earlier sessions (\"last session\", \"what did we do yesterday\").", cwd.display())
     };
     if cfg!(windows) {
         text += &format!("\nThis is Windows; the bash tool runs {}. Use Windows paths.", crate::platform::shell_name());

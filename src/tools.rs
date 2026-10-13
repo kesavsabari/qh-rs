@@ -758,6 +758,8 @@ read more with task_output, stop it with task_stop.{sandbox}"),
         }
         "task_output" => schema(name, "New output of a background task since the last read (its last 2000 lines at most), and whether it still runs. tail_lines keeps only the last n.", &[("id", "string"), ("tail_lines", "integer")], &["id"]),
         "task_stop" => schema(name, "Stop a background task and everything it started.", &[("id", "string")], &["id"]),
+        "past_sessions" => schema(name, "This folder's earlier sessions. No args: list them newest first (id, date, first message). \
+query: search their messages for text, with session ids. id: read that session's conversation (tool steps folded).", &[("query", "string"), ("id", "string")], &[]),
         "grep" => schema(name, "Search files recursively for a regex. Long results are cut: narrow the pattern or path.", &[("pattern", "string"), ("path", "string")], &["pattern"]),
         "web_fetch" => schema(name, "Fetch a URL as plain text (20 s at most; long pages are cut). It doesn't run JavaScript: use the browser tools for pages that need it.", &[("url", "string")], &["url"]),
         "web_search" => schema(name, "Search the web (DuckDuckGo) for numbered results: title, URL, snippet. max_results defaults to 8 (at most 20). \
@@ -781,11 +783,11 @@ pub const PROFILES: [&str; 4] = ["coding", "general", "browser", "all"];
 /// Tool names for a profile; "*webhooks" expands to the configured hooks.
 pub fn profile_tools(profile: &str) -> &'static [&'static str] {
     match profile {
-        "general" => &["read_file", "bash", "task_output", "task_stop", "web_search", "web_fetch", "remember", "skill", "*browser", "*webhooks"],
+        "general" => &["read_file", "bash", "task_output", "task_stop", "web_search", "web_fetch", "remember", "past_sessions", "skill", "*browser", "*webhooks"],
         "browser" => &["read_file", "write_file", "remember", "*browser"],
-        "all" => &["read_file", "write_file", "edit_file", "find_references", "goto_definition", "hover", "rename_symbol", "remember", "todo", "skill",
+        "all" => &["read_file", "write_file", "edit_file", "find_references", "goto_definition", "hover", "rename_symbol", "remember", "past_sessions", "todo", "skill",
                    "bash", "task_output", "task_stop", "grep", "web_search", "web_fetch", "*browser", "*webhooks"],
-        _ => &["read_file", "write_file", "edit_file", "rename_symbol", "find_references", "goto_definition", "hover", "bash", "task_output", "task_stop", "grep", "web_search", "remember", "todo", "skill", "*browser"],
+        _ => &["read_file", "write_file", "edit_file", "rename_symbol", "find_references", "goto_definition", "hover", "bash", "task_output", "task_stop", "grep", "web_search", "remember", "past_sessions", "todo", "skill", "*browser"],
     }
 }
 
@@ -855,6 +857,7 @@ pub fn call(name: &str, a: &Value, cfg: &Config, cwd: &mut PathBuf, lim: &crate:
         "remember" => remember(cwd, a),
         "bash" => bash(cwd, a, cfg, sb),
         "grep" => grep(cwd, a),
+        "past_sessions" => Ok(crate::session::past(&crate::session::dir(), &sb.root, a)),
         "task_output" => crate::bg::output(&sb.tab, sa(a, "id"), a["tail_lines"].as_u64().map(|n| n as usize)),
         "task_stop" => crate::bg::stop(&sb.tab, sa(a, "id")),
         "web_fetch" => web_fetch(a),

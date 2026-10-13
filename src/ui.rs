@@ -598,6 +598,7 @@ fn tool_title(tool: &str, a: &Value) -> String {
         "remember" => format!("✱ remember {}", one(s("fact"), 80)),
         "web_search" => format!("⌕ search {}", one(s("query"), 90)),
         "ask_model" => format!("⇆ ask {} {}", s("model"), one(s("question"), 80)),
+        "fetch" => format!("⇣ fetch {}", one(s("goal"), 90)),
         "web_fetch" | "browse" => format!("↗ {tool} {}", clip(&s("url"), 90)),
         "click" => format!("◉ click [{}]", a["ref"]),
         "type" => format!("⌨ type [{}] \"{}\"{}", a["ref"], one(s("text"), 60),
@@ -777,11 +778,19 @@ impl App {
                     let text = ["text", "question", "task"].iter().find_map(|k| args[*k].as_str()).unwrap_or("");
                     self.log_line(format!("{name} → {to}: {text}"));
                 }
+                // with routing on, each step says which model handled it
+                let mut title = tool_title(&tool, &args);
+                if !self.hub.cfg.fetch_model.is_empty() {
+                    let by = if tool == "fetch" { self.hub.cfg.fetch_model.clone() } else {
+                        self.hub.get(&name).map(|m| { let s = lock(&m.set); crate::providers::display(&s.provider, &s.model) }).unwrap_or_default()
+                    };
+                    title = format!("[{by}] {title}");
+                }
                 let v = self.view(&name);
                 v.streaming = false;
                 // edits show their diff straight away (Ctrl+O folds it); other tools start folded
                 let open = matches!(tool.as_str(), "edit_file" | "write_file");
-                v.push(Item::Tool { title: tool_title(&tool, &args), args: a, result: String::new(), open });
+                v.push(Item::Tool { title, args: a, result: String::new(), open });
             }
             Event::ToolResult { result, .. } => {
                 // a turn's calls are listed together and their results arrive in the same order,

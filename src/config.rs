@@ -31,6 +31,8 @@ pub struct Config {
     pub fallback_model: String,
     /// `[routing] ask_model`: where /ask-other and the ask_model tool go when no model is named
     pub ask_model: String,
+    /// `[routing] fetch_model`: a cheap model that only runs read-only lookups for the main one (off when empty)
+    pub fetch_model: String,
     pub openrouter_key: String,
     pub allow: Vec<String>,
     pub webhooks: Vec<Webhook>,
@@ -140,6 +142,7 @@ pub fn load_defaults() -> Config {
         keep_alive: "30m".into(),
         fallback_model: String::new(),
         ask_model: String::new(),
+        fetch_model: String::new(),
         openrouter_key: String::new(),
         allow: vec![],
         webhooks: vec![],
@@ -291,8 +294,7 @@ pub fn load() -> Config {
 fn routing(c: &mut Config, t: &toml::Table) {
     let Some(r) = t.get("routing").and_then(|v| v.as_table()) else { return };
     let s = |k: &str| r.get(k).and_then(|v| v.as_str()).map(|v| v.trim().to_string()).unwrap_or_default();
-    #[allow(clippy::redundant_closure_call)]
-    { c.ask_model = s("ask_model"); }
+    (c.ask_model, c.fetch_model) = (s("ask_model"), s("fetch_model"));
 }
 
 #[cfg(test)]
@@ -301,9 +303,10 @@ mod tests {
     fn routing_is_off_unless_set() {
         let mut c = super::load_defaults();
         super::routing(&mut c, &"model = \"x\"".parse().unwrap());
-        assert!(c.ask_model.is_empty());
-        super::routing(&mut c, &"[routing]\nask_model = \" openai:gpt-5 \"".parse().unwrap());
-        assert_eq!(c.ask_model, "openai:gpt-5");
+        assert!(c.ask_model.is_empty() && c.fetch_model.is_empty());
+        super::routing(&mut c, &"[routing]\nask_model = \" openai:gpt-5 \"\nfetch_model = \"ollama/qwen3:4b\"".parse().unwrap());
+        assert_eq!((c.ask_model.as_str(), c.fetch_model.as_str()), ("openai:gpt-5", "ollama/qwen3:4b"));
+        assert_eq!(crate::route::model_id(&c.fetch_model), (String::new(), "qwen3:4b".into()));
     }
 
 

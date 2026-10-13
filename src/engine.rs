@@ -349,6 +349,51 @@ pub fn ask_other(hub: &Arc<Hub>, m: &Arc<Member>, model: &str, question: &str, c
     }
 }
 
+/// The `fetch` tool: the fetch model picks lookups for `goal`; their raw outputs, not its words,
+/// go back to the main model. It sees only the lookup tools, and any other call is refused unrun.
+fn fetch(hub: &Arc<Hub>, m: &Arc<Member>, goal: &str) -> String {
+    const ROUNDS: usize = 4;
+    let (p, mo) = crate::route::model_id(&hub.cfg.fetch_model);
+    let who = crate::providers::display(&p, &mo);
+    let schemas = crate::route::fetch_schemas(&lock(&m.set).tools);
+    let mut cwd = m.cwd();
+    let mut msgs = crate::route::fetch_msgs(goal, &cwd);
+    let mut raw = vec![];
+    for _ in 0..ROUNDS {
+        if m.cancel.load(Relaxed) { break }
+        let msg = match call_as(hub, m, Some((&p, &mo)), &msgs, &schemas, true) {
+            Ok(x) => x,
+            Err(e) => { raw.push(format!("(fetch model {who} failed: {e})")); break }
+        };
+        msgs.push(msg.clone());
+        let calls = msg["tool_calls"].as_array().cloned().unwrap_or_default();
+        if calls.is_empty() { break }
+        for c in calls {
+            let name = c["function"]["name"].as_str().unwrap_or("").to_string();
+            let args = parse_args(&c["function"]["arguments"]);
+            let out = if !crate::route::fetch_allowed(&name) || !args.is_object() {
+                format!("error: {name} isn't allowed: lookups only ({})", crate::route::FETCH_TOOLS.join(", "))
+            } else if let Some(why) = crate::sandbox::guard(&name, &args, &cwd, &m.root, &hub.cfg) {
+                format!("error: not here: it {why}")
+            } else {
+                tools::call(&name, &args, &hub.cfg, &mut cwd, &hub.limits(m), &crate::sandbox::Ctx { root: m.root.clone(), proxy: None, tab: m.name.clone() })
+            };
+            // no notices here: the UI pins this result to the fetch line, and a note in between would unpin it
+            if !out.starts_with("error") {
+                raw.push(format!("### {name} {args}\n{out}"));
+            }
+            msgs.push(json!({"role": "tool", "tool_name": name, "content": out}));
+        }
+    }
+    settle(hub, m);
+    if raw.is_empty() {
+        return format!("{who} fetched nothing for this; look it up yourself with read_file / grep.");
+    }
+    let steps: Vec<&str> = raw.iter().filter_map(|r| r.strip_prefix("### ")?.split(' ').next()).collect();
+    format!("{} lookup{} by {who}: {} (raw outputs, its own words dropped)\n\n{}", steps.len(), if steps.len() == 1 { "" } else { "s" },
+            steps.join(", "), raw.join("\n\n"))
+}
+
 /// After a quiet call outside a turn: call() marked the session working.
 fn settle(hub: &Arc<Hub>, m: &Arc<Member>) {
     if !lock(&m.ctl).running {
@@ -674,6 +719,9 @@ fn dispatch(hub: &Arc<Hub>, m: &Arc<Member>, name: &str, args: &Value) -> String
         // read-only: a question to another model, never asked about
         return ask_other(hub, m, args["model"].as_str().unwrap_or(""), args["question"].as_str().unwrap_or(""),
                          args["context"].as_str().unwrap_or(""));
+    }
+    if name == "fetch" && !hub.cfg.fetch_model.is_empty() {
+        return fetch(hub, m, args["goal"].as_str().unwrap_or(""));
     }
     if hub.mode_name() == "plan" && (tools::risky(name, &args, &hub.cfg) || matches!(name, "remember" | "send_message" | "spawn")) {
         return "error: plan mode is read-only. Finish exploring, then reply with a numbered plan; the user switches mode (Shift+Tab) to let you carry it out.".into();

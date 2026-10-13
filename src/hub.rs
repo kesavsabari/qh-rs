@@ -316,6 +316,9 @@ session tests). Messages from other sessions start with [from <name>]. qh saves 
         if profile != "browser" && crate::tier::tier(self.cfg.ctx) != "S" {
             t.push(crate::route::ask_schema());
         }
+        if !self.cfg.fetch_model.is_empty() && profile != "browser" {
+            t.push(crate::route::fetch_schema());
+        }
         t
     }
 

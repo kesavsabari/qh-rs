@@ -1,5 +1,6 @@
 //! A second model in the loop: a second opinion (/ask-other and the ask_model tool), read-only,
-//! with no tools of its own.
+//! with no tools of its own; and, opt-in (`[routing] fetch_model`), a cheap model that only runs
+//! lookups whose raw outputs go to the main model, which decides everything.
 use crate::config::Config;
 use crate::tools::schema;
 use serde_json::{json, Value};
@@ -67,9 +68,50 @@ model is optional (\"provider:model\"); the default is the configured second mod
            &[("question", "string"), ("context", "string"), ("model", "string")], &["question"])
 }
 
+/// What the fetch model may call: lookups only. Anything else it asks for is refused, never run.
+pub const FETCH_TOOLS: [&str; 4] = ["read_file", "grep", "find_references", "web_search"];
+
+pub fn fetch_allowed(name: &str) -> bool {
+    FETCH_TOOLS.contains(&name)
+}
+
+/// The tab's tools the fetch model is shown: the lookups among them.
+pub fn fetch_schemas(all: &[Value]) -> Vec<Value> {
+    all.iter().filter(|t| t["function"]["name"].as_str().is_some_and(fetch_allowed)).cloned().collect()
+}
+
+pub fn fetch_schema() -> Value {
+    schema("fetch", "Have the cheap lookup model gather raw material for you: it runs read_file / grep / find_references / \
+web_search for the goal and you get their raw outputs back, unsummarised; it decides nothing. Use it for broad looking-around \
+(\"where is X handled\", \"read the config loader\"); read a known file yourself.", &[("goal", "string")], &["goal"])
+}
+
+pub fn fetch_msgs(goal: &str, cwd: &Path) -> Vec<Value> {
+    vec![json!({"role": "system", "content": format!("You fetch raw material for another model. Working folder: {}. \
+Call read_file, grep, find_references or web_search to gather what the goal needs, several calls at once if you can. \
+Don't explain or summarise: your words are thrown away, only the tool outputs are passed on. Reply 'done' when you have enough.",
+        cwd.display())}), json!({"role": "user", "content": goal})]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fetch_model_never_gets_a_mutating_tool() {
+        let cfg = crate::config::load_defaults();
+        let all = crate::tools::build("all", &cfg);
+        let names: Vec<String> = fetch_schemas(&all).iter().map(|t| t["function"]["name"].as_str().unwrap().to_string()).collect();
+        assert!(!names.is_empty() && names.iter().all(|n| fetch_allowed(n)), "{names:?}");
+        for n in ["write_file", "edit_file", "rename_symbol", "bash", "remember", "task_stop", "send_message", "spawn", "type", "click",
+                  "tell_team", "ask_model", "fetch", "todo"] {
+            assert!(!fetch_allowed(n), "{n}");
+        }
+        // and every tool it may call is one that never asks: nothing it does changes anything
+        for n in FETCH_TOOLS {
+            assert!(!crate::tools::risky(n, &json!({}), &cfg) && crate::tools::builtin_schema(n).is_some(), "{n}");
+        }
+    }
 
     #[test]
     fn ask_other_takes_model_then_question() {

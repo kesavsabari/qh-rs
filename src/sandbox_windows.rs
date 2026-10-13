@@ -246,9 +246,9 @@ mod win {
     use windows_sys::Win32::System::Registry::{RegDeleteKeyValueW, RegSetKeyValueW, HKEY_LOCAL_MACHINE, REG_DWORD};
     use windows_sys::Win32::System::Threading::{CreateProcessAsUserW, CreateProcessWithLogonW, GetCurrentProcess,
         GetCurrentThread, GetExitCodeProcess, OpenProcessToken, ResumeThread, TerminateProcess, WaitForSingleObject,
-        CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, INFINITE, PROCESS_INFORMATION,
+        CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, INFINITE, LOGON_WITH_PROFILE, PROCESS_INFORMATION,
         STARTF_USESTDHANDLES, STARTUPINFOW};
-    use windows_sys::Win32::UI::Shell::{GetUserProfileDirectoryW, IsUserAnAdmin, ShellExecuteExW, SEE_MASK_NOASYNC,
+    use windows_sys::Win32::UI::Shell::{DeleteProfileW, GetUserProfileDirectoryW, IsUserAnAdmin, ShellExecuteExW, SEE_MASK_NOASYNC,
         SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
 
     // winnt.h; kept local so windows-sys needn't pull in Win32_System_SystemServices
@@ -525,9 +525,9 @@ Windows asks for admin once to add two hidden sandbox users. Until then qh asks 
         let mut si: STARTUPINFOW = unsafe { zeroed() };
         std_handles(&mut si);
         let mut pi: PROCESS_INFORMATION = unsafe { zeroed() };
-        // SAFETY: all pointers are to live NUL-terminated buffers; no profile is loaded (faster, and
-        // nothing is left under C:\Users)
-        let ok = unsafe { CreateProcessWithLogonW(user.as_ptr(), domain.as_ptr(), pw.as_ptr(), 0, app.as_ptr(), cmdline.as_mut_ptr(),
+        // SAFETY: all pointers are to live NUL-terminated buffers. The profile is loaded: without it
+        // Windows' TLS (schannel) has no credentials, so every HTTPS download fails; `remove` deletes it
+        let ok = unsafe { CreateProcessWithLogonW(user.as_ptr(), domain.as_ptr(), pw.as_ptr(), LOGON_WITH_PROFILE, app.as_ptr(), cmdline.as_mut_ptr(),
             CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW, envb.as_ptr().cast(), cwd.as_ptr(), &si, &mut pi) };
         if ok == 0 {
             let e = last_err();
@@ -710,7 +710,7 @@ Windows asks for admin once to add two hidden sandbox users. Until then qh asks 
 writing only in the project, temp and package caches. Restart qh for auto mode. `qh sandbox remove` undoes it.", USERS[0], USERS[1]))
     }
 
-    /// `qh sandbox remove`: the ACEs, the users and group, the firewall filters, the stored secrets.
+    /// `qh sandbox remove`: the ACEs, the users, their profiles and group, the firewall filters, the stored secrets.
     pub fn remove() -> Result<String, String> {
         let n = reset().map_err(|e| format!("taking back folder permissions: {e}"))?;
         as_admin("remove")?;
@@ -828,6 +828,8 @@ writing only in the project, temp and package caches. Restart qh for auto mode. 
         let fw = firewall_remove();
         for u in USERS {
             let name = wz(u);
+            // its profile (C:\Users\qh-sbx-…), made by the first command; needs the SID, so before the user goes
+            if let Ok(sid) = lookup(u) { unsafe { DeleteProfileW(wz(&sid).as_ptr(), null(), null()) }; }
             unsafe {
                 NetUserDel(null(), name.as_ptr());
                 RegDeleteKeyValueW(HKEY_LOCAL_MACHINE, wz(HIDE).as_ptr(), name.as_ptr());

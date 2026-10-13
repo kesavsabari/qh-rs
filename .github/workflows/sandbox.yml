@@ -51,6 +51,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit 1 }
           if (Get-LocalUser -Name 'qh-sbx-*') { throw 'sandbox users left behind' }
           if (Get-LocalGroup -Name 'qh-sandbox' -ErrorAction SilentlyContinue) { throw 'sandbox group left behind' }
+          if (Test-Path 'C:\Users\qh-sbx-*') { throw 'sandbox user profiles left behind' }
           $f = netsh wfp show filters file=- | Select-String 'qh sandbox'
           if ($f) { throw "firewall filters left behind: $f" }
           if (Test-Path "$env:USERPROFILE\AppData\Local\qh\sandbox-users.dat") { throw 'stored passwords left behind' }

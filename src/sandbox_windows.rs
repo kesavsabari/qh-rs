@@ -577,6 +577,10 @@ Windows asks for admin once to add two hidden sandbox users. Until then qh asks 
         // and write through it. OWNER RIGHTS limits the owner to reading the DACL, so it can't be undone.
         if let Err(e) = lock_self() { return fail("can't protect the runner", e) }
         let token = match restricted(&group.to_string_lossy(), which != "on") { Ok(t) => t, Err(e) => return fail("can't make the restricted token", e) };
+        // TEMP experiment (QH_WINSBX_DIAG=low): online commands at Low integrity
+        if which == "on" && std::env::var("QH_WINSBX_DIAG").as_deref() == Ok("low") {
+            if let Err(e) = low(&token) { return fail("can't lower the token", e) }
+        }
         let mut cmdline = command_line(prog, &a[3..]);
         let p = PathBuf::from(prog);
         let app = p.is_absolute().then(|| wz(&p)); // else CreateProcess looks on PATH
@@ -654,6 +658,20 @@ Windows asks for admin once to add two hidden sandbox users. Until then qh asks 
         if unsafe { CreateRestrictedToken(tok.as_raw_handle(), flags, 0, null(), 0, null(), n,
             if n == 0 { null_mut() } else { sa.as_mut_ptr() }, &mut out) } == 0 { return Err(last_err()) }
         Ok(unsafe { OwnedHandle::from_raw_handle(out) })
+    }
+
+    /// Lower `token` to Low integrity: it then writes only where a Low label allows it, whatever the
+    /// DACL says (no-write-up), yet stays an ordinary token, so Schannel still serves it.
+    fn low(token: &OwnedHandle) -> io::Result<()> {
+        use windows_sys::Win32::Security::{SetTokenInformation, TokenIntegrityLevel, TOKEN_MANDATORY_LABEL};
+        const SE_GROUP_INTEGRITY: u32 = 0x20;
+        let sid = sid_from("S-1-16-4096")?;
+        let tml = TOKEN_MANDATORY_LABEL { Label: SID_AND_ATTRIBUTES { Sid: sid.0, Attributes: SE_GROUP_INTEGRITY } };
+        let n = size_of::<TOKEN_MANDATORY_LABEL>() as u32 + unsafe { windows_sys::Win32::Security::GetLengthSid(sid.0) };
+        if unsafe { SetTokenInformation(token.as_raw_handle(), TokenIntegrityLevel, ptr::from_ref(&tml).cast(), n) } == 0 {
+            return Err(last_err());
+        }
+        Ok(())
     }
 
     // ---- setup and remove ----

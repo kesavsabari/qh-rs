@@ -326,13 +326,22 @@ fn windows_sandbox_users() {
     let public = format!("C:/Users/Public/qh-redteam-{}", std::process::id());
     let (_, out) = l.bash(&format!("echo x > {public}; mkdir {public}-d; ls {public} {public}-d 2>&1"));
     assert!(!std::path::Path::new(&public).exists() && !std::path::Path::new(&format!("{public}-d")).exists(), "wrote where Users may: {out}");
+    // nor anything new at the top of the system drive or in ProgramData
+    let (root, data) = (format!("C:/qh-redteam-{}", std::process::id()), format!("C:/ProgramData/qh-redteam-{}", std::process::id()));
+    let (_, out) = l.bash(&format!("mkdir {root}; echo x > {root}.txt; mkdir {data} 2>&1"));
+    assert!(![root.clone(), format!("{root}.txt"), data.clone()].iter().any(|p| std::path::Path::new(p).exists()), "wrote in a shared spot: {out}");
     let (_, out) = l.bash("cmd //c \"echo cmd-ok > c.txt\" && cat c.txt && powershell -NoProfile -Command \"Set-Content p.txt ps-ok; Get-Content p.txt\"");
     assert!(out.contains("cmd-ok") && out.contains("ps-ok"), "cmd and PowerShell inside: {out}");
     // direct connections are blocked by the firewall filters; the allowlist proxy works (needs internet)
-    let (_, out) = l.bash("curl -s -m 8 --noproxy '*' -o /dev/null -w 'direct=%{http_code}' https://1.1.1.1; echo; \
-curl -s -m 20 -o /dev/null -w 'proxy=%{http_code}' https://index.crates.io/config.json");
+    // (HTTPS inside can't use Schannel, which refuses the write-restricted token: git and curl are
+    // switched to OpenSSL, Python brings its own)
+    let (_, out) = l.bash("command -v curl; curl -V | head -2; echo \"backend=$CURL_SSL_BACKEND\"; \
+curl -s -m 8 --noproxy '*' -o /dev/null -w 'direct=%{http_code}' https://1.1.1.1; echo; \
+curl -sS -m 20 -o /dev/null -w 'proxy=%{http_code}' https://index.crates.io/config.json; echo; \
+git ls-remote https://github.com/git/git HEAD >/dev/null && echo git-https-ok; \
+python -c \"import urllib.request as u; print('py=%d' % u.urlopen('https://index.crates.io/config.json', timeout=20).status)\"");
     assert!(out.contains("direct=000"), "a direct connection got out: {out}");
-    assert!(out.contains("proxy=200"), "the allowlisted host through the proxy: {out}");
+    assert!(out.contains("proxy=200") && out.contains("git-https-ok"), "HTTPS through the proxy: {out}");
     // a server of yours on loopback (Ollama, a debug port) is out of reach: only the proxy's ports are open
     let host = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = host.local_addr().unwrap().port();

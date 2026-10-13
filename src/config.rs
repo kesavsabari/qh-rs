@@ -143,7 +143,8 @@ pub fn load_defaults() -> Config {
         hooks: vec![],
         mcp: vec![],
         browser_headless: false,
-        mode: "ask".into(),
+        // auto by default where commands run in the OS sandbox; Windows waits for its sandbox
+        mode: if cfg!(windows) { "ask" } else { "auto" }.into(),
         browser_allow_hosts: vec![],
         providers: vec![],
         default_provider: String::new(),
@@ -223,6 +224,8 @@ pub fn load() -> Config {
                 c.sandbox_network = n.to_lowercase();
             }
         }
+        // sandbox off → nothing contains auto mode, so fall back to asking unless mode was set
+        if !c.sandbox && s("mode").is_none() { c.mode = "ask".into() }
         if let Some(p) = t.get("providers").and_then(|v| v.as_table()) {
             c.providers = p.iter().filter_map(|(k, v)| v.as_table().map(|t| (k.clone(), t.clone()))).collect();
         }

@@ -792,7 +792,16 @@ relevant files first, then call ask_model again with the code, error or plan pas
     }
     lock(&m.turn).ckpt.snapshot(name, &args, &cwd);
     let sb = if name == "bash" { hub.sandbox_ctx(m) } else { crate::sandbox::Ctx { root: m.root.clone(), proxy: None, tab: m.name.clone() } };
-    let mut out = tools::call(name, &args, &hub.cfg, &mut cwd, &hub.limits(m), &sb);
+    // `/allow localhost:3000`: addresses the user let this session's browser open
+    let browse: Vec<String> = if crate::browser::TOOLS.contains(&name) {
+        lock(&m.set).allow.iter().filter_map(|r| r.strip_prefix("browse:")).map(String::from).collect()
+    } else { vec![] };
+    let with_browse;
+    let cfg = if browse.is_empty() { &hub.cfg } else {
+        with_browse = { let mut c = hub.cfg.clone(); c.browser_allow_hosts.extend(browse); c };
+        &with_browse
+    };
+    let mut out = tools::call(name, &args, cfg, &mut cwd, &hub.limits(m), &sb);
     if !out.starts_with("error") {
         for t in &touched {
             crate::team::claim(&m.name, &lock(&m.purpose).clone(), t);

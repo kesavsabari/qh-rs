@@ -299,6 +299,26 @@ pub fn take_image() -> Option<String> {
     lock(&SHOT).take()
 }
 
+/// `/allow <address>`: the browser rules for a web address the user lets this session open, or
+/// None when it isn't one (then it's an ordinary rule). localhost and 127.0.0.1 go together.
+pub fn allow_rules(arg: &str) -> Option<Vec<String>> {
+    let a = arg.trim();
+    let rest = a.strip_prefix("http://").or_else(|| a.strip_prefix("https://"));
+    let auth = rest.unwrap_or(a).split(['/', '?', '#']).next().unwrap_or("");
+    let (host, port) = match auth.rsplit_once(':') {
+        Some((h, p)) if !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) => (h, Some(p)),
+        _ => (auth, None),
+    };
+    let named = matches!(host, "localhost" | "127.0.0.1") || host.ends_with(".local") || host.ends_with(".lan")
+        || host.parse::<std::net::Ipv4Addr>().is_ok();
+    // a bare word ("git*", "pytest") stays a command rule; an address is a URL, has a port, or is a known local name
+    if host.is_empty() || host.contains(['*', ' ']) || !(rest.is_some() || port.is_some() || named) {
+        return None;
+    }
+    let hosts: Vec<&str> = if matches!(host, "localhost" | "127.0.0.1") { vec!["localhost", "127.0.0.1"] } else { vec![host] };
+    Some(hosts.iter().map(|h| match port { Some(p) => format!("browse:{h}:{p}"), None => format!("browse:{h}") }).collect())
+}
+
 fn private(host: &str) -> bool {
     if host == "localhost" || [".local", ".internal", ".lan"].iter().any(|s| host.ends_with(s)) {
         return true;
@@ -327,10 +347,10 @@ fn check_url(url: &str, allow: &[String]) -> Option<String> {
         if matches!(host, "localhost" | "127.0.0.1" | "::1") {
             return Some(format!("error: {host}:{port} isn't a server this tab started; the browser opens only those. \
 Start the app's dev server with bash in the background (pick a free port if {port} is taken) and browse that port. \
-To open a server that was already running, the user adds \"localhost:{port}\" to browser_allow_hosts in {}.", cfg.display()));
+To open a server that was already running, the user types `/allow localhost:{port}` (this session) or adds \"localhost:{port}\" to browser_allow_hosts in {}.", cfg.display()));
         }
         return Some(format!("error: {host} is on the local network, which the browser doesn't open unless the user \
-adds \"{host}\" to browser_allow_hosts in {}.", cfg.display()));
+types `/allow {host}` (this session) or adds \"{host}\" to browser_allow_hosts in {}.", cfg.display()));
     }
     None
 }
@@ -556,7 +576,7 @@ pub fn schemas() -> Vec<Value> {
 
 #[cfg(test)]
 mod url_tests {
-    use super::check_url;
+    use super::{allow_rules, check_url};
 
     #[test]
     fn a_port_entry_opens_that_port_only() {
@@ -565,7 +585,17 @@ mod url_tests {
         assert!(check_url("http://localhost:3002/", &allow).is_some(), "another local port stays blocked");
         assert!(check_url("http://localhost/", &allow).is_some(), "port 80 is not 3001");
         let e = check_url("http://localhost:3001/", &[]).unwrap();
-        assert!(e.contains("this tab started") && e.contains("\"localhost:3001\" to browser_allow_hosts"), "{e}");
+        assert!(e.contains("this tab started") && e.contains("/allow localhost:3001") && e.contains("\"localhost:3001\" to browser_allow_hosts"), "{e}");
+        let r = |s: &str| allow_rules(s);
+        assert_eq!(r("localhost:57961"), Some(vec!["browse:localhost:57961".into(), "browse:127.0.0.1:57961".into()]));
+        assert_eq!(r("http://127.0.0.1:8080/app"), Some(vec!["browse:localhost:8080".into(), "browse:127.0.0.1:8080".into()]));
+        assert_eq!(r("printer.local"), Some(vec!["browse:printer.local".into()]));
+        assert_eq!(r("git push*"), None, "a command rule stays one");
+        assert_eq!(r("pytest"), None);
+        assert_eq!(r("net:pypi.org"), None);
+        // what /allow added reaches check_url as browser_allow_hosts
+        let extra: Vec<String> = r("localhost:57961").unwrap().iter().map(|x| x[7..].to_string()).collect();
+        assert!(check_url("http://localhost:57961/", &extra).is_none() && check_url("http://localhost:57962/", &extra).is_some());
         assert!(check_url("http://localhost:9/", &["localhost".to_string()]).is_none(), "a bare host allows every port");
     }
 }

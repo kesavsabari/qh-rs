@@ -69,7 +69,7 @@ const COMMANDS: [(&str, &str); 44] = [
     ("/diff", "show the agent's file changes"), ("/cwd", "this tab's working folder"), ("/think", "thinking on/off, or an effort level"),
     ("/tokens", "context use, tokens and cost"), ("/tier", "this tab's context window"), ("/profile", "tool set: coding, general, browser, all"),
     ("/role", "give this tab a role"), ("/map", "map of sessions and messages"), ("/layout", "tabs or grid"),
-    ("/msg", "message another tab"), ("/sessions", "saved sessions"), ("/allow", "auto-approve rules"), ("/sandbox", "what commands and tools may touch"),
+    ("/msg", "message another tab"), ("/sessions", "saved sessions"), ("/allow", "auto-approve rules; /allow localhost:3000 lets the browser open it"), ("/sandbox", "what commands and tools may touch"),
     ("/tasks", "background tasks; /tasks stop <id>"),
     ("/release", "let held messages through"), ("/pause", "hold automatic messaging"), ("/resume", "resume messaging"),
     ("/mcp", "MCP servers"), ("/team", "your team: start or join; in a team, opens the team room (Ctrl+T)"), ("/relay", "relay server for teammates nothing else reaches"), ("/commands", "your own /commands"), ("/help", "everything"), ("/docs", "open the docs in your browser"), ("/update", "install the newest qh"), ("/project", "switch project (Ctrl+P)"),
@@ -1589,8 +1589,13 @@ impl App {
             }
             "/allow" => {
                 let mut s = lock(&m.set);
-                if !arg.is_empty() {
-                    s.allow.push(arg.into());
+                // a web address (localhost:3000, http://127.0.0.1:8080/x, dev.lan) is for the browser
+                let rules = crate::browser::allow_rules(arg).unwrap_or_else(|| vec![arg.to_string()]);
+                if let Some(first) = rules.first().and_then(|r| r.strip_prefix("browse:")) {
+                    self.note(&a, format!("the browser may open {first} in this tab's session"));
+                }
+                for r in rules.into_iter().filter(|r| !r.is_empty()) {
+                    if !s.allow.contains(&r) { s.allow.push(r) }
                 }
                 let msg = format!("auto-approve: {}", if s.allow.is_empty() { "none".into() } else { s.allow.join(", ") });
                 drop(s);

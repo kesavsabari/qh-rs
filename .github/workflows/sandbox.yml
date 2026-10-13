@@ -55,6 +55,8 @@ jobs:
           $f = netsh wfp show filters file=- | Select-String 'qh sandbox'
           if ($f) { throw "firewall filters left behind: $f" }
           if (Test-Path "$env:USERPROFILE\AppData\Local\qh\sandbox-users.dat") { throw 'stored passwords left behind' }
-          $a = icacls $env:TEMP | Select-String 'qh-sandbox'
-          if ($a) { throw "ACEs left behind on TEMP: $a" }
+          foreach ($d in @($env:TEMP, 'C:\', 'D:\', $env:ProgramData, $env:PUBLIC)) {
+            $a = icacls $d | Select-String 'qh-sandbox|S-1-5-21-'
+            if ($a -match 'qh-sandbox') { throw "ACEs left behind on ${d}: $a" }
+          }
           "removed cleanly"

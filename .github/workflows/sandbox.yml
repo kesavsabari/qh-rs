@@ -41,6 +41,19 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: cargo build --release && ./target/release/qh.exe sandbox setup && ./target/release/qh.exe __tool --status
+      - name: TEMP diagnosis, TLS inside the sandbox
+        if: runner.os == 'Windows'
+        shell: bash
+        continue-on-error: true
+        run: |
+          openssl req -x509 -newkey rsa:2048 -nodes -keyout k.pem -out c.pem -days 1 -subj /CN=localhost 2>/dev/null
+          python -c "import http.server,ssl;s=http.server.HTTPServer(('127.0.0.1',47610),http.server.SimpleHTTPRequestHandler);c=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);c.load_cert_chain('c.pem','k.pem');s.socket=c.wrap_socket(s.socket,server_side=True);s.serve_forever()" &
+          sleep 3
+          C="$(cygpath -w "$(command -v curl)")"
+          echo "host: $(curl -sk -o /dev/null -w '%{http_code}' https://127.0.0.1:47610/)"
+          for m in restricted plain noprofile; do echo "== $m"; QH_WINSBX_DIAG=$m ./target/release/qh.exe __winsbx on "$C" -sk -o NUL -w "code=%{http_code} %{errormsg}" https://127.0.0.1:47610/; echo " exit=$?"; done
+          QH_WINSBX_DIAG=restricted ./target/release/qh.exe __winsbx on "$C" -skv -o NUL https://127.0.0.1:47610/ 2>&1 | tail -8
+          kill %1 || true
       - run: cargo test --release -- --nocapture
         shell: bash
       - name: qh sandbox remove

@@ -527,7 +527,10 @@ Windows asks for admin once to add two hidden sandbox users. Until then qh asks 
         let mut pi: PROCESS_INFORMATION = unsafe { zeroed() };
         // SAFETY: all pointers are to live NUL-terminated buffers. The profile is loaded: without it
         // Windows' TLS (schannel) has no credentials, so every HTTPS download fails; `remove` deletes it
-        let ok = unsafe { CreateProcessWithLogonW(user.as_ptr(), domain.as_ptr(), pw.as_ptr(), LOGON_WITH_PROFILE, app.as_ptr(), cmdline.as_mut_ptr(),
+        // TEMP diagnosis (remove): QH_WINSBX_DIAG=noprofile|plain
+        let diag = std::env::var("QH_WINSBX_DIAG").unwrap_or_default();
+        let lflag = if diag == "noprofile" { 0 } else { LOGON_WITH_PROFILE };
+        let ok = unsafe { CreateProcessWithLogonW(user.as_ptr(), domain.as_ptr(), pw.as_ptr(), lflag, app.as_ptr(), cmdline.as_mut_ptr(),
             CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW, envb.as_ptr().cast(), cwd.as_ptr(), &si, &mut pi) };
         if ok == 0 {
             let e = last_err();
@@ -576,7 +579,11 @@ Windows asks for admin once to add two hidden sandbox users. Until then qh asks 
         // the command runs as the same user: without this it could open this (unrestricted) process
         // and write through it. OWNER RIGHTS limits the owner to reading the DACL, so it can't be undone.
         if let Err(e) = lock_self() { return fail("can't protect the runner", e) }
-        let token = match restricted(&group.to_string_lossy()) { Ok(t) => t, Err(e) => return fail("can't make the restricted token", e) };
+        let token = if std::env::var("QH_WINSBX_DIAG").as_deref() == Ok("plain") {
+            let mut t = null_mut();
+            unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY | TOKEN_ADJUST_DEFAULT, &mut t) };
+            unsafe { OwnedHandle::from_raw_handle(t) }
+        } else { match restricted(&group.to_string_lossy()) { Ok(t) => t, Err(e) => return fail("can't make the restricted token", e) } };
         let mut cmdline = command_line(prog, &a[2..]);
         let p = PathBuf::from(prog);
         let app = p.is_absolute().then(|| wz(&p)); // else CreateProcess looks on PATH

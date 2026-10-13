@@ -530,6 +530,15 @@ Windows asks for admin once to add two hidden sandbox users. Until then qh asks 
         unsafe { (si.hStdInput, si.hStdOutput, si.hStdError) = (GetStdHandle(STD_INPUT_HANDLE), GetStdHandle(STD_OUTPUT_HANDLE), GetStdHandle(STD_ERROR_HANDLE)) };
     }
 
+    /// No error popups for the command and what it starts (they inherit the mode): a tool that dies
+    /// at start would otherwise put up a dialog on your screen and hang until someone clicks OK.
+    fn quiet_errors() {
+        #[link(name = "kernel32")]
+        extern "system" { fn SetErrorMode(mode: u32) -> u32; }
+        // SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX
+        unsafe { SetErrorMode(0x1 | 0x2 | 0x8000) };
+    }
+
     fn fail(what: &str, e: impl std::fmt::Display) -> i32 {
         eprintln!("qh sandbox: {what}: {e}");
         126
@@ -539,6 +548,7 @@ Windows asks for admin once to add two hidden sandbox users. Until then qh asks 
     /// that dies with this process (so a timeout or task_stop takes the whole tree), wait, pass on
     /// its exit code.
     pub fn launcher_main(a: &[OsString]) -> i32 {
+        quiet_errors();
         let (Some(which), Some(prog)) = (a.first(), a.get(1)) else { return fail("usage", "qh __winsbx on|off program args…") };
         let c = match load() { Ok(c) => c, Err(e) => return fail("can't read the sandbox users' secrets", e) };
         let i = usize::from(which == "on");
@@ -551,6 +561,8 @@ Windows asks for admin once to add two hidden sandbox users. Until then qh asks 
         let (user, domain, pw) = (wz(USERS[i]), wz("."), wz(&c.pw[i]));
         let mut si: STARTUPINFOW = unsafe { zeroed() };
         std_handles(&mut si);
+        // (no lpDesktop: the logon service lets the runner onto your desktop only when none is named;
+        // the runner then puts the command itself on a private one)
         let mut pi: PROCESS_INFORMATION = unsafe { zeroed() };
         // SAFETY: all pointers are to live NUL-terminated buffers. The profile is loaded: without it
         // Windows' TLS (schannel) has no credentials, so every HTTPS download fails; `remove` deletes it
@@ -596,9 +608,51 @@ Windows asks for admin once to add two hidden sandbox users. Until then qh asks 
         code as i32
     }
 
+    struct Desk(windows_sys::Win32::System::StationsAndDesktops::HDESK);
+    impl Drop for Desk {
+        fn drop(&mut self) { unsafe { windows_sys::Win32::System::StationsAndDesktops::CloseDesktop(self.0) }; }
+    }
+
+    /// A desktop of its own for one command, as Codex does: on yours, a sandboxed process could send
+    /// keystrokes and window messages to your other windows (your terminal, qh itself) and so act as
+    /// you. The runner makes it: it is on your desktop already (the logon service lets it in only
+    /// when no desktop is named), and keeps full rights; the group, so the command's restricted
+    /// token, may make windows and read and write objects on it, but not switch the screen to it or
+    /// change it. It goes when the runner exits. Returns "<window station>\\<desktop>" for
+    /// STARTUPINFO; the command's own children inherit it.
+    fn private_desktop(group: &str) -> io::Result<(Desk, Vec<u16>)> {
+        use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+        use windows_sys::Win32::System::StationsAndDesktops::{CreateDesktopW, GetProcessWindowStation, GetUserObjectInformationW, UOI_NAME};
+        // read objects, create windows and menus, hook control, enumerate, write objects, read control
+        const PARTICIPANT: u32 = 0x1 | 0x2 | 0x4 | 0x8 | 0x40 | 0x80 | 0x2_0000;
+        let mut tok = null_mut();
+        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut tok) } == 0 { return Err(last_err()) }
+        let tok = unsafe { OwnedHandle::from_raw_handle(tok) };
+        let user = token_info(tok.as_raw_handle(), TokenUser)?;
+        let me = sid_string(unsafe { (*(user.as_ptr() as *const TOKEN_USER)).User.Sid })?;
+        let w = wz(format!("D:P(A;;GA;;;{me})(A;;0x{PARTICIPANT:x};;;{group})"));
+        let mut sd: PSECURITY_DESCRIPTOR = null_mut();
+        if unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(w.as_ptr(), 1, &mut sd, null_mut()) } == 0 { return Err(last_err()) }
+        let _sd = Local(sd);
+        let sa = SECURITY_ATTRIBUTES { nLength: size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: sd, bInheritHandle: 0 };
+        let r = crate::oauth::random();
+        let name = format!("qh-sbx-{}", r[..8].iter().map(|b| format!("{b:02x}")).collect::<String>());
+        let h = unsafe { CreateDesktopW(wz(&name).as_ptr(), null(), null(), 0, 0x000F_01FF, &sa) };
+        if h.is_null() { return Err(last_err()) }
+        let desk = Desk(h);
+        let mut buf = vec![0u16; 256];
+        let mut n = 0u32;
+        if unsafe { GetUserObjectInformationW(GetProcessWindowStation(), UOI_NAME, buf.as_mut_ptr().cast(), (buf.len() * 2) as u32, &mut n) } == 0 {
+            return Err(last_err());
+        }
+        let ws = String::from_utf16_lossy(&buf[..buf.iter().position(|&c| c == 0).unwrap_or(0)]);
+        Ok((desk, wz(format!("{ws}\\{name}"))))
+    }
+
     /// `qh __winsbx-in <group sid> program args…`, as the sandbox user: run the command under a
     /// write-restricted copy of this token, wait, pass on its exit code.
     pub fn runner_main(a: &[OsString]) -> i32 {
+        quiet_errors();
         let (Some(group), Some(prog)) = (a.first(), a.get(1)) else { return fail("usage", "qh __winsbx-in sid program args…") };
         // the command runs as the same user: without this it could open this (unrestricted) process
         // and write through it. OWNER RIGHTS limits the owner to reading the DACL, so it can't be undone.
@@ -611,10 +665,14 @@ Windows asks for admin once to add two hidden sandbox users. Until then qh asks 
         let envb = env_block(&env);
         let mut si: STARTUPINFOW = unsafe { zeroed() };
         std_handles(&mut si);
+        let (_desk, mut desk_name) = match private_desktop(&group.to_string_lossy()) { Ok(d) => d, Err(e) => return fail("can't make the command's desktop", e) };
+        si.lpDesktop = desk_name.as_mut_ptr();
+        let ps = p.file_stem().is_some_and(|s| s.eq_ignore_ascii_case("powershell") || s.eq_ignore_ascii_case("pwsh"));
+        let dir = std::env::current_dir().ok().and_then(|c| if ps { cwd_alias(&c) } else { None }).map(|d| wz(plain(&d)));
         let mut pi: PROCESS_INFORMATION = unsafe { zeroed() };
         // SAFETY: live NUL-terminated buffers; the token is ours; inherits only std handles (all qh has here)
         let ok = unsafe { CreateProcessAsUserW(token.as_raw_handle(), app.as_ref().map_or(null(), |a| a.as_ptr()), cmdline.as_mut_ptr(),
-            null(), null(), 1, CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW, envb.as_ptr().cast(), null(), &si, &mut pi) };
+            null(), null(), 1, CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW, envb.as_ptr().cast(), dir.as_ref().map_or(null(), |d| d.as_ptr()), &si, &mut pi) };
         if ok == 0 { return fail(&format!("can't start {}", p.display()), last_err()) }
         let (process, _thread) = unsafe { (OwnedHandle::from_raw_handle(pi.hProcess), OwnedHandle::from_raw_handle(pi.hThread)) };
         let mut code = 1u32;
@@ -623,6 +681,27 @@ Windows asks for admin once to add two hidden sandbox users. Until then qh asks 
             GetExitCodeProcess(process.as_raw_handle(), &mut code);
         }
         code as i32
+    }
+
+    /// `cwd` through a junction in the sandbox user's own profile, for PowerShell: it takes a folder
+    /// as its location only if it can list every parent, and yours (C:\\Users\\you) is closed to the
+    /// sandbox, so a project inside it started PowerShell in C:\\. Codex does the same. One junction
+    /// per folder, checked before each use (a command could have pointed it elsewhere).
+    fn cwd_alias(cwd: &Path) -> Option<PathBuf> {
+        use std::hash::{Hash, Hasher};
+        use std::os::windows::process::CommandExt;
+        let real = cwd.canonicalize().ok()?;
+        let root = profile().join("qh-cwd");
+        if under(&real, profile()) { return None }
+        fs::create_dir_all(&root).ok()?;
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        norm(&real).hash(&mut h);
+        let link = root.join(format!("{:016x}", h.finish()));
+        if link.canonicalize().ok().as_deref() == Some(real.as_path()) { return Some(link) }
+        let _ = fs::remove_dir(&link); // a junction goes like an empty folder; its target stays
+        let ok = std::process::Command::new("cmd").raw_arg(format!("/d /c mklink /J \"{}\" \"{}\" >nul",
+            plain(&link).display(), plain(&real).display())).status().ok()?.success();
+        ok.then_some(link)
     }
 
     fn lock_self() -> io::Result<()> {

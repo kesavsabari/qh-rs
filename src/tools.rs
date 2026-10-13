@@ -468,6 +468,15 @@ fn bash(cwd: &mut PathBuf, a: &Value, cfg: &Config, sb: &crate::sandbox::Ctx) ->
     let mut moved = String::new();
     if let Some(i) = out.rfind(CWD_MARK) {
         let dir = PathBuf::from(out[i + CWD_MARK.len()..].trim_end());
+        // a sandboxed PowerShell on Windows reports its folder through a junction: the real one
+        #[cfg(windows)]
+        let dir = if dir == *cwd { dir } else {
+            let c = crate::sandbox::canon(&dir);
+            if c == crate::sandbox::canon(cwd) { cwd.clone() } else {
+                let s = c.to_string_lossy();
+                if s.starts_with(r"\\?\") && s.as_bytes().get(5) == Some(&b':') { PathBuf::from(&s[4..]) } else { c.clone() }
+            }
+        };
         out.truncate(i);
         if out.ends_with('\n') {
             out.pop();

@@ -330,6 +330,9 @@ fn windows_sandbox_users() {
     let (root, data) = (format!("C:/qh-redteam-{}", std::process::id()), format!("C:/ProgramData/qh-redteam-{}", std::process::id()));
     let (_, out) = l.bash(&format!("mkdir {root}; echo x > {root}.txt; mkdir {data} 2>&1"));
     assert!(![root.clone(), format!("{root}.txt"), data.clone()].iter().any(|p| std::path::Path::new(p).exists()), "wrote in a shared spot: {out}");
+    // on a desktop of its own: your windows (the taskbar here) are out of sight, so out of reach
+    let (_, out) = l.bash("powershell -NoProfile -Command \"Add-Type -Namespace W -Name U -MemberDefinition '[DllImport(\\\"user32.dll\\\")] public static extern System.IntPtr FindWindow(string c, string n);'; 'taskbar=' + [W.U]::FindWindow('Shell_TrayWnd', [NullString]::Value)\"");
+    assert!(out.contains("taskbar=0"), "sees your desktop's windows: {out}");
     let (_, out) = l.bash("cmd //c \"echo cmd-ok > c.txt\" && cat c.txt && powershell -NoProfile -Command \"Set-Content p.txt ps-ok; Get-Content p.txt\"");
     assert!(out.contains("cmd-ok") && out.contains("ps-ok"), "cmd and PowerShell inside: {out}");
     // direct connections are blocked by the firewall filters; the allowlist proxy works (needs internet)

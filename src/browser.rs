@@ -321,7 +321,16 @@ fn check_url(url: &str, allow: &[String]) -> Option<String> {
     let host = if host.starts_with('[') { host.trim_start_matches('[').split(']').next().unwrap_or("") } else { host.split(':').next().unwrap_or("") };
     // an entry is a host, or host:port for one port only (the tab's own dev server)
     if !allow.iter().any(|h| h == host || *h == format!("{host}:{port}")) && private(host) {
-        return Some(format!("error: {host} is on the local network; add it to browser_allow_hosts to allow"));
+        // say why and what to do: the model can't change config, and "add it to browser_allow_hosts"
+        // left both it and the user stuck (seen live on a Mac: port 3000 held by another program)
+        let cfg = crate::platform::config_base().join("config.toml");
+        if matches!(host, "localhost" | "127.0.0.1" | "::1") {
+            return Some(format!("error: {host}:{port} isn't a server this tab started; the browser opens only those. \
+Start the app's dev server with bash in the background (pick a free port if {port} is taken) and browse that port. \
+To open a server that was already running, the user adds \"localhost:{port}\" to browser_allow_hosts in {}.", cfg.display()));
+        }
+        return Some(format!("error: {host} is on the local network, which the browser doesn't open unless the user \
+adds \"{host}\" to browser_allow_hosts in {}.", cfg.display()));
     }
     None
 }
@@ -555,7 +564,8 @@ mod url_tests {
         assert!(check_url("http://localhost:3001/", &allow).is_none());
         assert!(check_url("http://localhost:3002/", &allow).is_some(), "another local port stays blocked");
         assert!(check_url("http://localhost/", &allow).is_some(), "port 80 is not 3001");
-        assert!(check_url("http://localhost:3001/", &[]).is_some());
+        let e = check_url("http://localhost:3001/", &[]).unwrap();
+        assert!(e.contains("this tab started") && e.contains("\"localhost:3001\" to browser_allow_hosts"), "{e}");
         assert!(check_url("http://localhost:9/", &["localhost".to_string()]).is_none(), "a bare host allows every port");
     }
 }

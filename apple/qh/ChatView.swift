@@ -145,8 +145,14 @@ struct ThreadView: View {
                     if tab.items.isEmpty {
                         Text("Ask qh anything about this project.").font(Theme.sans(15)).foregroundStyle(Theme.faint).padding(.top, 40)
                     }
-                    ForEach(shown) { item in ItemView(item: item).equatable() }
-                    if tab.status == "working" { Thinking() }
+                    let blocks = Activity.blocks(shown)
+                    ForEach(Array(blocks.enumerated()), id: \.element.id) { i, b in
+                        switch b {
+                        case .item(let item): ItemView(item: item).equatable()
+                        case .run(let run): ToolRun(items: run, live: tab.busy && i == blocks.count - 1)
+                        }
+                    }
+                    if tab.status == "working" { ThinkingRow(tab: tab) }
                     Color.clear.frame(height: 1).id("end")
                 }
                 .frame(maxWidth: 720, alignment: .leading)

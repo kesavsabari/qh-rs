@@ -145,15 +145,19 @@ struct PersonalSidebar: View {
 
     var body: some View {
         let mine = ws.recent.filter { ws.teamRepos[$0] == nil }
-        ScrollView {
-            VStack(alignment: .leading, spacing: 1) {
-                Header(text: "Projects")
-                if mine.isEmpty {
-                    EmptyHint(icon: "folder", text: "Open a folder to start.", hint: "⌘O")
+        // the header sits above the scroll view: a ScrollView first in the sidebar column drew nothing at all
+        VStack(spacing: 0) {
+            Header(text: "Projects").padding(.horizontal, 8)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 1) {
+                    if mine.isEmpty {
+                        EmptyHint(icon: "folder", text: "Open a folder to start.", hint: "⌘O")
+                    }
+                    ForEach(mine, id: \.self) { p in ProjectBlock(path: p) }
                 }
-                ForEach(mine, id: \.self) { p in ProjectBlock(path: p) }
+                .padding(.horizontal, 8)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .padding(.horizontal, 8)
         }
     }
 }

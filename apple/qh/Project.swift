@@ -13,6 +13,8 @@ struct Item: Identifiable, Equatable {
     }
     let id = UUID()
     var kind: Kind
+    var at = Date()       // when it appeared
+    var end: Date?        // a tool call: when its result came back
 }
 
 /// A permission qh is waiting on.
@@ -36,6 +38,7 @@ final class ChatTab: ObservableObject, Identifiable {
     @Published var purpose = ""
     @Published var tokens = 0
     @Published var cost: Double?
+    @Published var lastActivity = Date()   // the thread last showed something: the quiet timer starts here
     var busy: Bool { status == "working" || status == "confirm" }
 
     init(name: String) { self.name = name }
@@ -64,6 +67,7 @@ final class ChatTab: ObservableObject, Identifiable {
 
     /// Streaming text joins the reply it belongs to; anything else in between starts a new one.
     func append(text: String) {
+        lastActivity = Date()
         if case .reply(let t)? = items.last?.kind {
             items[items.count - 1].kind = .reply(t + text)
         } else {
@@ -209,7 +213,10 @@ final class Project: ObservableObject, Identifiable {
     private func handle(_ e: [String: Any]) {
         let type = e["type"] as? String ?? ""
         let tabName = e["tab"] as? String ?? "main"
-        if type != "text", let t = tabs.first(where: { $0.name == tabName }) { t.flush() }
+        if type != "text", let t = tabs.first(where: { $0.name == tabName }) {
+            t.flush()
+            if ["tool_call", "tool_result", "diff", "notice"].contains(type) { t.lastActivity = Date() }
+        }
         switch type {
         case "history":
             fill(e)
@@ -288,6 +295,7 @@ final class Project: ObservableObject, Identifiable {
                case .tool(let n, let a, _, _, _) = t.items[i].kind {
                 t.items[i].kind = .tool(name: n, args: a, ok: e["ok"] as? Bool ?? true, summary: e["summary"] as? String ?? "",
                                         output: e["output"] as? String ?? "")
+                t.items[i].end = Date()
             }
         case "diff":
             loadChanges()

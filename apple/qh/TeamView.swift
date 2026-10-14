@@ -174,6 +174,10 @@ struct ChannelPage: View {
             .padding(.horizontal, 24).padding(.bottom, 18)
         }
         .onAppear { project.loadHeat() }
+        // debug: "io.qh.type" with text as its object fills the composer, for snapshots
+        .onReceive(DistributedNotificationCenter.default().publisher(for: .init("io.qh.type"))) { n in
+            if UserDefaults.standard.bool(forKey: "debugSnapshot") { text = n.object as? String ?? "" }
+        }
     }
 
     private var suggestions: [String] {

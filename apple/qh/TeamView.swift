@@ -129,7 +129,7 @@ struct ChannelPage: View {
                                     Text(m.who).font(Theme.sans(13, medium: true)).foregroundStyle(Theme.ink)
                                     Text(m.when).font(Theme.mono(10.5)).foregroundStyle(Theme.faint)
                                 }
-                                Text(m.text).font(Theme.sans(14)).foregroundStyle(Theme.ink).lineSpacing(3).textSelection(.enabled)
+                                Text(Mentions.render(m.text, project)).font(Theme.sans(14)).foregroundStyle(Theme.ink).lineSpacing(3).textSelection(.enabled)
                                     .padding(.leading, m.ping ? 8 : 0)
                                     .overlay(alignment: .leading) { if m.ping { Rectangle().fill(Theme.accent).frame(width: 2) } }
                             }
@@ -144,8 +144,24 @@ struct ChannelPage: View {
             .onChange(of: msgs.count) { _, _ in sv.scrollTo("end", anchor: .bottom) }
             .onAppear { sv.scrollTo("end", anchor: .bottom) }
             }
+            let sugg = suggestions
+            if !sugg.isEmpty {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(sugg, id: \.self) { f in
+                        Label(f, systemImage: "doc.text").font(Theme.mono(12)).foregroundStyle(Theme.ink)
+                            .padding(.horizontal, 10).padding(.vertical, 5)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
+                            .onTapGesture { insert(f) }
+                    }
+                }
+                .padding(.vertical, 4)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Theme.side))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.rule))
+                .frame(maxWidth: 720).padding(.horizontal, 24).padding(.bottom, 6)
+            }
             HStack(spacing: 8) {
-                TextField("Message \(chan)", text: $text, axis: .vertical).textFieldStyle(.plain).font(Theme.sans(14)).lineLimit(1...6)
+                TextField("Message \(chan)   @ to mention a file", text: $text, axis: .vertical).textFieldStyle(.plain).font(Theme.sans(14)).lineLimit(1...6)
                     .onSubmit(send)
                 Button(action: send) { Image(systemName: "arrow.up").font(.system(size: 12, weight: .semibold)).foregroundStyle(.white)
                     .frame(width: 26, height: 26).background(Circle().fill(text.isEmpty ? Theme.faint : Theme.accent)) }
@@ -159,11 +175,46 @@ struct ChannelPage: View {
         }
     }
 
+    /// Files matching the @word being typed (teammates share the repo, so the path means the same file to them).
+    private var suggestions: [String] {
+        guard let at = text.split(separator: " ", omittingEmptySubsequences: false).last, at.hasPrefix("@"), at.count > 1 else { return [] }
+        let q = at.dropFirst().lowercased()
+        return Array(project.files.lazy.filter { $0.lowercased().contains(q) }.prefix(6))
+    }
+
+    private func insert(_ f: String) {
+        let last = text.split(separator: " ", omittingEmptySubsequences: false).last ?? ""
+        text = String(text.dropLast(last.count)) + "@" + f + " "
+    }
+
     private func send() {
+        if let f = suggestions.first, !text.hasSuffix(" ") { insert(f); return }
         let s = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !s.isEmpty else { return }
         project.teamSend(chan, s)
         text = ""
+    }
+}
+
+/// @path mentions in a message: a file of this project turns into a link that opens it here.
+enum Mentions {
+    @MainActor static func render(_ text: String, _ project: Project) -> AttributedString {
+        var out = AttributedString()
+        for (i, w) in text.split(separator: " ", omittingEmptySubsequences: false).enumerated() {
+            if i > 0 { out += AttributedString(" ") }
+            let core = w.trimmingCharacters(in: CharacterSet(charactersIn: ".,;:!?)"))
+            let path = core.hasPrefix("@") ? String(core.dropFirst()).split(separator: ":").first.map(String.init) ?? "" : ""
+            if !path.isEmpty, project.fileSet.contains(path) {
+                var a = AttributedString(String(w))
+                a.link = URL(fileURLWithPath: project.path + "/" + path)
+                a.foregroundColor = Theme.accent
+                a.font = Theme.mono(13)
+                out += a
+            } else {
+                out += AttributedString(String(w))
+            }
+        }
+        return out
     }
 }
 

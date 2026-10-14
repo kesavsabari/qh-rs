@@ -102,6 +102,7 @@ final class Project: ObservableObject, Identifiable {
     @Published var secret: String?          // provider whose API key the composer is asking for
     @Published var commands: [(cmd: String, about: String)] = []
     lazy var files: [String] = Self.listFiles(path)
+    lazy var fileSet: Set<String> = Set(files)
     @Published var models: [ModelChoice] = []
     @Published var showSetup = false
     @Published var setupBusy = false

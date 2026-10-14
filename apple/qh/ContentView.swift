@@ -100,6 +100,35 @@ struct SpaceSwitch: View {
     }
 }
 
+/// Work | Messages, inside the team space: chat gets its own sidebar.
+struct TeamTabs: View {
+    let messages: Bool
+    let unread: Int
+    let pick: (Bool) -> Void
+    var body: some View {
+        HStack(spacing: 2) {
+            seg("Work", false)
+            seg(unread > 0 ? "Messages \(unread)" : "Messages", true)
+        }
+        .padding(2)
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Theme.ink.opacity(0.06)))
+    }
+
+    private func seg(_ label: String, _ m: Bool) -> some View {
+        let on = messages == m
+        return Button { withAnimation(.snappy(duration: 0.2)) { pick(m) } } label: {
+            Text(label)
+                .font(Theme.sans(12, medium: on))
+                .foregroundStyle(on ? Theme.ink : m && unread > 0 ? Theme.accent : Theme.soft)
+                .frame(maxWidth: .infinity).frame(height: 22)
+                .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(on ? Theme.paper : .clear)
+                    .shadow(color: .black.opacity(on ? 0.12 : 0), radius: 1, y: 0.5))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
 /// A sidebar row: 28pt, neutral selection (never orange), 4% hover.
 struct Row<Content: View>: View {
     let selected: Bool
@@ -296,39 +325,49 @@ struct TeamNav: View {
                 if let t, !t.running {
                     EmptyHint(icon: "antenna.radiowaves.left.and.right.slash", text: "Team mode isn't connected here.", hint: "/team on")
                 }
-                // what needs you first, then your own work, then the conversation, then the team
-                if let n = t?.waiting.count, n > 0 {
-                    Header(text: "Needs you")
-                    page(.requests, icon: "tray.full", "Requests", badge: n)
+                let unread = t?.channels.reduce(0) { $0 + $1.unread } ?? 0
+                TeamTabs(messages: chatting, unread: unread) { m in
+                    if m != chatting { ws.teamPage = m ? .channel("#team") : .agent }
                 }
-                Header(text: "Your agent")
-                page(.agent, icon: "sparkles", "Agent",
-                     trailing: project.current?.busy == true ? "working" : "")
-                SessionRows(project: project)
-                Header(text: "Channels")
-                ForEach(t?.channels.filter { !$0.id.hasPrefix("@") } ?? []) { c in channel(c) }
-                let dms = t?.channels.filter { $0.id.hasPrefix("@") } ?? []
-                if !dms.isEmpty {
-                    Header(text: "Direct messages")
-                    ForEach(dms) { c in channel(c) }
-                }
-                if let agents = t?.agents, !agents.isEmpty {
-                    Header(text: "Teammates' agents")
-                    ForEach(agents) { a in
-                        page(.peer(a.login, a.name), icon: "", avatar: a.login, "\(a.login) · \(a.name)", trailing: a.status)
+                .padding(.vertical, 6)
+                if chatting {
+                    Header(text: "Channels")
+                    ForEach(t?.channels.filter { !$0.id.hasPrefix("@") } ?? []) { c in channel(c) }
+                    let dms = t?.channels.filter { $0.id.hasPrefix("@") } ?? []
+                    if !dms.isEmpty {
+                        Header(text: "Direct messages")
+                        ForEach(dms) { c in channel(c) }
                     }
+                } else {
+                    // what needs you first, then your own work, then the team
+                    if let n = t?.waiting.count, n > 0 {
+                        Header(text: "Needs you")
+                        page(.requests, icon: "tray.full", "Requests", badge: n)
+                    }
+                    Header(text: "Your agent")
+                    page(.agent, icon: "sparkles", "Agent",
+                         trailing: project.current?.busy == true ? "working" : "")
+                    SessionRows(project: project)
+                    if let agents = t?.agents, !agents.isEmpty {
+                        Header(text: "Teammates' agents")
+                        ForEach(agents) { a in
+                            page(.peer(a.login, a.name), icon: "", avatar: a.login, "\(a.login) · \(a.name)", trailing: a.status)
+                        }
+                    }
+                    Header(text: "Team")
+                    if (t?.waiting.count ?? 0) == 0 { page(.requests, icon: "tray", "Requests") }
+                    page(.members, icon: "person.2", "Members", trailing: "\(t?.people.filter(\.online).count ?? 0)/\(t?.people.count ?? 0)")
+                    page(.claims, icon: "lock.doc", "Claims")
+                    page(.activity, icon: "waveform.path.ecg", "Activity")
                 }
-                Header(text: "Team")
-                if (t?.waiting.count ?? 0) == 0 { page(.requests, icon: "tray", "Requests") }
-                page(.members, icon: "person.2", "Members", trailing: "\(t?.people.filter(\.online).count ?? 0)/\(t?.people.count ?? 0)")
-                page(.claims, icon: "lock.doc", "Claims")
-                page(.activity, icon: "waveform.path.ecg", "Activity")
             }
             .padding(.horizontal, 8)
         }
         .onAppear { refresh() }
         .onReceive(tick) { _ in refresh() }
     }
+
+    private var chatting: Bool { if case .channel = ws.teamPage { return true }; return false }
 
     private func refresh() {
         if case .channel(let c) = ws.teamPage { project.loadTeam(c) } else { project.loadTeam("#team") }

@@ -38,6 +38,8 @@ final class ChatTab: ObservableObject, Identifiable {
     @Published var purpose = ""
     @Published var tokens = 0
     @Published var cost: Double?
+    @Published var think = false
+    @Published var effort = ""
     @Published var lastActivity = Date()   // the thread last showed something: the quiet timer starts here
     var busy: Bool { status == "working" || status == "confirm" }
 
@@ -103,6 +105,20 @@ final class Project: ObservableObject, Identifiable {
     @Published var commands: [(cmd: String, about: String)] = []
     lazy var files: [String] = Self.listFiles(path)
     lazy var fileSet: Set<String> = Set(files)
+    /// the file tree (from `qh serve`'s list, which follows .gitignore) and the file the code view shows
+    @Published var tree = FileNode(name: "", path: "", isDir: true)
+    @Published var code: CodeTarget?
+    func loadFiles() { client.send(["type": "files", "tab": current?.name ?? "main"]) }
+    func absolute(_ rel: String) -> String { rel.hasPrefix("/") ? rel : path + "/" + rel }
+    /// Opens a path from anywhere (the tree, a link in the thread, a tool card) in the code view.
+    func openFile(_ p: String, line: Int? = nil) {
+        var rel = p.hasPrefix(path + "/") ? String(p.dropFirst(path.count + 1)) : p
+        var line = line
+        if line == nil, let c = rel.lastIndex(of: ":"), let n = Int(rel[rel.index(after: c)...]) { line = n; rel = String(rel[..<c]) }
+        let found = PathLinks.resolve(rel, files: fileSet, root: path) ?? rel
+        guard FileManager.default.fileExists(atPath: absolute(found)) else { return }
+        code = CodeTarget(path: found, line: line)
+    }
     /// how much each file matters to you, from git history (filled in the background)
     var gitHeat: [String: Double] = [:]
     private var heatLoaded = false
@@ -247,6 +263,12 @@ final class Project: ObservableObject, Identifiable {
             transcript = (key, (e["rows"] as? [[String: Any]] ?? []).map { ($0["role"] as? String ?? "", $0["text"] as? String ?? "") })
         case "team":
             team = TeamState(e)
+        case "files":
+            let list = e["files"] as? [String] ?? []
+            files = list
+            fileSet = Set(list)
+            tree = FileNode.build(list)
+            PathLinks.use(fileSet, root: path)
         case "tasks":
             tasks = e["text"] as? String ?? ""
         case "changes":
@@ -287,6 +309,7 @@ final class Project: ObservableObject, Identifiable {
             }
         case "snapshot":
             state = "live"
+            loadFiles()
             if e["needs_setup"] as? Bool == true { showSetup = true; loadSetup() }
             mode = e["mode"] as? String ?? ""
             tabs = []
@@ -366,6 +389,8 @@ final class Project: ObservableObject, Identifiable {
         tab.model = t["model"] as? String ?? tab.model
         tab.purpose = t["purpose"] as? String ?? tab.purpose
         tab.tokens = t["tokens"] as? Int ?? tab.tokens
+        tab.think = t["think"] as? Bool ?? tab.think
+        tab.effort = t["effort"] as? String ?? tab.effort
         if was && !tab.busy { Notify.done(project: name, tab: tab.name) }
     }
 

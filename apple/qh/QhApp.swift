@@ -76,6 +76,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     case "members": ws.teamPage = .members
                     case "claims": ws.teamPage = .claims
                     case "activity": ws.teamPage = .activity
+                    case "map": ws.teamPage = .map
                     case "personal", "team": ws.setSpace(page)
                     case "palette": ws.palette = true
                     default: ws.teamPage = .channel(page)

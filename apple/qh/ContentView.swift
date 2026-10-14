@@ -321,7 +321,7 @@ enum TeamPage: Hashable {
     case agent                  // your own agent: the normal chat
     case channel(String)
     case peer(String, String)   // a teammate's agent: login, session
-    case requests, members, claims, activity
+    case requests, members, claims, activity, map
 }
 
 struct TeamNav: View {
@@ -368,6 +368,7 @@ struct TeamNav: View {
                     Header(text: "Team")
                     if (t?.waiting.count ?? 0) == 0 { page(.requests, icon: "tray", "Requests") }
                     page(.members, icon: "person.2", "Members", trailing: "\(t?.people.filter(\.online).count ?? 0)/\(t?.people.count ?? 0)")
+                    page(.map, icon: "square.grid.3x3.square", "Map")
                     page(.claims, icon: "lock.doc", "Claims")
                     page(.activity, icon: "waveform.path.ecg", "Activity")
                 }

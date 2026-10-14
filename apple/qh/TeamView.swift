@@ -96,6 +96,7 @@ struct TeamPageView: View {
             case .members: MembersPage(people: t?.people ?? [], me: t?.me ?? "")
             case .claims: ClaimsPage(agents: t?.agents ?? [])
             case .activity: ActivityPage(rows: t?.activity ?? [])
+            case .map: MapPage(project: project)
             case .agent: EmptyView()
             }
         }

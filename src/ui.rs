@@ -12,7 +12,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 use ratatui::Frame;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
@@ -398,15 +398,7 @@ pub fn run(hub: Arc<Hub>, tx: Sender<Ui>, rx: Receiver<Ui>) -> std::io::Result<(
             Err(_) => break,
         }
     });
-    let mut app = App {
-        project: std::path::PathBuf::new(),
-        hub: hub.clone(), views: HashMap::new(), active: String::new(), grid: false, recent: vec![],
-        log: VecDeque::new(), show_log: false, replies: false, input: vec![], cur: 0, chips: vec![], hist: vec![], hist_i: 0,
-        confirms: VecDeque::new(), picker: None, secret: None, map: None,
-        tab_hits: vec![], body: Rect::default(), picker_rows: None, quit: false, sugg_sel: 0, team_view: None, outside: None,
-        last_personal: std::path::PathBuf::new(), last_team: std::path::PathBuf::new(), map_was_open: false, wt_hinted: false,
-        notifier: Default::default(),
-    };
+    let mut app = App::blank(hub.clone());
     for n in hub.names() {
         app.load_view(&n);
     }
@@ -660,6 +652,18 @@ fn clip(s: &str, n: usize) -> String {
 }
 
 impl App {
+    fn blank(hub: Arc<Hub>) -> App {
+        App {
+            project: std::path::PathBuf::new(),
+            hub, views: HashMap::new(), active: String::new(), grid: false, recent: vec![],
+            log: VecDeque::new(), show_log: false, replies: false, input: vec![], cur: 0, chips: vec![], hist: vec![], hist_i: 0,
+            confirms: VecDeque::new(), picker: None, secret: None, map: None,
+            tab_hits: vec![], body: Rect::default(), picker_rows: None, quit: false, sugg_sel: 0, team_view: None, outside: None,
+            last_personal: std::path::PathBuf::new(), last_team: std::path::PathBuf::new(), map_was_open: false, wt_hinted: false,
+            notifier: Default::default(),
+        }
+    }
+
     fn view(&mut self, name: &str) -> &mut View {
         self.views.entry(name.to_string()).or_default()
     }
@@ -3160,5 +3164,77 @@ mod md_tests {
     fn tables_align_and_fall_back_when_too_wide() {
         assert_eq!(text("| a | bb |\n|---|---|\n| ccc | d |", 40), ["a   │ bb", "────┼───", "ccc │ d"]);
         assert_eq!(text("| a | bb |\n|---|---|", 5), ["| a |", "bb |", "|---|", "---|"]);
+    }
+}
+
+/// The TUI's input without a terminal, for `qh serve` clients: a line goes through the same
+/// `/command` code and the same send (images, @mentions, queueing) as typing it in the TUI, so
+/// the Mac app has every command. What the TUI would draw comes back as JSON events.
+pub struct Remote(App);
+
+impl Remote {
+    pub fn new(hub: Arc<Hub>) -> Remote {
+        Remote(App::blank(hub))
+    }
+
+    /// The commands and descriptions `/` offers in `tab`, custom ones included.
+    pub fn commands(&self, tab: &str) -> Vec<Value> {
+        let cwd = self.0.hub.get(tab).map(|m| m.cwd()).unwrap_or_default();
+        COMMANDS.iter().map(|(c, d)| json!({"cmd": c, "about": d}))
+            .chain(custom_commands(&cwd).into_iter().map(|(n, p)| json!({"cmd": format!("/{n}"), "about": p.display().to_string()})))
+            .chain(SUBCOMMANDS.iter().map(|(c, d)| json!({"cmd": c, "about": d, "sub": true})))
+            .collect()
+    }
+
+    pub fn input(&mut self, tab: &str, line: &str, images: Vec<String>) -> Vec<Value> {
+        let app = &mut self.0;
+        if app.hub.get(tab).is_some() && app.active != tab {
+            app.set_active(tab);
+        }
+        for v in app.views.values_mut() {
+            v.items.clear();
+        }
+        let line = line.trim();
+        if let Some(name) = app.secret.take().filter(|_| !line.starts_with('/')) {
+            // the line is the API key a command asked for: never echoed, never kept
+            let msg = match crate::providers::set_key(&name, line).and_then(|_| crate::providers::test(&name)) {
+                Ok(n) => format!("✓ {name}: key saved (chmod 600), {n} models available. /model {name} to pick one"),
+                Err(e) => { let _ = crate::providers::remove_key(&name); format!("✗ {name}: {e} (not saved)") }
+            };
+            let a = app.active.clone();
+            app.note(&a, msg);
+        } else if line.starts_with('/') {
+            app.command(line);
+        } else if !line.is_empty() || !images.is_empty() {
+            app.chips = images;
+            app.send(if line.is_empty() { "(see the attached image)" } else { line });
+        }
+        let mut out = vec![];
+        for (name, v) in app.views.iter_mut() {
+            for it in v.items.drain(..) {
+                match it {
+                    Item::Note(m) => out.push(json!({"type": "notice", "tab": name, "message": m})),
+                    Item::Err(m) => out.push(json!({"type": "error", "tab": name, "message": m})),
+                    _ => {}
+                }
+            }
+        }
+        if let Some(p) = app.picker.take() {
+            let items: Vec<Value> = p.all.iter().map(|(v, l, g)| json!({"value": v, "label": l, "group": g})).collect();
+            out.push(json!({"type": "picker", "tab": app.active, "title": p.title, "cmd": p.cmd, "current": p.cur, "items": items}));
+        }
+        if let Some(name) = &app.secret {
+            out.push(json!({"type": "secret", "tab": app.active, "provider": name}));
+        }
+        if let Some(step) = app.outside.take() {
+            out.push(json!({"type": "notice", "tab": app.active,
+                "message": format!("this step needs a terminal for now: run `qh team {}` in Terminal", step.join(" "))}));
+        }
+        if app.map.take().is_some() || app.team_view.take().is_some() {
+            out.push(json!({"type": "notice", "tab": app.active, "message": "the map and team room aren't drawn in the app yet"}));
+        }
+        out.push(json!({"type": "active", "tab": app.active}));
+        app.quit = false;
+        out
     }
 }

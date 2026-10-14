@@ -1,4 +1,5 @@
 import AppKit
+import UniformTypeIdentifiers
 import SwiftUI
 
 /// A project: its tabs on top, the active tab's thread, permissions waiting, and the composer.
@@ -27,6 +28,7 @@ struct ProjectView: View {
             }
         }
         .background(Theme.paper)
+        .sheet(item: $project.picker) { p in PickerSheet(picker: p, project: project) }
     }
 }
 
@@ -304,51 +306,215 @@ struct AskCard: View {
     }
 }
 
-/// ⏎ sends, ⇧⏎ new line, Esc stops a running turn.
+/// ⏎ sends, ⇧⏎ new line, Esc stops a running turn. `/` offers commands, `@` project files,
+/// ⌘V or a drop attaches images. When a command asks for an API key the field masks it.
 struct Composer: View {
     @ObservedObject var project: Project
     @ObservedObject var tab: ChatTab
     @State private var text = ""
+    @State private var images: [(name: String, b64: String)] = []
+    @State private var sel = 0
+    @State private var dropping = false
     @FocusState private var focused: Bool
 
+    /// What the popup offers for the word being typed: commands after a leading /, files after @.
+    private var suggestions: [(insert: String, label: String, about: String)] {
+        if project.secret != nil { return [] }
+        if text.hasPrefix("/") && !text.contains(" ") {
+            return project.commands.filter { $0.cmd.hasPrefix(text) }.prefix(9).map { ($0.cmd + " ", $0.cmd, $0.about) }
+        }
+        if let at = text.split(separator: " ", omittingEmptySubsequences: false).last, at.hasPrefix("@") {
+            let q = at.dropFirst().lowercased()
+            let hits = project.files.lazy.filter { q.isEmpty || $0.lowercased().contains(q) }.prefix(9)
+            return hits.map { f in (String(text.dropLast(at.count)) + "@" + f + " ", f, "") }
+        }
+        return []
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            TextField(tab.busy ? "qh is working — Esc to stop" : "Message qh", text: $text, axis: .vertical)
+        let sugg = suggestions
+        VStack(alignment: .leading, spacing: 6) {
+            if !sugg.isEmpty {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(sugg.enumerated()), id: \.offset) { i, s in
+                        HStack(spacing: 12) {
+                            Text(s.label).foregroundStyle(Theme.ink)
+                            Text(s.about).foregroundStyle(Theme.faint).lineLimit(1)
+                            Spacer(minLength: 0)
+                        }
+                        .font(Theme.mono(12)).padding(.horizontal, 10).padding(.vertical, 5)
+                        .background(i == min(sel, sugg.count - 1) ? Theme.hover : .clear)
+                        .contentShape(Rectangle())
+                        .onTapGesture { text = s.insert; sel = 0 }
+                    }
+                }
+                .padding(.vertical, 4)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Theme.side))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.rule))
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                if !images.isEmpty {
+                    HStack(spacing: 8) {
+                        ForEach(Array(images.enumerated()), id: \.offset) { i, im in
+                            HStack(spacing: 4) {
+                                Text("▣ " + im.name).lineLimit(1)
+                                Button("×") { images.remove(at: i) }.buttonStyle(.plain)
+                            }
+                            .font(Theme.mono(11)).foregroundStyle(Theme.accent)
+                        }
+                    }
+                }
+                Group {
+                    if let p = project.secret {
+                        SecureField("paste your \(p) API key, ⏎ to save", text: $text).onSubmit(send)
+                    } else {
+                        TextField(tab.busy ? "qh is working — Esc to stop, or type to queue" : "Message qh   / commands   @ files",
+                                  text: $text, axis: .vertical)
+                            .lineLimit(1...10)
+                    }
+                }
                 .textFieldStyle(.plain)
                 .font(Theme.sans(15))
-                .lineLimit(1...10)
                 .focused($focused)
                 .onKeyPress(.return, phases: .down) { k in
                     if k.modifiers.contains(.shift) { return .ignored }
+                    if !sugg.isEmpty { text = sugg[min(sel, sugg.count - 1)].insert; sel = 0; return .handled }
                     send()
                     return .handled
                 }
-            HStack(spacing: 14) {
-                Text(tab.model).font(Theme.mono(11)).foregroundStyle(Theme.faint)
-                if tab.tokens > 0 { Text("\(tab.tokens / 1000)k tokens").font(Theme.mono(11)).foregroundStyle(Theme.faint) }
-                if let c = tab.cost, c > 0 { Text(String(format: "$%.3f", c)).font(Theme.mono(11)).foregroundStyle(Theme.faint) }
-                Spacer()
-                if tab.busy {
-                    Button("stop") { project.stop() }.buttonStyle(.plain).font(Theme.mono(12)).foregroundStyle(Theme.accent)
-                } else {
+                .onKeyPress(.tab) {
+                    guard !sugg.isEmpty else { return .ignored }
+                    text = sugg[min(sel, sugg.count - 1)].insert; sel = 0
+                    return .handled
+                }
+                .onKeyPress(.downArrow) { guard !sugg.isEmpty else { return .ignored }; sel = min(sel + 1, sugg.count - 1); return .handled }
+                .onKeyPress(.upArrow) { guard !sugg.isEmpty else { return .ignored }; sel = max(sel - 1, 0); return .handled }
+                .onChange(of: text) { _, _ in sel = 0 }
+                HStack(spacing: 14) {
+                    Button { project.prompt("/model") } label: { Text(tab.model).font(Theme.mono(11)).foregroundStyle(Theme.faint) }
+                        .buttonStyle(.plain).help("Switch model (/model)")
+                    if tab.tokens > 0 { Text("\(tab.tokens / 1000)k tokens").font(Theme.mono(11)).foregroundStyle(Theme.faint) }
+                    if let c = tab.cost, c > 0 { Text(String(format: "$%.3f", c)).font(Theme.mono(11)).foregroundStyle(Theme.faint) }
+                    Spacer()
+                    Button { attachPanel() } label: { Text("+ image").font(Theme.mono(11)).foregroundStyle(Theme.faint) }
+                        .buttonStyle(.plain).help("Attach an image (or paste / drop one)")
+                    if tab.busy {
+                        Button("stop") { project.stop() }.buttonStyle(.plain).font(Theme.mono(12)).foregroundStyle(Theme.accent)
+                    }
                     Button("send ⏎") { send() }.buttonStyle(.plain).font(Theme.mono(12))
-                        .foregroundStyle(text.isEmpty ? Theme.faint : Theme.ink).disabled(text.isEmpty)
+                        .foregroundStyle(text.isEmpty && images.isEmpty ? Theme.faint : Theme.ink)
+                        .disabled(text.isEmpty && images.isEmpty)
                 }
             }
+            .padding(14)
+            .background(RoundedRectangle(cornerRadius: 10).fill(Theme.side))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(dropping ? Theme.accent : focused ? Theme.accent.opacity(0.6) : Theme.rule))
         }
-        .padding(14)
-        .background(RoundedRectangle(cornerRadius: 10).fill(Theme.side))
-        .overlay(RoundedRectangle(cornerRadius: 10).stroke(focused ? Theme.accent.opacity(0.6) : Theme.rule))
         .frame(maxWidth: 820)
         .padding(.horizontal, 28).padding(.bottom, 18).padding(.top, 4)
-        .onAppear { focused = true }
+        .onAppear { focused = true; if project.commands.isEmpty { project.loadCommands() } }
+        .onDrop(of: [.fileURL, .image], isTargeted: $dropping) { providers in
+            for p in providers {
+                _ = p.loadObject(ofClass: URL.self) { url, _ in
+                    if let url { Task { @MainActor in add(url) } }
+                }
+            }
+            return true
+        }
+        .onPasteCommand(of: [.png, .tiff, .fileURL]) { _ in pasteImage() }
     }
 
     private func send() {
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        project.prompt(text)
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty || !images.isEmpty else { return }
+        project.prompt(t, images: images.map(\.b64))
         text = ""
+        images = []
     }
+
+    private func add(_ url: URL) {
+        let ok = ["png", "jpg", "jpeg", "gif", "webp", "heic", "tiff"].contains(url.pathExtension.lowercased())
+        if ok, let img = NSImage(contentsOf: url), let b = Self.png(img) {
+            images.append((url.lastPathComponent, b))
+        } else {
+            // a dropped non-image file becomes an @ mention
+            let rel = url.path.hasPrefix(project.path + "/") ? String(url.path.dropFirst(project.path.count + 1)) : url.path
+            text += (text.isEmpty || text.hasSuffix(" ") ? "" : " ") + "@" + rel + " "
+        }
+    }
+
+    private func pasteImage() {
+        let pb = NSPasteboard.general
+        if let urls = pb.readObjects(forClasses: [NSURL.self]) as? [URL], !urls.isEmpty { urls.forEach(add); return }
+        if let img = NSImage(pasteboard: pb), let b = Self.png(img) { images.append(("pasted image", b)) }
+    }
+
+    private func attachPanel() {
+        let p = NSOpenPanel()
+        p.allowedContentTypes = [.image]
+        p.allowsMultipleSelection = true
+        if p.runModal() == .OK { p.urls.forEach(add) }
+    }
+
+    static func png(_ img: NSImage) -> String? {
+        guard let t = img.tiffRepresentation, let rep = NSBitmapImageRep(data: t),
+              let d = rep.representation(using: .png, properties: [:]) else { return nil }
+        return d.base64EncodedString()
+    }
+}
+
+/// /model, /provider and every other list a command opens: type to filter, ⏎ picks.
+struct PickerSheet: View {
+    let picker: PickerState
+    @ObservedObject var project: Project
+    @State private var filter = ""
+    @State private var sel = 0
+
+    var body: some View {
+        let rows = picker.rows.filter { filter.isEmpty || $0.label.localizedCaseInsensitiveContains(filter) || $0.value.localizedCaseInsensitiveContains(filter) }
+        VStack(alignment: .leading, spacing: 10) {
+            Text(picker.title).font(Theme.sans(17, medium: true)).foregroundStyle(Theme.ink)
+            TextField("type to filter \(picker.rows.count)", text: $filter).textFieldStyle(.plain).font(Theme.mono(13))
+                .padding(9).background(RoundedRectangle(cornerRadius: 6).fill(Theme.side))
+                .onSubmit { if let r = rows[safe: sel] { project.choose(picker, r.value) } }
+                .onKeyPress(.downArrow) { sel = min(sel + 1, max(rows.count - 1, 0)); return .handled }
+                .onKeyPress(.upArrow) { sel = max(sel - 1, 0); return .handled }
+                .onChange(of: filter) { _, _ in sel = 0 }
+            ScrollViewReader { sv in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(Array(rows.enumerated()), id: \.element.id) { i, r in
+                            if !r.group.isEmpty && (i == 0 || rows[i - 1].group != r.group) {
+                                Text(r.group).font(Theme.mono(11)).foregroundStyle(Theme.faint).padding(.top, 10).padding(.bottom, 3).padding(.horizontal, 8)
+                            }
+                            HStack {
+                                Text(r.label).foregroundStyle(Theme.ink)
+                                Spacer()
+                                if r.value == picker.current { Text("current").foregroundStyle(Theme.accent) }
+                            }
+                            .font(Theme.mono(12.5)).padding(.horizontal, 8).padding(.vertical, 6)
+                            .background(RoundedRectangle(cornerRadius: 5).fill(i == sel ? Theme.hover : .clear))
+                            .contentShape(Rectangle())
+                            .onTapGesture { project.choose(picker, r.value) }
+                            .id(i)
+                        }
+                    }
+                }
+                .onChange(of: sel) { _, v in sv.scrollTo(v) }
+            }
+            HStack {
+                Spacer()
+                Button("cancel") { project.picker = nil }.keyboardShortcut(.cancelAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 520, height: 480)
+        .background(Theme.paper)
+    }
+}
+
+extension Array {
+    subscript(safe i: Int) -> Element? { indices.contains(i) ? self[i] : nil }
 }
 
 struct Banner: View {

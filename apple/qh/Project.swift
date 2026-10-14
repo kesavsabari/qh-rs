@@ -62,6 +62,10 @@ final class Project: ObservableObject, Identifiable {
     @Published var asks: [Ask] = []
     @Published var state: String = "starting"   // starting | live | closed: <why>
     @Published var setup: SetupState?
+    @Published var picker: PickerState?
+    @Published var secret: String?          // provider whose API key the composer is asking for
+    @Published var commands: [(cmd: String, about: String)] = []
+    lazy var files: [String] = Self.listFiles(path)
     @Published var models: [ModelChoice] = []
     @Published var showSetup = false
     @Published var setupBusy = false
@@ -89,12 +93,43 @@ final class Project: ObservableObject, Identifiable {
 
     // MARK: up
 
-    func prompt(_ text: String) {
+    func prompt(_ text: String, images: [String] = []) {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !t.isEmpty, let tab = current else { return }
-        tab.items.append(Item(kind: .user(t)))
-        tab.status = "working"
-        client.send(["type": "prompt", "tab": tab.name, "text": t])
+        guard !t.isEmpty || !images.isEmpty, let tab = current else { return }
+        if secret != nil {
+            secret = nil
+            tab.items.append(Item(kind: .notice("key entered (hidden)")))
+        } else if t.hasPrefix("/") {
+            tab.items.append(Item(kind: .notice("› " + t)))
+        } else {
+            tab.items.append(Item(kind: .user(t + (images.isEmpty ? "" : "  [+\(images.count) image\(images.count == 1 ? "" : "s")]"))))
+            tab.status = "working"
+        }
+        var msg: [String: Any] = ["type": "prompt", "tab": tab.name, "text": t]
+        if !images.isEmpty { msg["images"] = images }
+        client.send(msg)
+    }
+
+    func choose(_ p: PickerState, _ value: String) {
+        picker = nil
+        prompt("\(p.cmd) \(value)")
+    }
+
+    func loadCommands() { client.send(["type": "commands", "tab": current?.name ?? "main"]) }
+
+    /// Project files for @ mentions: skips what's never worth mentioning, stops at 20k.
+    nonisolated static func listFiles(_ root: String) -> [String] {
+        let skip: Set<String> = [".git", "node_modules", "target", "build", ".build", "dist", ".next", "DerivedData", "__pycache__", ".venv"]
+        var out: [String] = []
+        let base = URL(fileURLWithPath: root)
+        guard let e = FileManager.default.enumerator(at: base, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else { return [] }
+        for case let u as URL in e {
+            if skip.contains(u.lastPathComponent) { e.skipDescendants(); continue }
+            if (try? u.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true { continue }
+            out.append(String(u.path.dropFirst(base.path.count + 1)))
+            if out.count >= 20000 { break }
+        }
+        return out
     }
 
     func answer(_ a: Ask, _ choice: String) {
@@ -129,6 +164,15 @@ final class Project: ObservableObject, Identifiable {
         let type = e["type"] as? String ?? ""
         let tabName = e["tab"] as? String ?? "main"
         switch type {
+        case "picker":
+            picker = PickerState(e)
+        case "secret":
+            secret = e["provider"] as? String
+        case "active":
+            if let a = e["tab"] as? String, tabs.contains(where: { $0.name == a }) { active = a }
+        case "commands":
+            commands = (e["commands"] as? [[String: Any]] ?? []).filter { $0["sub"] == nil }
+                .map { ($0["cmd"] as? String ?? "", $0["about"] as? String ?? "") }
         case "setup":
             setup = SetupState(e)
             if setup?.needed == true { showSetup = true }
@@ -249,5 +293,24 @@ final class Project: ObservableObject, Identifiable {
         }
         if let h = d["host"] as? String { return h }
         return brief(a)
+    }
+}
+
+/// A list a /command offers (/model, /provider, /merge…): choosing runs `cmd value`.
+struct PickerState: Identifiable {
+    struct Row: Identifiable { let id = UUID(); let value: String; let label: String; let group: String }
+    let id = UUID()
+    let title: String
+    let cmd: String
+    let current: String
+    let rows: [Row]
+
+    init(_ e: [String: Any]) {
+        title = e["title"] as? String ?? ""
+        cmd = e["cmd"] as? String ?? ""
+        current = e["current"] as? String ?? ""
+        rows = (e["items"] as? [[String: Any]] ?? []).map {
+            Row(value: $0["value"] as? String ?? "", label: $0["label"] as? String ?? "", group: $0["group"] as? String ?? "")
+        }
     }
 }

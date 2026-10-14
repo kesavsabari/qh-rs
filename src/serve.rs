@@ -37,6 +37,8 @@ fn token() -> String {
 
 struct State {
     clients: Mutex<Vec<UnixStream>>,
+    /// the TUI's command and send code, shared by every client
+    remote: Mutex<crate::ui::Remote>,
     confirms: Mutex<HashMap<u64, (String, Sender<Answer>)>>,
     next: AtomicU64,
 }
@@ -108,9 +110,18 @@ fn command(hub: &Arc<Hub>, st: &State, v: &Value) -> Option<String> {
     let tab = v["tab"].as_str().unwrap_or("main");
     match v["type"].as_str().unwrap_or("") {
         "prompt" => {
+            // typed text and /commands both: exactly what Enter does in the TUI
             let text = v["text"].as_str().unwrap_or("");
-            if text.is_empty() { return Some("prompt needs text".into()) }
-            if !hub.send(tab, text, "user", 0, None) { return Some(format!("no tab {tab}")) }
+            let images: Vec<String> = v["images"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
+            if text.is_empty() && images.is_empty() { return Some("prompt needs text".into()) }
+            if hub.get(tab).is_none() { return Some(format!("no tab {tab}")) }
+            let out = lock(&st.remote).input(tab, text, images);
+            for e in out { st.broadcast(&e) }
+            hub.changed();
+        }
+        "commands" => {
+            let list = lock(&st.remote).commands(tab);
+            st.broadcast(&json!({"type": "commands", "tab": tab, "commands": list}));
         }
         "answer" => {
             let id = v["id"].as_u64().unwrap_or(u64::MAX);
@@ -253,7 +264,7 @@ pub fn run(hub: Arc<Hub>, rx: Receiver<crate::ui::Ui>) -> i32 {
     // the app reads this line to know where to connect
     println!("{}", json!({"type": "listening", "socket": sock, "token_file": tok_path, "protocol": PROTOCOL, "pid": std::process::id()}));
     let _ = std::io::stdout().flush();
-    let st = Arc::new(State { clients: Mutex::new(vec![]), confirms: Mutex::new(HashMap::new()), next: AtomicU64::new(1) });
+    let st = Arc::new(State { clients: Mutex::new(vec![]), remote: Mutex::new(crate::ui::Remote::new(hub.clone())), confirms: Mutex::new(HashMap::new()), next: AtomicU64::new(1) });
     { let (h, s) = (hub.clone(), st.clone()); std::thread::spawn(move || pump(h, s, rx)); }
     let want = Arc::new(tok);
     for s in listener.incoming().map_while(Result::ok) {

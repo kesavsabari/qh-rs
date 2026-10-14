@@ -306,9 +306,9 @@ struct ToolCard: View {
             if open {
                 if !summary.isEmpty { Text(summary).font(Theme.mono(11.5)).foregroundStyle(Theme.soft).textSelection(.enabled).padding(.leading, 20) }
                 if !output.isEmpty {
-                    ScrollView {
+                    ScrollView([.vertical, .horizontal]) {
                         Text(output).font(Theme.mono(11.5)).foregroundStyle(Theme.ink).textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .fixedSize().frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .frame(maxHeight: 280)
                     .padding(8).background(RoundedRectangle(cornerRadius: 5).fill(Theme.side))
@@ -348,8 +348,9 @@ struct Markdown: View {
             ForEach(Array(parsed.enumerated()), id: \.offset) { _, b in
                 switch b.kind {
                 case .code:
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        Text(b.text).font(Theme.mono(12.5)).foregroundStyle(Theme.ink).textSelection(.enabled).padding(12)
+                    ScrollView(.horizontal) {
+                        Text(b.text).font(Theme.mono(12.5)).foregroundStyle(Theme.ink).textSelection(.enabled).fixedSize().padding(12)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .background(RoundedRectangle(cornerRadius: 6).fill(Theme.side))
                     .overlay(alignment: .topTrailing) { CopyButton(text: b.text).padding(6) }

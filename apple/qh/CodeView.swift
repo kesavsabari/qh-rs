@@ -197,6 +197,7 @@ struct CodeView: View {
     @State private var reloads = 0          // bumps when the file changes on disk
     @State private var watch: FileWatch?
     @State private var landed = ""          // the target we've already scrolled to
+    @State private var width: CGFloat = 0   // widest line: a lazy stack only measures the rows on screen
 
     var body: some View {
         let abs = project.absolute(target.path)
@@ -234,6 +235,7 @@ struct CodeView: View {
                                 .id(i + 1)
                             }
                         }
+                        .frame(minWidth: width, alignment: .leading)
                         .textSelection(.enabled)
                         .padding(.vertical, 8)
                     }
@@ -261,6 +263,8 @@ struct CodeView: View {
         let s = String(decoding: d, as: UTF8.self)
         lines = s.split(separator: "\n", omittingEmptySubsequences: false).map { String($0.replacingOccurrences(of: "\t", with: "    ")) }
         if lines.last == "" { lines.removeLast() }
+        let cw = ("M" as NSString).size(withAttributes: [.font: Theme.monoNS(12)]).width
+        width = 62 + CGFloat(lines.map(\.count).max() ?? 0) * cw + 24
     }
 }
 

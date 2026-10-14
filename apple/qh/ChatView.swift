@@ -506,7 +506,7 @@ struct Composer: View {
                 HStack(spacing: 14) {
                     Button { project.prompt("/model") } label: { Text(tab.model).font(Theme.mono(11)).foregroundStyle(Theme.faint) }
                         .buttonStyle(.plain).help("Switch model (/model)")
-                    if tab.tokens > 0 { Text("\(tab.tokens / 1000)k tokens").font(Theme.mono(11)).foregroundStyle(Theme.faint) }
+                    if tab.tokens >= 1000 { Text("\(tab.tokens / 1000)k tokens").font(Theme.mono(11)).foregroundStyle(Theme.faint) }
                     if let c = tab.cost, c > 0 { Text(String(format: "$%.3f", c)).font(Theme.mono(11)).foregroundStyle(Theme.faint) }
                     Spacer()
                     Button { attachPanel() } label: { Text("+ image").font(Theme.mono(11)).foregroundStyle(Theme.faint) }

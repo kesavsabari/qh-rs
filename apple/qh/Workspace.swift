@@ -10,6 +10,7 @@ final class Workspace: ObservableObject {
     @Published var version = ""
     /// folder → GitHub repo, for the folders that are team projects (asked from qh itself)
     @Published var teamRepos: [String: String] = [:]
+    private var teamsKnown = false   // until qh __team has answered once, don't pick a space from it
     /// which space the sidebar shows: "personal" or "team"
     @Published var space = UserDefaults.standard.string(forKey: "space") ?? "personal"
     @Published var inspector = UserDefaults.standard.bool(forKey: "inspector")
@@ -104,8 +105,9 @@ final class Workspace: ObservableObject {
             let teams = map.compactMapValues { $0 as? String }
             await MainActor.run {
                 self.teamRepos = teams
+                self.teamsKnown = true
                 // a folder that just turned out to be a team project: show the team space
-                if let a = self.active, teams[a] != nil, self.space != "team" { self.setSpace("team") }
+                if let a = self.active { self.setSpace(teams[a] != nil ? "team" : "personal") }
             }
         }
     }
@@ -114,7 +116,7 @@ final class Workspace: ObservableObject {
         recent = Array(([path] + recent.filter { $0 != path }).prefix(14))
         UserDefaults.standard.set(recent, forKey: "projects")
         refreshTeams()
-        setSpace(teamRepos[path] != nil ? "team" : "personal")
+        if teamsKnown { setSpace(teamRepos[path] != nil ? "team" : "personal") }
         if !projects.contains(where: { $0.path == path }), let qh {
             projects.append(Project(path: path, qh: qh))
         }

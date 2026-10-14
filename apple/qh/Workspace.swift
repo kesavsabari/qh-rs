@@ -17,7 +17,7 @@ final class Workspace: ObservableObject {
     /// which space the sidebar shows: "personal" or "team"
     @Published var space = UserDefaults.standard.string(forKey: "space") ?? "personal"
     @Published var inspector = UserDefaults.standard.bool(forKey: "inspector")
-    @Published var teamPage: TeamPage = .channel("#team")
+    @Published var teamPage: TeamPage = .agent
 
     /// the team project the team space shows: the open one if it's a team project, else the last
     var teamProject: String? {
@@ -97,6 +97,7 @@ final class Workspace: ObservableObject {
     }
 
     func setSpace(_ s: String) {
+        if s == "team" && space != "team" { teamPage = .agent }   // the team space opens on Work, not Messages
         space = s
         UserDefaults.standard.set(s, forKey: "space")
     }

@@ -196,9 +196,6 @@ struct ThreadView: View {
         ScrollViewReader { sv in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
-                    if tab.items.isEmpty {
-                        Text("Ask qh anything about this project.").font(Theme.sans(15)).foregroundStyle(Theme.faint).padding(.top, 40)
-                    }
                     let blocks = Activity.blocks(shown)
                     ForEach(Array(blocks.enumerated()), id: \.element.id) { i, b in
                         switch b {
@@ -218,6 +215,14 @@ struct ThreadView: View {
             .defaultScrollAnchor(.bottom)
             .onChange(of: tab.items.count) { _, _ in DispatchQueue.main.async { sv.scrollTo("end", anchor: .bottom) } }
             .onChange(of: tab.status) { _, _ in DispatchQueue.main.async { sv.scrollTo("end", anchor: .bottom) } }
+        }
+        .overlay(alignment: .top) {
+            // outside the scroll view: it's anchored to the bottom, and this belongs at the top
+            if tab.items.isEmpty {
+                Text("Ask qh anything about this project.").font(Theme.sans(15)).foregroundStyle(Theme.faint)
+                    .frame(maxWidth: 720, alignment: .leading).padding(.horizontal, 24).padding(.top, 60).frame(maxWidth: .infinity)
+                    .allowsHitTesting(false)
+            }
         }
         .id(ObjectIdentifier(tab))   // a fresh scroll view per tab, never one left at another session's offset
     }

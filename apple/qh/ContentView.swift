@@ -40,8 +40,17 @@ struct Sidebar: View {
             Rectangle().fill(Theme.rule).frame(height: 1).padding(.bottom, 6)
 
             ScrollView {
-                VStack(spacing: 1) {
-                    ForEach(ws.recent, id: \.self) { p in ProjectRow(path: p) }
+                VStack(alignment: .leading, spacing: 1) {
+                    let team = ws.recent.filter { ws.teamRepos[$0] != nil }
+                    let personal = ws.recent.filter { ws.teamRepos[$0] == nil }
+                    if !team.isEmpty {
+                        SectionLabel(text: "team", count: team.count)
+                        ForEach(team, id: \.self) { p in ProjectRow(path: p) }
+                    }
+                    if !personal.isEmpty {
+                        SectionLabel(text: "personal", count: personal.count).padding(.top, team.isEmpty ? 0 : 16)
+                        ForEach(personal, id: \.self) { p in ProjectRow(path: p) }
+                    }
                 }
             }
 
@@ -78,7 +87,7 @@ struct ProjectRow: View {
             HStack(spacing: 0) {
                 VStack(alignment: .leading, spacing: 1) {
                     Text((path as NSString).lastPathComponent).font(Theme.sans(14, medium: true)).foregroundStyle(Theme.ink).lineLimit(1)
-                    Text(Workspace.short(path)).font(Theme.mono(11)).foregroundStyle(Theme.faint).lineLimit(1).truncationMode(.head)
+                    Text(ws.teamRepos[path] ?? Workspace.short(path)).font(Theme.mono(11)).foregroundStyle(Theme.faint).lineLimit(1).truncationMode(.head)
                 }
                 Spacer(minLength: 6)
                 if let live { LiveDot(project: live) }
@@ -98,6 +107,19 @@ struct ProjectRow: View {
             if let live { Button("Stop qh here") { ws.close(live) } }
             Button("Remove from list") { ws.forget(path) }
         }
+    }
+}
+
+struct SectionLabel: View {
+    let text: String
+    let count: Int
+    var body: some View {
+        HStack {
+            Text(text).font(Theme.mono(11)).foregroundStyle(Theme.faint)
+            Spacer()
+            Text("\(count)").font(Theme.mono(11)).foregroundStyle(Theme.faint)
+        }
+        .padding(.horizontal, 8).padding(.top, 4).padding(.bottom, 4)
     }
 }
 

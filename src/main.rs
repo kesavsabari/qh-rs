@@ -165,6 +165,15 @@ fn main() {
             _ => {}
         }
     }
+    // the Mac app's sidebar: which of these folders are team projects (and their repo)
+    if argv.get(1).map(String::as_str) == Some("__team") {
+        let out: serde_json::Map<String, serde_json::Value> = argv[2..].iter().map(|p| {
+            let repo = team::github_repo(std::path::Path::new(p)).filter(|(_, r)| team::enabled(r)).map(|(_, r)| r);
+            (p.clone(), serde_json::json!(repo))
+        }).collect();
+        println!("{}", serde_json::Value::Object(out));
+        std::process::exit(0);
+    }
     if argv.get(1).map(String::as_str) == Some("__tool") {
         std::process::exit(tool_once(&argv[2..]));
     }

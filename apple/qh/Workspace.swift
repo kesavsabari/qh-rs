@@ -8,6 +8,8 @@ final class Workspace: ObservableObject {
     @Published var projects: [Project] = []
     @Published var active: String?
     @Published var version = ""
+    /// folder → GitHub repo, for the folders that are team projects (asked from qh itself)
+    @Published var teamRepos: [String: String] = [:]
     let qh: String?
     private var keys: Any?
 
@@ -41,15 +43,32 @@ final class Workspace: ObservableObject {
             default: return e
             }
         }
+        refreshTeams()
+        NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refreshTeams() }
+        }
         Notify.workspace = self
         Notify.setup()
     }
 
     var current: Project? { projects.first { $0.path == active } }
 
+    /// Which recent folders are team projects: `qh __team` answers with qh's own check.
+    func refreshTeams() {
+        guard let qh else { return }
+        let paths = recent
+        Task.detached {
+            let out = Workspace.run(qh, ["__team"] + paths)
+            let map = (try? JSONSerialization.jsonObject(with: Data(out.utf8)) as? [String: Any]) ?? [:]
+            let teams = map.compactMapValues { $0 as? String }
+            await MainActor.run { self.teamRepos = teams }
+        }
+    }
+
     func open(_ path: String) {
         recent = Array(([path] + recent.filter { $0 != path }).prefix(14))
         UserDefaults.standard.set(recent, forKey: "projects")
+        refreshTeams()
         if !projects.contains(where: { $0.path == path }), let qh {
             projects.append(Project(path: path, qh: qh))
         }

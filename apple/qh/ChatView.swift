@@ -30,7 +30,6 @@ struct ProjectView: View {
         .background(Theme.paper)
         .sheet(item: $project.picker) { p in PickerSheet(picker: p, project: project) }
         .sheet(isPresented: $project.showReview) { ReviewView(project: project) }
-        .sheet(isPresented: $project.showTeam) { TeamView(project: project) }
         .sheet(isPresented: $project.showTasks) { TasksView(project: project) }
     }
 }
@@ -53,12 +52,10 @@ struct ChatTabBar: View {
                     }
                     .buttonStyle(.plain).padding(.bottom, 9).padding(.trailing, 10).help("Review changes (⌘D)")
                 }
-                ForEach([("team", "Team room (⌘⇧T)"), ("tasks", "Background tasks (⌘⇧B)")], id: \.0) { name, help in
-                    Button { if name == "team" { project.showTeam = true } else { project.showTasks = true } } label: {
-                        Text(name).font(Theme.mono(12)).foregroundStyle(Theme.soft)
-                    }
-                    .buttonStyle(.plain).padding(.bottom, 9).padding(.trailing, 10).help(help)
+                Button { project.showTasks = true } label: {
+                    Text("tasks").font(Theme.mono(12)).foregroundStyle(Theme.soft)
                 }
+                .buttonStyle(.plain).padding(.bottom, 9).padding(.trailing, 10).help("Background tasks (⌘⇧B)")
                 Button { project.showSetup.toggle() } label: {
                     Text("models").font(Theme.mono(12)).foregroundStyle(project.showSetup ? Theme.ink : Theme.soft)
                 }
@@ -152,8 +149,8 @@ struct ThreadView: View {
                     if tab.status == "working" { Thinking() }
                     Color.clear.frame(height: 1).id("end")
                 }
-                .frame(maxWidth: 820, alignment: .leading)
-                .padding(.horizontal, 28).padding(.vertical, 20)
+                .frame(maxWidth: 720, alignment: .leading)
+                .padding(.horizontal, 24).padding(.vertical, 20)
                 .frame(maxWidth: .infinity)
             }
             .onChange(of: tab.items.count) { _, _ in sv.scrollTo("end", anchor: .bottom) }
@@ -175,8 +172,7 @@ struct ItemView: View, Equatable {
                 Spacer(minLength: 80)
                 Text(t).font(Theme.sans(15)).foregroundStyle(Theme.ink).textSelection(.enabled)
                     .padding(.horizontal, 14).padding(.vertical, 10)
-                    .background(RoundedRectangle(cornerRadius: 12).fill(Theme.accent.opacity(0.12)))
-                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.accent.opacity(0.35)))
+                    .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Theme.ink.opacity(0.07)))
             }
             .padding(.top, 18)
         case .reply(let t):
@@ -248,7 +244,8 @@ struct ToolCard: View {
             }
         }
         .padding(.horizontal, 12).padding(.vertical, 8)
-        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Theme.rule))
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Theme.ink.opacity(0.03)))
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Theme.ink.opacity(0.08), lineWidth: 0.5))
     }
 }
 
@@ -523,11 +520,12 @@ struct Composer: View {
                 }
             }
             .padding(14)
-            .background(RoundedRectangle(cornerRadius: 10).fill(Theme.side))
-            .overlay(RoundedRectangle(cornerRadius: 10).stroke(dropping ? Theme.accent : focused ? Theme.accent.opacity(0.6) : Theme.rule))
+            .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Theme.side))
+            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(dropping ? Theme.accent : focused ? Theme.accent.opacity(0.55) : Theme.ink.opacity(0.1), lineWidth: focused || dropping ? 1 : 0.5))
         }
-        .frame(maxWidth: 820)
-        .padding(.horizontal, 28).padding(.bottom, 18).padding(.top, 4)
+        .frame(maxWidth: 720)
+        .padding(.horizontal, 24).padding(.bottom, 18).padding(.top, 4)
         .onAppear { focused = true; if project.commands.isEmpty { project.loadCommands() } }
         .onDrop(of: [.fileURL, .image], isTargeted: $dropping) { providers in
             for p in providers {

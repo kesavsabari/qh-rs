@@ -121,13 +121,20 @@ fn team_state(chan: Option<&str>) -> Value {
     let waiting: Vec<Value> = crate::team::pending().into_iter().map(|i| json!({"from": i.from, "id": i.id, "session": i.session,
         "text": i.text, "question": i.question.is_some(), "replied": i.replied})).collect();
     let activity: Vec<Value> = crate::team::activity().into_iter().take(40).map(|(ago, x)| json!({"ago": ago, "text": x})).collect();
+    // teammates' agents, with what each is doing and the files it's changing (the claims view)
+    let agents: Vec<Value> = crate::team::overview().into_iter().flat_map(|p| {
+        let (login, online) = (p.login.clone(), p.online);
+        p.sessions.into_iter().map(move |v| json!({"login": login, "online": online, "name": v.name, "status": v.status,
+            "topic": v.topic, "now": v.now, "branch": v.branch, "files": v.files, "waiting": v.waiting.is_some(),
+            "edits": v.edits.into_iter().map(|(f, fns, _)| json!({"file": f, "functions": fns})).collect::<Vec<_>>()}))
+    }).collect();
     let chan = chan.unwrap_or("#team");
     let msgs: Vec<Value> = crate::team::channel_msgs(chan).into_iter().map(|(when, who, text, ping)|
         json!({"who": who, "when": when, "text": text, "ping": ping})).collect();
     crate::team::channel_read(chan);
     json!({"type": "team", "running": true, "me": crate::team::me(), "repo": crate::team::repo(),
            "status": crate::team::status_line(), "people": people, "channels": channels, "waiting": waiting,
-           "activity": activity, "chan": chan, "messages": msgs})
+           "activity": activity, "chan": chan, "messages": msgs, "agents": agents})
 }
 
 /// One client's commands. Returns an error line for a bad command, nothing when it worked.
@@ -189,6 +196,12 @@ fn command(hub: &Arc<Hub>, st: &State, v: &Value) -> Option<String> {
             let (chan, text) = (v["chan"].as_str().unwrap_or("#team"), v["text"].as_str().unwrap_or(""));
             if let Err(e) = crate::team::channel_send(chan, text) { return Some(e) }
             st.broadcast(&team_state(Some(chan)));
+        }
+        "team_transcript" => {
+            let (login, session) = (v["login"].as_str().unwrap_or(""), v["session"].as_str().unwrap_or(""));
+            let rows: Vec<Value> = crate::team::transcript_rows(login, session).into_iter()
+                .map(|(role, text)| json!({"role": role, "text": text})).collect();
+            st.broadcast(&json!({"type": "team_transcript", "login": login, "session": session, "rows": rows}));
         }
         "tasks" => st.broadcast(&json!({"type": "tasks", "tab": tab, "text": crate::bg::list(tab)})),
         "changes" => {

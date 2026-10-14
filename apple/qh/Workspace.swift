@@ -12,6 +12,40 @@ final class Workspace: ObservableObject {
     @Published var teamRepos: [String: String] = [:]
     /// which space the sidebar shows: "personal" or "team"
     @Published var space = UserDefaults.standard.string(forKey: "space") ?? "personal"
+    @Published var inspector = UserDefaults.standard.bool(forKey: "inspector")
+    @Published var teamPage: TeamPage = .channel("#team")
+
+    /// the team project the team space shows: the open one if it's a team project, else the last
+    var teamProject: String? {
+        if let a = active, teamRepos[a] != nil { return a }
+        return recent.first { r in teamRepos[r] != nil && projects.contains { $0.path == r } } ?? recent.first { teamRepos[$0] != nil }
+    }
+
+    /// the personal project on screen: the open one, or the last open personal one while a team
+    /// project is active (each space keeps its own place)
+    var personalProject: Project? {
+        if let c = current, teamRepos[c.path] == nil { return c }
+        return recent.lazy.compactMap { p in self.teamRepos[p] == nil ? self.projects.first { $0.path == p } : nil }.first
+    }
+
+    /// the toolbar's title: what the content column shows
+    var title: String {
+        if space == "team" {
+            guard let p = teamProject else { return "Team" }
+            let name = (p as NSString).lastPathComponent
+            switch teamPage {
+            case .agent: return "\(name) · your agent"
+            case .channel(let c): return "\(name) · \(c)"
+            case .peer(let l, let s): return "\(name) · \(l)/\(s)"
+            case .requests: return "\(name) · requests"
+            case .members: return "\(name) · members"
+            case .claims: return "\(name) · claims"
+            case .activity: return "\(name) · activity"
+            }
+        }
+        guard let p = personalProject else { return "qh" }
+        return [p.name, p.current?.purpose.isEmpty == false ? p.current!.purpose : p.current?.name ?? ""].filter { !$0.isEmpty }.joined(separator: " · ")
+    }
     let qh: String?
     private var keys: Any?
 
@@ -51,6 +85,7 @@ final class Workspace: ObservableObject {
             MainActor.assumeIsolated { self?.refreshTeams() }
         }
         Notify.workspace = self
+        WorkspaceHolder.ws = self
         Notify.setup()
         // back where you were: the project open when the app last quit
         if let last = UserDefaults.standard.string(forKey: "lastOpen"), FileManager.default.fileExists(atPath: last) { open(last) }
@@ -61,6 +96,11 @@ final class Workspace: ObservableObject {
     func setSpace(_ s: String) {
         space = s
         UserDefaults.standard.set(s, forKey: "space")
+    }
+
+    func toggleInspector() {
+        inspector.toggle()
+        UserDefaults.standard.set(inspector, forKey: "inspector")
     }
 
     /// Which recent folders are team projects: `qh __team` answers with qh's own check.

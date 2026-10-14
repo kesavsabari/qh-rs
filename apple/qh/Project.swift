@@ -87,6 +87,7 @@ final class Project: ObservableObject, Identifiable {
     @Published var picker: PickerState?
     @Published var changes: [FileChange] = []
     @Published var team: TeamState?
+    @Published var transcript: (key: String, rows: [(role: String, text: String)]) = ("", [])
     @Published var sessions: [SavedSession] = []
     @Published var openSessions: [String: String] = [:]   // session id → tab showing it
     @Published var tasks = ""
@@ -154,6 +155,9 @@ final class Project: ObservableObject, Identifiable {
         if let t = openSessions[s.id] { active = t; return }
         client.send(["type": "resume", "id": s.id])
     }
+    func loadTranscript(_ login: String, _ session: String) {
+        client.send(["type": "team_transcript", "login": login, "session": session])
+    }
     func loadTeam(_ chan: String) { client.send(["type": "team", "chan": chan]) }
     func teamSend(_ chan: String, _ text: String) { client.send(["type": "team_send", "chan": chan, "text": text]) }
     func loadTasks() { client.send(["type": "tasks", "tab": current?.name ?? "main"]) }
@@ -217,6 +221,9 @@ final class Project: ObservableObject, Identifiable {
             var open: [String: String] = [:]
             for o in e["open"] as? [[String: Any]] ?? [] { if let id = o["id"] as? String, let t = o["tab"] as? String { open[id] = t } }
             openSessions = open
+        case "team_transcript":
+            let key = "\(e["login"] as? String ?? "")/\(e["session"] as? String ?? "")"
+            transcript = (key, (e["rows"] as? [[String: Any]] ?? []).map { ($0["role"] as? String ?? "", $0["text"] as? String ?? "") })
         case "team":
             team = TeamState(e)
         case "tasks":

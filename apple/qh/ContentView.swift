@@ -239,7 +239,7 @@ struct TeamSidebar: View {
                     .padding(.horizontal, 8).padding(.vertical, 6)
                     .contentShape(Rectangle())
                 }
-                .menuStyle(.borderlessButton).menuIndicator(.hidden)
+                .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden)
                 .padding(.horizontal, 8)
                 if let p = ws.projects.first(where: { $0.path == cur }) {
                     TeamNav(project: p)

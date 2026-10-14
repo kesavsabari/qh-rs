@@ -42,6 +42,10 @@ struct QhApp: App {
                 Button("Replies Only") { ws.current?.repliesOnly.toggle() }.keyboardShortcut("r").disabled(ws.current == nil)
                 Button("Models…") { ws.current?.showSetup = true }.keyboardShortcut(",").disabled(ws.current == nil)
                 Button("New Tab") { ws.current?.newTab() }.keyboardShortcut("t").disabled(ws.current == nil)
+                Divider()
+                Button("Chat") { ws.current?.layout = "chat" }.keyboardShortcut("1", modifiers: .control).disabled(ws.current == nil)
+                Button("Chat and Code") { ws.current?.layout = "split" }.keyboardShortcut("2", modifiers: .control).disabled(ws.current == nil)
+                Button("Code") { ws.current?.layout = "code" }.keyboardShortcut("3", modifiers: .control).disabled(ws.current == nil)
             }
         }
     }

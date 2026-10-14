@@ -159,11 +159,39 @@ enum Editor {
     }
 }
 
+/// Split layout's right side: the open file, or how to open one.
+struct CodePane: View {
+    @ObservedObject var project: Project
+    var body: some View {
+        if let t = project.code {
+            CodeView(target: t, project: project)
+        } else {
+            VStack(spacing: 8) {
+                Text("No file open").font(Theme.sans(13, medium: true)).foregroundStyle(Theme.soft)
+                Text("Click a path in the chat, or pick one in Code (⌃3).").font(Theme.sans(12)).foregroundStyle(Theme.faint)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity).background(Theme.paper)
+        }
+    }
+}
+
+/// Code layout: the project's files on the left, the open file on the right.
+struct CodeBrowser: View {
+    @ObservedObject var project: Project
+    var body: some View {
+        HSplitView {
+            ScrollView { FileTree(project: project).padding(8) }
+                .frame(minWidth: 200, idealWidth: 260, maxWidth: 420).background(Theme.side)
+            CodePane(project: project).frame(minWidth: 400)
+        }
+        .onAppear { if project.tree.children.isEmpty { project.loadFiles() } }
+    }
+}
+
 /// Read-only code with line numbers and syntax colour; lands on the line it was opened at.
 struct CodeView: View {
     let target: CodeTarget
     @ObservedObject var project: Project
-    @Environment(\.dismiss) private var dismiss
     @State private var lines: [String] = []
     @State private var note = ""
 
@@ -178,6 +206,10 @@ struct CodeView: View {
                 Spacer()
                 Button("Reveal in Finder") { NSWorkspace.shared.selectFile(abs, inFileViewerRootedAtPath: "") }
                 Button("Open in your editor") { Editor.open(abs, line: target.line) }.keyboardShortcut("e")
+                if project.layout == "split" {
+                    Button { project.layout = "chat" } label: { Image(systemName: "xmark") }.buttonStyle(.plain)
+                        .foregroundStyle(Theme.soft).help("Close the code pane")
+                }
             }
             .font(Theme.mono(12)).padding(12)
             Rectangle().fill(Theme.rule).frame(height: 1)
@@ -207,15 +239,14 @@ struct CodeView: View {
                     }
                 }
             }
-            Rectangle().fill(Theme.rule).frame(height: 1)
-            HStack { Spacer(); Button("done") { dismiss() }.keyboardShortcut(.cancelAction) }.padding(10).font(Theme.mono(12))
         }
-        .frame(minWidth: 900, minHeight: 600)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.paper)
-        .task(id: target.id) { load(abs) }
+        .task(id: "\(target.id)#\(project.edits)") { load(abs) }   // reloads when the agent edits
     }
 
     private func load(_ abs: String) {
+        note = ""
         guard let d = FileManager.default.contents(atPath: abs) else { note = "can't read \(target.path)"; return }
         if d.count > 4_000_000 { note = "too big to show here (\(d.count / 1_000_000) MB): open it in your editor"; return }
         if d.prefix(8000).contains(0) { note = "binary file: open it in your editor"; return }

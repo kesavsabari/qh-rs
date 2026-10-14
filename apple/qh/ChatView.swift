@@ -14,7 +14,31 @@ struct ProjectView: View {
             }
             if project.showSetup {
                 SetupView(project: project)
-            } else if let tab = project.current {
+            } else if project.layout == "code" {
+                CodeBrowser(project: project)
+            } else if project.layout == "split" {
+                HSplitView {
+                    chat.frame(minWidth: 380)
+                    CodePane(project: project).frame(minWidth: 360)
+                }
+            } else {
+                chat
+            }
+        }
+        .background(Theme.paper)
+        .sheet(item: $project.picker) { p in PickerSheet(picker: p, project: project) }
+        .sheet(isPresented: $project.showReview) { ReviewView(project: project) }
+        .sheet(isPresented: $project.showTasks) { TasksView(project: project) }
+        // links in the thread point at this project's files
+        .onAppear { if !project.tree.children.isEmpty { PathLinks.use(project.fileSet, root: project.path) } }
+    }
+}
+
+extension ProjectView {
+    /// The thread, waiting permissions and the composer: the chat column in every layout.
+    @ViewBuilder var chat: some View {
+        VStack(spacing: 0) {
+            if let tab = project.current {
                 ThreadView(tab: tab, repliesOnly: project.repliesOnly)
                     .environment(\.openURL, OpenURLAction { url in
                         guard url.scheme == "qh-file" else { return .systemAction }
@@ -33,13 +57,6 @@ struct ProjectView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .background(Theme.paper)
-        .sheet(item: $project.picker) { p in PickerSheet(picker: p, project: project) }
-        .sheet(isPresented: $project.showReview) { ReviewView(project: project) }
-        .sheet(isPresented: $project.showTasks) { TasksView(project: project) }
-        .sheet(item: $project.code) { t in CodeView(target: t, project: project) }
-        // links in the thread point at this project's files
-        .onAppear { if !project.tree.children.isEmpty { PathLinks.use(project.fileSet, root: project.path) } }
     }
 }
 
@@ -55,6 +72,13 @@ struct ChatTabBar: View {
                 }
                 .buttonStyle(.plain).help("New tab (⌘T)")
                 Spacer()
+                Picker("", selection: $project.layout) {
+                    Text("Chat").tag("chat")
+                    Text("Split").tag("split")
+                    Text("Code").tag("code")
+                }
+                .pickerStyle(.segmented).labelsHidden().fixedSize().controlSize(.small)
+                .padding(.bottom, 7).padding(.trailing, 12).help("Chat, chat and code side by side, or code (⌃1 ⌃2 ⌃3)")
                 if !project.changes.isEmpty {
                     Button { project.loadChanges(); project.showReview = true } label: {
                         Text("\(project.changes.count) changed").font(Theme.mono(12)).foregroundStyle(Theme.accent)

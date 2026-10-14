@@ -110,6 +110,9 @@ final class Project: ObservableObject, Identifiable {
     /// the file tree (from `qh serve`'s list, which follows .gitignore) and the file the code view shows
     @Published var tree = FileNode(name: "", path: "", isDir: true)
     @Published var code: CodeTarget?
+    /// main area: "chat", "split" (chat and code side by side) or "code" (tree and file)
+    @Published var layout = "chat"
+    @Published var edits = 0   // bumps on every agent edit, so an open file reloads
     func loadFiles() { client.send(["type": "files", "tab": current?.name ?? "main"]) }
     func absolute(_ rel: String) -> String { rel.hasPrefix("/") ? rel : path + "/" + rel }
     /// Opens a path from anywhere (the tree, a link in the thread, a tool card) in the code view.
@@ -120,6 +123,7 @@ final class Project: ObservableObject, Identifiable {
         let found = PathLinks.resolve(rel, files: fileSet, root: path) ?? rel
         guard FileManager.default.fileExists(atPath: absolute(found)) else { return }
         code = CodeTarget(path: found, line: line)
+        if layout == "chat" { layout = "split" }
     }
     /// how much each file matters to you, from git history (filled in the background)
     var gitHeat: [String: Double] = [:]
@@ -356,6 +360,7 @@ final class Project: ObservableObject, Identifiable {
             }
         case "diff":
             loadChanges()
+            edits += 1
             tab(tabName).items.append(Item(kind: .diff(path: e["path"] as? String ?? "", added: e["added"] as? Int ?? 0, removed: e["removed"] as? Int ?? 0)))
         case "notice", "compact":
             let msg = e["message"] as? String ?? "compacted the conversation"

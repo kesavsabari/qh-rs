@@ -15,7 +15,7 @@ struct ProjectView: View {
             if project.showSetup {
                 SetupView(project: project)
             } else if let tab = project.current {
-                ThreadView(tab: tab)
+                ThreadView(tab: tab, repliesOnly: project.repliesOnly)
                 ForEach(project.asks.filter { $0.tab == tab.name }) { a in AskCard(ask: a, project: project) }
                 Composer(project: project, tab: tab)
             } else {
@@ -30,6 +30,8 @@ struct ProjectView: View {
         .background(Theme.paper)
         .sheet(item: $project.picker) { p in PickerSheet(picker: p, project: project) }
         .sheet(isPresented: $project.showReview) { ReviewView(project: project) }
+        .sheet(isPresented: $project.showTeam) { TeamView(project: project) }
+        .sheet(isPresented: $project.showTasks) { TasksView(project: project) }
     }
 }
 
@@ -50,6 +52,12 @@ struct ChatTabBar: View {
                         Text("\(project.changes.count) changed").font(Theme.mono(12)).foregroundStyle(Theme.accent)
                     }
                     .buttonStyle(.plain).padding(.bottom, 9).padding(.trailing, 10).help("Review changes (⌘D)")
+                }
+                ForEach([("team", "Team room (⌘⇧T)"), ("tasks", "Background tasks (⌘⇧B)")], id: \.0) { name, help in
+                    Button { if name == "team" { project.showTeam = true } else { project.showTasks = true } } label: {
+                        Text(name).font(Theme.mono(12)).foregroundStyle(Theme.soft)
+                    }
+                    .buttonStyle(.plain).padding(.bottom, 9).padding(.trailing, 10).help(help)
                 }
                 Button { project.showSetup.toggle() } label: {
                     Text("models").font(Theme.mono(12)).foregroundStyle(project.showSetup ? Theme.ink : Theme.soft)
@@ -125,6 +133,13 @@ struct ModePicker: View {
 
 struct ThreadView: View {
     @ObservedObject var tab: ChatTab
+    var repliesOnly = false
+
+    /// Replies only (⌘R): your messages and the agent's answers; tool calls, diffs and notes fold away.
+    private var shown: [Item] {
+        guard repliesOnly else { return tab.items }
+        return tab.items.filter { if case .user = $0.kind { return true }; if case .reply = $0.kind { return true }; return false }
+    }
 
     var body: some View {
         ScrollViewReader { sv in
@@ -133,7 +148,7 @@ struct ThreadView: View {
                     if tab.items.isEmpty {
                         Text("Ask qh anything about this project.").font(Theme.sans(15)).foregroundStyle(Theme.faint).padding(.top, 40)
                     }
-                    ForEach(tab.items) { item in ItemView(item: item) }
+                    ForEach(shown) { item in ItemView(item: item) }
                     if tab.status == "working" { Thinking() }
                     Color.clear.frame(height: 1).id("end")
                 }

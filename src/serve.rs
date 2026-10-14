@@ -108,6 +108,28 @@ fn pump(hub: Arc<Hub>, st: Arc<State>, rx: Receiver<crate::ui::Ui>) {
     }
 }
 
+/// The team room: who's here, channels, what's waiting for you, recent activity, and one
+/// channel's messages (marked read). `running: false` when this project has no team on.
+fn team_state(chan: Option<&str>) -> Value {
+    if !crate::team::running() {
+        return json!({"type": "team", "running": false});
+    }
+    let people: Vec<Value> = crate::team::people().into_iter().map(|(login, online, status, sessions, role)|
+        json!({"login": login, "online": online, "status": status, "sessions": sessions, "role": role})).collect();
+    let channels: Vec<Value> = crate::team::channels().into_iter().map(|c|
+        json!({"id": c.id, "label": c.label, "unread": c.unread, "pinged": c.pinged, "online": c.online})).collect();
+    let waiting: Vec<Value> = crate::team::pending().into_iter().map(|i| json!({"from": i.from, "id": i.id, "session": i.session,
+        "text": i.text, "question": i.question.is_some(), "replied": i.replied})).collect();
+    let activity: Vec<Value> = crate::team::activity().into_iter().take(40).map(|(ago, x)| json!({"ago": ago, "text": x})).collect();
+    let chan = chan.unwrap_or("#team");
+    let msgs: Vec<Value> = crate::team::channel_msgs(chan).into_iter().map(|(when, who, text, ping)|
+        json!({"who": who, "when": when, "text": text, "ping": ping})).collect();
+    crate::team::channel_read(chan);
+    json!({"type": "team", "running": true, "me": crate::team::me(), "repo": crate::team::repo(),
+           "status": crate::team::status_line(), "people": people, "channels": channels, "waiting": waiting,
+           "activity": activity, "chan": chan, "messages": msgs})
+}
+
 /// One client's commands. Returns an error line for a bad command, nothing when it worked.
 fn command(hub: &Arc<Hub>, st: &State, v: &Value) -> Option<String> {
     let tab = v["tab"].as_str().unwrap_or("main");
@@ -138,6 +160,13 @@ fn command(hub: &Arc<Hub>, st: &State, v: &Value) -> Option<String> {
             st.broadcast(&json!({"type": "confirm_closed", "id": id}));
         }
         "stop" => hub.interrupt(tab),
+        "team" => st.broadcast(&team_state(v["chan"].as_str())),
+        "team_send" => {
+            let (chan, text) = (v["chan"].as_str().unwrap_or("#team"), v["text"].as_str().unwrap_or(""));
+            if let Err(e) = crate::team::channel_send(chan, text) { return Some(e) }
+            st.broadcast(&team_state(Some(chan)));
+        }
+        "tasks" => st.broadcast(&json!({"type": "tasks", "tab": tab, "text": crate::bg::list(tab)})),
         "changes" => {
             let Some(m) = hub.get(tab) else { return Some(format!("no tab {tab}")) };
             let files: Vec<Value> = lock(&m.turn).ckpt.changes().into_iter()
@@ -283,6 +312,11 @@ pub fn run(hub: Arc<Hub>, rx: Receiver<crate::ui::Ui>) -> i32 {
     let _ = std::io::stdout().flush();
     let st = Arc::new(State { clients: Mutex::new(vec![]), remote: Mutex::new(crate::ui::Remote::new(hub.clone())), confirms: Mutex::new(HashMap::new()), next: AtomicU64::new(1) });
     { let (h, s) = (hub.clone(), st.clone()); std::thread::spawn(move || pump(h, s, rx)); }
+    match lock(&st.remote).start_team() {
+        Some(Ok(s)) => eprintln!("team: {s}"),
+        Some(Err(e)) => eprintln!("team presence: {e}"),
+        None => {}
+    }
     let want = Arc::new(tok);
     for s in listener.incoming().map_while(Result::ok) {
         let (h, st, want) = (hub.clone(), st.clone(), want.clone());

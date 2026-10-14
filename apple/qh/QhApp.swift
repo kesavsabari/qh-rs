@@ -22,6 +22,9 @@ struct QhApp: App {
             CommandGroup(replacing: .newItem) {
                 Button("Open Folder…") { ws.pick() }.keyboardShortcut("o")
                 Button("Review Changes") { ws.current?.loadChanges(); ws.current?.showReview = true }.keyboardShortcut("d").disabled(ws.current == nil)
+                Button("Team Room") { ws.current?.showTeam = true }.keyboardShortcut("t", modifiers: [.command, .shift]).disabled(ws.current == nil)
+                Button("Background Tasks") { ws.current?.showTasks = true }.keyboardShortcut("b", modifiers: [.command, .shift]).disabled(ws.current == nil)
+                Button("Replies Only") { ws.current?.repliesOnly.toggle() }.keyboardShortcut("r").disabled(ws.current == nil)
                 Button("Models…") { ws.current?.showSetup = true }.keyboardShortcut(",").disabled(ws.current == nil)
                 Button("New Tab") { ws.current?.newTab() }.keyboardShortcut("t").disabled(ws.current == nil)
             }

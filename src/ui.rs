@@ -3177,6 +3177,16 @@ impl Remote {
         Remote(App::blank(hub))
     }
 
+    /// Team presence on, as the TUI does at start, when this project has a team. Returns what it says.
+    pub fn start_team(&mut self) -> Option<Result<String, String>> {
+        let app = &mut self.0;
+        let n = app.hub.names().first()?.clone();
+        let cwd = app.hub.get(&n)?.cwd();
+        if !crate::team::enabled_for(&cwd) { return None }
+        app.set_active(&n);
+        Some(app.start_team_in(&n))
+    }
+
     /// The commands and descriptions `/` offers in `tab`, custom ones included.
     pub fn commands(&self, tab: &str) -> Vec<Value> {
         let cwd = self.0.hub.get(tab).map(|m| m.cwd()).unwrap_or_default();

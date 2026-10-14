@@ -64,6 +64,11 @@ final class Project: ObservableObject, Identifiable {
     @Published var setup: SetupState?
     @Published var picker: PickerState?
     @Published var changes: [FileChange] = []
+    @Published var team: TeamState?
+    @Published var tasks = ""
+    @Published var showTeam = false
+    @Published var showTasks = false
+    @Published var repliesOnly = false
     @Published var showReview = false
     @Published var secret: String?          // provider whose API key the composer is asking for
     @Published var commands: [(cmd: String, about: String)] = []
@@ -120,6 +125,9 @@ final class Project: ObservableObject, Identifiable {
     func loadChanges() { client.send(["type": "changes", "tab": current?.name ?? "main"]) }
     func accept(_ f: FileChange) { client.send(["type": "accept", "tab": current?.name ?? "main", "path": f.path]) }
     func reject(_ f: FileChange) { client.send(["type": "reject", "tab": current?.name ?? "main", "path": f.path]) }
+    func loadTeam(_ chan: String) { client.send(["type": "team", "chan": chan]) }
+    func teamSend(_ chan: String, _ text: String) { client.send(["type": "team_send", "chan": chan, "text": text]) }
+    func loadTasks() { client.send(["type": "tasks", "tab": current?.name ?? "main"]) }
     func loadCommands() { client.send(["type": "commands", "tab": current?.name ?? "main"]) }
 
     /// Project files for @ mentions: skips what's never worth mentioning, stops at 20k.
@@ -169,6 +177,10 @@ final class Project: ObservableObject, Identifiable {
         let type = e["type"] as? String ?? ""
         let tabName = e["tab"] as? String ?? "main"
         switch type {
+        case "team":
+            team = TeamState(e)
+        case "tasks":
+            tasks = e["text"] as? String ?? ""
         case "changes":
             let root = e["root"] as? String ?? path
             changes = (e["files"] as? [[String: Any]] ?? []).map {

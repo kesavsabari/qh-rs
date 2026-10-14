@@ -69,6 +69,30 @@ fn tab_json(hub: &Hub, name: &str, history: bool) -> Value {
     v
 }
 
+/// Once per server: old sessions whose title is a long first request get a short one from the
+/// model, in the background, using an idle tab; the sidebar list is sent again when done.
+fn backfill_titles(hub: &Arc<Hub>, st: &Arc<State>) {
+    static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if STARTED.swap(true, std::sync::atomic::Ordering::Relaxed) { return }
+    let (hub, st) = (hub.clone(), st.clone());
+    std::thread::spawn(move || {
+        let Some(m) = hub.names().first().and_then(|n| hub.get(n)) else { return };
+        let mut named = 0;
+        for (path, first) in crate::session::untitled(&m.root, 30) {
+            if m.status() != "idle" { break } // never compete with a running turn
+            if let Some(t) = crate::engine::label(&hub, &m, &first) {
+                crate::session::set_title(&path, &t);
+                named += 1;
+            }
+        }
+        if named > 0 {
+            let open: Vec<Value> = hub.names().iter().filter_map(|n| hub.get(n))
+                .map(|m| json!({"tab": m.name, "id": lock(&m.session).file_stem().map(|s| s.to_string_lossy().to_string())})).collect();
+            st.broadcast(&json!({"type": "sessions", "sessions": crate::session::for_project(&m.root, 60), "open": open}));
+        }
+    });
+}
+
 /// The turns that changed files, for the app's checkpoint timeline.
 fn checkpoints_json(tab: &str, c: &crate::checkpoints::Checkpoints) -> Value {
     let items: Vec<Value> = c.turns().into_iter().map(|(turn, prompt, files)| json!({"turn": turn, "prompt": prompt, "files": files})).collect();
@@ -173,7 +197,7 @@ fn project_files(root: &Path) -> Vec<String> {
 }
 
 /// One client's commands. Returns an error line for a bad command, nothing when it worked.
-fn command(hub: &Arc<Hub>, st: &State, v: &Value) -> Option<String> {
+fn command(hub: &Arc<Hub>, st: &Arc<State>, v: &Value) -> Option<String> {
     let tab = v["tab"].as_str().unwrap_or("main");
     match v["type"].as_str().unwrap_or("") {
         "prompt" => {
@@ -203,6 +227,7 @@ fn command(hub: &Arc<Hub>, st: &State, v: &Value) -> Option<String> {
         }
         "stop" => hub.interrupt(tab),
         "sessions" => {
+            backfill_titles(hub, st);
             let cwd = hub.get(tab).map(|m| m.root.clone()).unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
             let open: Vec<Value> = hub.names().iter().filter_map(|n| hub.get(n))
                 .map(|m| json!({"tab": m.name, "id": lock(&m.session).file_stem().map(|s| s.to_string_lossy().to_string())})).collect();
@@ -220,6 +245,7 @@ fn command(hub: &Arc<Hub>, st: &State, v: &Value) -> Option<String> {
             }
             if let Err(e) = std::fs::remove_file(&path) { return Some(e.to_string()) }
             let _ = std::fs::remove_dir_all(dir.join("checkpoints").join(id));
+            let _ = std::fs::remove_file(path.with_extension("title"));
             hub.changed();
             let cwd = hub.names().first().and_then(|n| hub.get(n)).map(|m| m.root.clone()).unwrap_or_default();
             let open: Vec<Value> = hub.names().iter().filter_map(|n| hub.get(n))

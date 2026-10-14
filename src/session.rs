@@ -98,6 +98,26 @@ fn cut(s: &str, n: usize) -> String {
     if s.chars().count() > n { format!("{}…", s.chars().take(n).collect::<String>()) } else { s }
 }
 
+/// A short title for a session (named by the model), kept beside its transcript.
+pub fn set_title(session: &Path, title: &str) {
+    if !title.trim().is_empty() { let _ = std::fs::write(session.with_extension("title"), title.trim()); }
+}
+
+fn title_of(session: &Path) -> Option<String> {
+    std::fs::read_to_string(session.with_extension("title")).ok().map(|t| t.trim().to_string()).filter(|t| !t.is_empty())
+}
+
+/// This folder's sessions with no short title yet and a long first request: (path, that request).
+pub fn untitled(cwd: &Path, n: usize) -> Vec<(PathBuf, String)> {
+    for_project(cwd, n).into_iter().filter_map(|x| {
+        let p = PathBuf::from(x["path"].as_str()?);
+        if title_of(&p).is_some() || x["title"].as_str()?.chars().count() <= 40 { return None }
+        let first = load(&p).into_iter().filter(|m| m["role"] == "user").map(|m| text(&m))
+            .find(|t| !t.trim_start().starts_with('/'))?;
+        Some((p, first))
+    }).collect()
+}
+
 fn id(p: &Path) -> String {
     p.file_stem().unwrap_or_default().to_string_lossy().into()
 }
@@ -130,6 +150,7 @@ pub fn for_project(cwd: &Path, n: usize) -> Vec<Value> {
         }
         let (_, here, title, count) = &seen[&p];
         if !*here || title.is_empty() { continue }
+        let title = &title_of(&p).unwrap_or_else(|| title.clone());
         let when = modified.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
         out.push(serde_json::json!({"id": id(&p), "title": title, "messages": count, "when": when, "path": p}));
         if out.len() >= n { break }

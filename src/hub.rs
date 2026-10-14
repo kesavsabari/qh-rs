@@ -286,6 +286,7 @@ session tests). Messages from other sessions start with [from <name>]. qh saves 
     pub fn name_role(&self, m: &Member, role: &str) {
         *lock(&m.purpose) = role.to_string();
         m.named.store(true, Relaxed);
+        session::set_title(&lock(&m.session), role);
         self.save();
         self.changed();
     }

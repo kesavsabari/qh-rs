@@ -20,9 +20,7 @@ struct ContentView: View {
         }
         .navigationSplitViewStyle(.balanced)
         .toolbar {
-            ToolbarItem(placement: .principal) {
-                Text(ws.title).font(Theme.sans(13, medium: true)).foregroundStyle(Theme.ink).lineLimit(1)
-            }
+            TitleItem(title: ws.title)
             ToolbarItem(placement: .primaryAction) {
                 Button { withAnimation(.smooth(duration: 0.25)) { ws.toggleInspector() } } label: {
                     Image(systemName: "sidebar.right")
@@ -30,6 +28,21 @@ struct ContentView: View {
                 .help("Inspector (⌘⌥I)")
             }
         }
+    }
+}
+
+/// The window title in the toolbar, as plain text: macOS 26 would put it in a glass capsule.
+struct TitleItem: ToolbarContent {
+    let title: String
+    var body: some ToolbarContent {
+        if #available(macOS 26, *) {
+            ToolbarItem(placement: .principal) { label }.sharedBackgroundVisibility(.hidden)
+        } else {
+            ToolbarItem(placement: .principal) { label }
+        }
+    }
+    private var label: some View {
+        Text(title).font(Theme.sans(13, medium: true)).foregroundStyle(Theme.ink).lineLimit(1)
     }
 }
 

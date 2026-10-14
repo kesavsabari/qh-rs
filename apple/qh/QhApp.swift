@@ -54,6 +54,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // `debugSnapshot` default is on, a distributed "io.qh.snapshot" notification makes the app
         // draw its own window into /tmp/qh-window.png (only its own pixels, nothing else on screen)
         if UserDefaults.standard.bool(forKey: "debugSnapshot") {
+            // and "io.qh.page" with a page name as its object: show that page (agent, requests, members…)
+            DistributedNotificationCenter.default().addObserver(forName: .init("io.qh.page"), object: nil, queue: .main) { n in
+                let page = n.object as? String ?? ""
+                MainActor.assumeIsolated {
+                    guard let ws = Notify.workspace else { return }
+                    switch page {
+                    case "agent": ws.teamPage = .agent
+                    case "requests": ws.teamPage = .requests
+                    case "members": ws.teamPage = .members
+                    case "claims": ws.teamPage = .claims
+                    case "activity": ws.teamPage = .activity
+                    case "personal", "team": ws.setSpace(page)
+                    default: ws.teamPage = .channel(page)
+                    }
+                }
+            }
             DistributedNotificationCenter.default().addObserver(forName: .init("io.qh.snapshot"), object: nil, queue: .main) { _ in
                 MainActor.assumeIsolated {
                     guard let w = NSApp.windows.first(where: { $0.isVisible && $0.contentView != nil }), let v = w.contentView?.superview ?? w.contentView,

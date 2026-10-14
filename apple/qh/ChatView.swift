@@ -388,26 +388,28 @@ struct TableBlock: View {
 
     var body: some View {
         let r = rows
-        let cols = r.map(\.count).max() ?? 0
-        ScrollView(.horizontal, showsIndicators: false) {
-            Grid(alignment: .topLeading, horizontalSpacing: 18, verticalSpacing: 0) {
-                ForEach(Array(r.enumerated()), id: \.offset) { i, row in
-                    GridRow {
-                        ForEach(0..<cols, id: \.self) { c in
-                            Text(Markdown.inline(c < row.count ? row[c] : ""))
-                                .font(Theme.sans(13.5, medium: i == 0)).foregroundStyle(Theme.ink)
-                                .frame(maxWidth: 340, alignment: .leading)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .textSelection(.enabled)
-                                .padding(.vertical, 7)
-                        }
-                    }
-                    if i < r.count - 1 {
-                        Rectangle().fill(Theme.ink.opacity(i == 0 ? 0.18 : 0.08)).frame(height: 0.5).gridCellColumns(cols)
+        let cols = max(r.map(\.count).max() ?? 1, 1)
+        // columns share the transcript's width: rows then wrap and grow to fit instead of overlapping
+        // (a sideways scroll measured them at infinite width)
+        let first: CGFloat = cols > 1 ? 130 : 700
+        let rest = cols > 1 ? (700 - first - CGFloat(cols - 1) * 16) / CGFloat(cols - 1) : 0
+        Grid(alignment: .topLeading, horizontalSpacing: 16, verticalSpacing: 0) {
+            ForEach(Array(r.enumerated()), id: \.offset) { i, row in
+                GridRow {
+                    ForEach(0..<cols, id: \.self) { c in
+                        Text(Markdown.inline(c < row.count ? row[c] : ""))
+                            .font(Theme.sans(13.5, medium: i == 0 || c == 0)).foregroundStyle(Theme.ink)
+                            .lineSpacing(2)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(width: c == 0 ? first : rest, alignment: .leading)
+                            .textSelection(.enabled)
+                            .padding(.vertical, 8)
                     }
                 }
+                if i < r.count - 1 {
+                    Rectangle().fill(Theme.ink.opacity(i == 0 ? 0.18 : 0.08)).frame(height: 0.5).gridCellColumns(cols)
+                }
             }
-            .padding(.horizontal, 2)
         }
     }
 }

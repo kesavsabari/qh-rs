@@ -160,6 +160,30 @@ fn command(hub: &Arc<Hub>, st: &State, v: &Value) -> Option<String> {
             st.broadcast(&json!({"type": "confirm_closed", "id": id}));
         }
         "stop" => hub.interrupt(tab),
+        "sessions" => {
+            let cwd = hub.get(tab).map(|m| m.root.clone()).unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+            let open: Vec<Value> = hub.names().iter().filter_map(|n| hub.get(n))
+                .map(|m| json!({"tab": m.name, "id": lock(&m.session).file_stem().map(|s| s.to_string_lossy().to_string())})).collect();
+            st.broadcast(&json!({"type": "sessions", "sessions": crate::session::for_project(&cwd, 60), "open": open}));
+        }
+        "resume" => {
+            let id = v["id"].as_str().unwrap_or("");
+            let path = crate::session::dir().join(format!("{id}.jsonl"));
+            if id.is_empty() || id.contains(['/', '\\']) || !path.exists() { return Some(format!("no saved session {id}")) }
+            // already open in a tab: just go there
+            if let Some(m) = hub.names().iter().filter_map(|n| hub.get(n)).find(|m| *lock(&m.session) == path) {
+                st.broadcast(&json!({"type": "active", "tab": m.name}));
+                return None;
+            }
+            let name = (1..).map(|i| if i == 1 { "resumed".to_string() } else { format!("resumed{i}") }).find(|n| hub.get(n).is_none()).unwrap_or_default();
+            let root = hub.names().first().and_then(|n| hub.get(n)).map(|m| m.root.clone());
+            if let Err(e) = hub.add(&name, None, "", "", Some(path), false, root) { return Some(e) }
+            hub.changed();
+            let mut h = tab_json(hub, &name, true);
+            h["type"] = json!("history");
+            st.broadcast(&h);
+            st.broadcast(&json!({"type": "active", "tab": name}));
+        }
         "team" => st.broadcast(&team_state(v["chan"].as_str())),
         "team_send" => {
             let (chan, text) = (v["chan"].as_str().unwrap_or("#team"), v["text"].as_str().unwrap_or(""));

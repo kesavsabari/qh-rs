@@ -65,6 +65,8 @@ final class Project: ObservableObject, Identifiable {
     @Published var picker: PickerState?
     @Published var changes: [FileChange] = []
     @Published var team: TeamState?
+    @Published var sessions: [SavedSession] = []
+    @Published var openSessions: [String: String] = [:]   // session id → tab showing it
     @Published var tasks = ""
     @Published var showTeam = false
     @Published var showTasks = false
@@ -125,6 +127,11 @@ final class Project: ObservableObject, Identifiable {
     func loadChanges() { client.send(["type": "changes", "tab": current?.name ?? "main"]) }
     func accept(_ f: FileChange) { client.send(["type": "accept", "tab": current?.name ?? "main", "path": f.path]) }
     func reject(_ f: FileChange) { client.send(["type": "reject", "tab": current?.name ?? "main", "path": f.path]) }
+    func loadSessions() { client.send(["type": "sessions"]) }
+    func resume(_ s: SavedSession) {
+        if let t = openSessions[s.id] { active = t; return }
+        client.send(["type": "resume", "id": s.id])
+    }
     func loadTeam(_ chan: String) { client.send(["type": "team", "chan": chan]) }
     func teamSend(_ chan: String, _ text: String) { client.send(["type": "team_send", "chan": chan, "text": text]) }
     func loadTasks() { client.send(["type": "tasks", "tab": current?.name ?? "main"]) }
@@ -177,6 +184,16 @@ final class Project: ObservableObject, Identifiable {
         let type = e["type"] as? String ?? ""
         let tabName = e["tab"] as? String ?? "main"
         switch type {
+        case "history":
+            fill(e)
+        case "sessions":
+            sessions = (e["sessions"] as? [[String: Any]] ?? []).map {
+                SavedSession(id: $0["id"] as? String ?? "", title: $0["title"] as? String ?? "",
+                             messages: $0["messages"] as? Int ?? 0, when: Date(timeIntervalSince1970: $0["when"] as? Double ?? 0))
+            }
+            var open: [String: String] = [:]
+            for o in e["open"] as? [[String: Any]] ?? [] { if let id = o["id"] as? String, let t = o["tab"] as? String { open[id] = t } }
+            openSessions = open
         case "team":
             team = TeamState(e)
         case "tasks":
@@ -221,21 +238,8 @@ final class Project: ObservableObject, Identifiable {
             if e["needs_setup"] as? Bool == true { showSetup = true; loadSetup() }
             mode = e["mode"] as? String ?? ""
             tabs = []
-            for t in e["tabs"] as? [[String: Any]] ?? [] {
-                let tab = self.tab(t["name"] as? String ?? "main")
-                update(tab, t)
-                for m in t["messages"] as? [[String: Any]] ?? [] {
-                    let text = m["text"] as? String ?? ""
-                    if m["role"] as? String == "user" {
-                        if !text.isEmpty { tab.items.append(Item(kind: .user(text))) }
-                    } else {
-                        if !text.isEmpty { tab.items.append(Item(kind: .reply(text))) }
-                        for name in m["tools"] as? [String] ?? [] {
-                            tab.items.append(Item(kind: .tool(name: name, args: "", ok: true, summary: "", output: "")))
-                        }
-                    }
-                }
-            }
+            for t in e["tabs"] as? [[String: Any]] ?? [] { fill(t) }
+            loadSessions()
             if !tabs.contains(where: { $0.name == active }) { active = tabs.first?.name ?? "main" }
         case "tabs":
             mode = e["mode"] as? String ?? mode
@@ -270,6 +274,7 @@ final class Project: ObservableObject, Identifiable {
             t.cost = e["cost"] as? Double
         case "turn_done":
             tab(tabName).tokens = e["tokens"] as? Int ?? 0
+            loadSessions()
         case "confirm":
             asks.append(Ask(id: e["id"] as? Int ?? -1, tab: tabName, tool: e["tool"] as? String ?? "",
                             detail: Self.detail(e["tool"] as? String ?? "", e["args"]), warn: e["warn"] as? String ?? "",
@@ -282,6 +287,24 @@ final class Project: ObservableObject, Identifiable {
             break
         }
         Notify.badge()
+    }
+
+    /// A tab from the server with its saved history (snapshot, or a resumed session).
+    private func fill(_ t: [String: Any]) {
+        let tab = self.tab(t["name"] as? String ?? "main")
+        update(tab, t)
+        tab.items = []
+        for m in t["messages"] as? [[String: Any]] ?? [] {
+            let text = m["text"] as? String ?? ""
+            if m["role"] as? String == "user" {
+                if !text.isEmpty { tab.items.append(Item(kind: .user(text))) }
+            } else {
+                if !text.isEmpty { tab.items.append(Item(kind: .reply(text))) }
+                for name in m["tools"] as? [String] ?? [] {
+                    tab.items.append(Item(kind: .tool(name: name, args: "", ok: true, summary: "", output: "")))
+                }
+            }
+        }
     }
 
     private func update(_ tab: ChatTab, _ t: [String: Any]) {
@@ -337,4 +360,11 @@ struct PickerState: Identifiable {
             Row(value: $0["value"] as? String ?? "", label: $0["label"] as? String ?? "", group: $0["group"] as? String ?? "")
         }
     }
+}
+
+struct SavedSession: Identifiable {
+    let id: String
+    let title: String
+    let messages: Int
+    let when: Date
 }

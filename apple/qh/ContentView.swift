@@ -45,11 +45,11 @@ struct Sidebar: View {
                     let personal = ws.recent.filter { ws.teamRepos[$0] == nil }
                     if !team.isEmpty {
                         SectionLabel(text: "team", count: team.count)
-                        ForEach(team, id: \.self) { p in ProjectRow(path: p) }
+                        ForEach(team, id: \.self) { p in ProjectRow(path: p); SessionList(path: p) }
                     }
                     if !personal.isEmpty {
                         SectionLabel(text: "personal", count: personal.count).padding(.top, team.isEmpty ? 0 : 16)
-                        ForEach(personal, id: \.self) { p in ProjectRow(path: p) }
+                        ForEach(personal, id: \.self) { p in ProjectRow(path: p); SessionList(path: p) }
                     }
                 }
             }
@@ -107,6 +107,56 @@ struct ProjectRow: View {
             if let live { Button("Stop qh here") { ws.close(live) } }
             Button("Remove from list") { ws.forget(path) }
         }
+    }
+}
+
+/// An open project's sessions under its row, newest first, like Claude Code desktop: the tabs
+/// open now, then saved ones; click to switch to or resume one.
+struct SessionList: View {
+    @EnvironmentObject var ws: Workspace
+    let path: String
+    var body: some View {
+        if let p = ws.projects.first(where: { $0.path == path }) { Sessions(project: p) }
+    }
+}
+
+struct Sessions: View {
+    @ObservedObject var project: Project
+    @EnvironmentObject var ws: Workspace
+    @State private var all = false
+
+    var body: some View {
+        let shown = all ? project.sessions : Array(project.sessions.prefix(8))
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(shown) { s in
+                let tab = project.openSessions[s.id]
+                let on = ws.active == project.path && tab != nil && tab == project.current?.name
+                HStack(spacing: 6) {
+                    Circle().fill(tab != nil ? Theme.accent : .clear).frame(width: 4, height: 4)
+                    Text(s.title.isEmpty ? s.id : s.title).font(Theme.sans(12.5)).foregroundStyle(on ? Theme.ink : Theme.soft).lineLimit(1)
+                    Spacer(minLength: 4)
+                    Text(Self.ago(s.when)).font(Theme.mono(10)).foregroundStyle(Theme.faint)
+                }
+                .padding(.leading, 14).padding(.trailing, 8).padding(.vertical, 5)
+                .background(RoundedRectangle(cornerRadius: 5).fill(on ? Theme.hover : .clear))
+                .contentShape(Rectangle())
+                .onTapGesture { ws.active = project.path; project.resume(s) }
+                .help("\(s.messages) messages · \(s.id)")
+            }
+            if project.sessions.count > 8 {
+                Button(all ? "fewer" : "all \(project.sessions.count)") { all.toggle() }
+                    .buttonStyle(.plain).font(Theme.mono(11)).foregroundStyle(Theme.faint).padding(.leading, 24).padding(.vertical, 4)
+            }
+        }
+        .padding(.bottom, 6)
+    }
+
+    static func ago(_ d: Date) -> String {
+        let s = Int(Date().timeIntervalSince(d))
+        if s < 60 { return "now" }
+        if s < 3600 { return "\(s / 60)m" }
+        if s < 86400 { return "\(s / 3600)h" }
+        return "\(s / 86400)d"
     }
 }
 

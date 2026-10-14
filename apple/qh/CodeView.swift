@@ -143,7 +143,7 @@ enum Editor {
                 try? p.run()
                 return
             }
-            NSWorkspace.shared.open([URL(fileURLWithPath: path)], withApplicationAt: app, configuration: .init())
+            NSWorkspace.shared.open([URL(fileURLWithPath: path)], withApplicationAt: app, configuration: NSWorkspace.OpenConfiguration())
             return
         }
         NSWorkspace.shared.open(URL(fileURLWithPath: path))

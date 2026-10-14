@@ -85,12 +85,21 @@ fn backfill_titles(hub: &Arc<Hub>, st: &Arc<State>) {
                 named += 1;
             }
         }
-        if named > 0 {
-            let open: Vec<Value> = hub.names().iter().filter_map(|n| hub.get(n))
-                .map(|m| json!({"tab": m.name, "id": lock(&m.session).file_stem().map(|s| s.to_string_lossy().to_string())})).collect();
-            st.broadcast(&json!({"type": "sessions", "sessions": crate::session::for_project(&m.root, 60), "open": open}));
-        }
+        if named > 0 { st.broadcast(&sessions_json(&hub, &m.root)) }
     });
+}
+
+/// The saved sessions for a folder's sidebar, and which tab shows each open one.
+fn sessions_json(hub: &Hub, cwd: &std::path::Path) -> Value {
+    let open: Vec<Value> = hub.names().iter().filter_map(|n| hub.get(n))
+        .map(|m| json!({"tab": m.name, "id": lock(&m.session).file_stem().map(|s| s.to_string_lossy().to_string())})).collect();
+    json!({"type": "sessions", "sessions": crate::session::for_project(cwd, 60), "open": open})
+}
+
+/// Every file the agent changed this session, before and now, for the review list.
+fn changes_json(tab: &str, root: &std::path::Path, c: &crate::checkpoints::Checkpoints) -> Value {
+    let files: Vec<Value> = c.changes().into_iter().map(|(p, b, a)| json!({"path": p, "before": b, "after": a})).collect();
+    json!({"type": "changes", "tab": tab, "root": root, "files": files})
 }
 
 /// The turns that changed files, for the app's checkpoint timeline.
@@ -229,9 +238,7 @@ fn command(hub: &Arc<Hub>, st: &Arc<State>, v: &Value) -> Option<String> {
         "sessions" => {
             backfill_titles(hub, st);
             let cwd = hub.get(tab).map(|m| m.root.clone()).unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-            let open: Vec<Value> = hub.names().iter().filter_map(|n| hub.get(n))
-                .map(|m| json!({"tab": m.name, "id": lock(&m.session).file_stem().map(|s| s.to_string_lossy().to_string())})).collect();
-            st.broadcast(&json!({"type": "sessions", "sessions": crate::session::for_project(&cwd, 60), "open": open}));
+            st.broadcast(&sessions_json(hub, &cwd));
         }
         "delete_session" => {
             // the transcript and its checkpoints; a tab showing it closes first, unless it's the last one
@@ -248,9 +255,7 @@ fn command(hub: &Arc<Hub>, st: &Arc<State>, v: &Value) -> Option<String> {
             let _ = std::fs::remove_file(path.with_extension("title"));
             hub.changed();
             let cwd = hub.names().first().and_then(|n| hub.get(n)).map(|m| m.root.clone()).unwrap_or_default();
-            let open: Vec<Value> = hub.names().iter().filter_map(|n| hub.get(n))
-                .map(|m| json!({"tab": m.name, "id": lock(&m.session).file_stem().map(|s| s.to_string_lossy().to_string())})).collect();
-            st.broadcast(&json!({"type": "sessions", "sessions": crate::session::for_project(&cwd, 60), "open": open}));
+            st.broadcast(&sessions_json(hub, &cwd));
         }
         "resume" => {
             let id = v["id"].as_str().unwrap_or("");
@@ -296,17 +301,14 @@ fn command(hub: &Arc<Hub>, st: &Arc<State>, v: &Value) -> Option<String> {
         "tasks" => st.broadcast(&json!({"type": "tasks", "tab": tab, "text": crate::bg::list(tab)})),
         "changes" => {
             let Some(m) = hub.get(tab) else { return Some(format!("no tab {tab}")) };
-            let files: Vec<Value> = lock(&m.turn).ckpt.changes().into_iter()
-                .map(|(p, b, a)| json!({"path": p, "before": b, "after": a})).collect();
-            st.broadcast(&json!({"type": "changes", "tab": tab, "root": m.root, "files": files}));
+            st.broadcast(&changes_json(tab, &m.root, &lock(&m.turn).ckpt));
         }
         "accept" | "reject" => {
             let Some(m) = hub.get(tab) else { return Some(format!("no tab {tab}")) };
             let path = v["path"].as_str().unwrap_or("");
             let mut t = lock(&m.turn);
             if v["type"] == "accept" { t.ckpt.accept(path) } else if let Err(e) = t.ckpt.reject(path) { return Some(e) }
-            let files: Vec<Value> = t.ckpt.changes().into_iter().map(|(p, b, a)| json!({"path": p, "before": b, "after": a})).collect();
-            st.broadcast(&json!({"type": "changes", "tab": tab, "root": m.root, "files": files}));
+            st.broadcast(&changes_json(tab, &m.root, &t.ckpt));
         }
         "checkpoints" => {
             let Some(m) = hub.get(tab) else { return Some(format!("no tab {tab}")) };
@@ -336,8 +338,7 @@ fn command(hub: &Arc<Hub>, st: &Arc<State>, v: &Value) -> Option<String> {
             st.broadcast(&json!({"type": "rewound", "tab": tab, "turn": turn, "restored": restored, "prompt": prompt}));
             let t = lock(&m.turn);
             st.broadcast(&checkpoints_json(tab, &t.ckpt));
-            let files: Vec<Value> = t.ckpt.changes().into_iter().map(|(p, b, a)| json!({"path": p, "before": b, "after": a})).collect();
-            st.broadcast(&json!({"type": "changes", "tab": tab, "root": m.root, "files": files}));
+            st.broadcast(&changes_json(tab, &m.root, &t.ckpt));
             drop(t);
             hub.changed();
         }

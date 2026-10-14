@@ -105,8 +105,8 @@ final class Project: ObservableObject, Identifiable {
     @Published var showReview = false
     @Published var secret: String?          // provider whose API key the composer is asking for
     @Published var commands: [(cmd: String, about: String)] = []
-    lazy var files: [String] = Self.listFiles(path)
-    lazy var fileSet: Set<String> = Set(files)
+    var files: [String] = []        // from `qh serve` (follows .gitignore), filled right after connecting
+    var fileSet: Set<String> = []
     /// the file tree (from `qh serve`'s list, which follows .gitignore) and the file the code view shows
     @Published var tree = FileNode(name: "", path: "", isDir: true)
     @Published var code: CodeTarget?
@@ -210,21 +210,6 @@ final class Project: ObservableObject, Identifiable {
     func teamSend(_ chan: String, _ text: String) { client.send(["type": "team_send", "chan": chan, "text": text]) }
     func loadTasks() { client.send(["type": "tasks", "tab": current?.name ?? "main"]) }
     func loadCommands() { client.send(["type": "commands", "tab": current?.name ?? "main"]) }
-
-    /// Project files for @ mentions: skips what's never worth mentioning, stops at 20k.
-    nonisolated static func listFiles(_ root: String) -> [String] {
-        let skip: Set<String> = [".git", "node_modules", "target", "build", ".build", "dist", ".next", "DerivedData", "__pycache__", ".venv"]
-        var out: [String] = []
-        let base = URL(fileURLWithPath: root)
-        guard let e = FileManager.default.enumerator(at: base, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else { return [] }
-        for case let u as URL in e {
-            if skip.contains(u.lastPathComponent) { e.skipDescendants(); continue }
-            if (try? u.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true { continue }
-            out.append(String(u.path.dropFirst(base.path.count + 1)))
-            if out.count >= 20000 { break }
-        }
-        return out
-    }
 
     func answer(_ a: Ask, _ choice: String) {
         asks.removeAll { $0.id == a.id }

@@ -38,9 +38,11 @@ final class FileWatch {
 }
 
 /// Calls back (at most about once a second) when files are added, removed or renamed anywhere
-/// under a folder. Changes inside .git don't count.
+/// under a folder. Changes inside .git and build output (which a build rewrites by the thousand,
+/// and git ignores anyway) don't count.
 final class FolderWatch {
     private var stream: FSEventStreamRef?
+    nonisolated static let skip = ["/.git/", "/target/", "/node_modules/", "/build/", "/.build/", "/DerivedData/", "/dist/", "/.next/", "/__pycache__/"]
     private let changed: () -> Void
 
     init(_ root: String, changed: @escaping () -> Void) {
@@ -51,7 +53,7 @@ final class FolderWatch {
             let me = Unmanaged<FolderWatch>.fromOpaque(info).takeUnretainedValue()
             let ps = unsafeBitCast(paths, to: NSArray.self) as? [String] ?? []
             let shape = UInt32(kFSEventStreamEventFlagItemCreated | kFSEventStreamEventFlagItemRemoved | kFSEventStreamEventFlagItemRenamed)
-            for i in 0..<n where flags[i] & shape != 0 && !ps[i].contains("/.git/") {
+            for i in 0..<n where flags[i] & shape != 0 && !FolderWatch.skip.contains(where: ps[i].contains) {
                 me.changed()
                 return
             }

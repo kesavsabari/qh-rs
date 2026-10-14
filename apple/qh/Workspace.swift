@@ -10,6 +10,8 @@ final class Workspace: ObservableObject {
     @Published var version = ""
     /// folder → GitHub repo, for the folders that are team projects (asked from qh itself)
     @Published var teamRepos: [String: String] = [:]
+    /// which space the sidebar shows: "personal" or "team"
+    @Published var space = UserDefaults.standard.string(forKey: "space") ?? "personal"
     let qh: String?
     private var keys: Any?
 
@@ -26,6 +28,7 @@ final class Workspace: ObservableObject {
         keys = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] e in
             guard let self else { return e }
             let mods = e.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            if e.keyCode == 49, mods == .control { self.setSpace(self.space == "team" ? "personal" : "team"); return nil }
             if e.keyCode == 53, mods.isEmpty, let p = self.current, p.current?.busy == true { p.stop(); return nil }
             guard mods == .command, let k = e.charactersIgnoringModifiers else { return e }
             switch k {
@@ -53,6 +56,11 @@ final class Workspace: ObservableObject {
 
     var current: Project? { projects.first { $0.path == active } }
 
+    func setSpace(_ s: String) {
+        space = s
+        UserDefaults.standard.set(s, forKey: "space")
+    }
+
     /// Which recent folders are team projects: `qh __team` answers with qh's own check.
     func refreshTeams() {
         guard let qh else { return }
@@ -61,7 +69,11 @@ final class Workspace: ObservableObject {
             let out = Workspace.run(qh, ["__team"] + paths)
             let map = (try? JSONSerialization.jsonObject(with: Data(out.utf8)) as? [String: Any]) ?? [:]
             let teams = map.compactMapValues { $0 as? String }
-            await MainActor.run { self.teamRepos = teams }
+            await MainActor.run {
+                self.teamRepos = teams
+                // a folder that just turned out to be a team project: show the team space
+                if let a = self.active, teams[a] != nil, self.space != "team" { self.setSpace("team") }
+            }
         }
     }
 
@@ -69,6 +81,7 @@ final class Workspace: ObservableObject {
         recent = Array(([path] + recent.filter { $0 != path }).prefix(14))
         UserDefaults.standard.set(recent, forKey: "projects")
         refreshTeams()
+        setSpace(teamRepos[path] != nil ? "team" : "personal")
         if !projects.contains(where: { $0.path == path }), let qh {
             projects.append(Project(path: path, qh: qh))
         }

@@ -29,27 +29,30 @@ struct Sidebar: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .lastTextBaseline, spacing: 2) {
-                Text("qh").font(Theme.sans(26, medium: true)).kerning(-1.6)
-                Cursor(width: 2.5, height: 17)
+            HStack(alignment: .center) {
+                HStack(alignment: .lastTextBaseline, spacing: 2) {
+                    Text("qh").font(Theme.sans(26, medium: true)).kerning(-1.6)
+                    Cursor(width: 2.5, height: 17)
+                }
+                .foregroundStyle(Theme.ink)
+                Spacer()
+                SpaceSwitch()
             }
-            .foregroundStyle(Theme.ink)
-            .padding(EdgeInsets(top: 44, leading: 6, bottom: 22, trailing: 6))
+            .padding(EdgeInsets(top: 44, leading: 6, bottom: 22, trailing: 0))
 
-            Text("projects").font(Theme.mono(12)).foregroundStyle(Theme.soft).padding(.horizontal, 6).padding(.bottom, 8)
+            Text(ws.space == "team" ? "team projects" : "personal projects").font(Theme.mono(12)).foregroundStyle(Theme.soft)
+                .padding(.horizontal, 6).padding(.bottom, 8)
             Rectangle().fill(Theme.rule).frame(height: 1).padding(.bottom, 6)
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 1) {
-                    let team = ws.recent.filter { ws.teamRepos[$0] != nil }
-                    let personal = ws.recent.filter { ws.teamRepos[$0] == nil }
-                    if !team.isEmpty {
-                        SectionLabel(text: "team", count: team.count)
-                        ForEach(team, id: \.self) { p in ProjectRow(path: p); SessionList(path: p) }
-                    }
-                    if !personal.isEmpty {
-                        SectionLabel(text: "personal", count: personal.count).padding(.top, team.isEmpty ? 0 : 16)
-                        ForEach(personal, id: \.self) { p in ProjectRow(path: p); SessionList(path: p) }
+                    let shown = ws.recent.filter { (ws.teamRepos[$0] != nil) == (ws.space == "team") }
+                    ForEach(shown, id: \.self) { p in ProjectRow(path: p); SessionList(path: p) }
+                    if shown.isEmpty {
+                        Text(ws.space == "team"
+                             ? "No team projects yet. Open a GitHub project and start a team from its team room (⌘⇧T)."
+                             : "No personal projects yet: open a folder.")
+                            .font(Theme.sans(12.5)).foregroundStyle(Theme.faint).padding(.horizontal, 8).padding(.top, 4)
                     }
                 }
             }
@@ -69,7 +72,7 @@ struct Sidebar: View {
             Text(ws.version).font(Theme.mono(11)).foregroundStyle(Theme.faint).padding(.horizontal, 8).padding(.top, 4)
         }
         .padding(EdgeInsets(top: 0, leading: 14, bottom: 16, trailing: 14))
-        .frame(width: 232)
+        .frame(width: 268)
         .frame(maxHeight: .infinity, alignment: .top)
         .background(Theme.side)
     }
@@ -157,6 +160,32 @@ struct Sessions: View {
         if s < 3600 { return "\(s / 60)m" }
         if s < 86400 { return "\(s / 3600)h" }
         return "\(s / 86400)d"
+    }
+}
+
+/// Personal ⇄ team, like Claude's Chat ⇄ Code switch: the sidebar shows one space at a time.
+struct SpaceSwitch: View {
+    @EnvironmentObject var ws: Workspace
+    var body: some View {
+        HStack(spacing: 2) {
+            seg("person", "personal", "Personal projects (⌃Space flips)")
+            seg("person.2", "team", "Team projects (⌃Space flips)")
+        }
+        .padding(2)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.hover))
+    }
+
+    private func seg(_ icon: String, _ space: String, _ help: String) -> some View {
+        let on = ws.space == space
+        return Button { ws.setSpace(space) } label: {
+            Image(systemName: icon).font(.system(size: 12, weight: .medium))
+                .foregroundStyle(on ? Theme.ink : Theme.faint)
+                .frame(width: 30, height: 24)
+                .background(RoundedRectangle(cornerRadius: 6).fill(on ? Theme.paper : .clear))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(help)
     }
 }
 

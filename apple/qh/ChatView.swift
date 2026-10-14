@@ -213,10 +213,13 @@ struct ThreadView: View {
                 .padding(.horizontal, 24).padding(.vertical, 20)
                 .frame(maxWidth: .infinity)
             }
-            .onChange(of: tab.items.count) { _, _ in sv.scrollTo("end", anchor: .bottom) }
-            .onChange(of: tab.status) { _, _ in sv.scrollTo("end", anchor: .bottom) }
-            .onAppear { sv.scrollTo("end", anchor: .bottom) }
+            // start at the bottom without a jump: scrolling a lazy stack before its rows are measured
+            // left long sessions blank until you scrolled
+            .defaultScrollAnchor(.bottom)
+            .onChange(of: tab.items.count) { _, _ in DispatchQueue.main.async { sv.scrollTo("end", anchor: .bottom) } }
+            .onChange(of: tab.status) { _, _ in DispatchQueue.main.async { sv.scrollTo("end", anchor: .bottom) } }
         }
+        .id(ObjectIdentifier(tab))   // a fresh scroll view per tab, never one left at another session's offset
     }
 }
 

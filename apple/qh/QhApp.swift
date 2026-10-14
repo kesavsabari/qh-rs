@@ -79,6 +79,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let p = n.object as? String ?? ""
                 MainActor.assumeIsolated { Notify.workspace?.setSpace("personal"); Notify.workspace?.open(p) }
             }
+            // "io.qh.resume" with a session id: open it in the current project
+            DistributedNotificationCenter.default().addObserver(forName: .init("io.qh.resume"), object: nil, queue: .main) { n in
+                let id = n.object as? String ?? ""
+                MainActor.assumeIsolated {
+                    guard let p = Notify.workspace?.current else { return }
+                    p.resume(p.sessions.first { $0.id == id } ?? SavedSession(id: id, title: "", messages: 0, when: Date()))
+                }
+            }
             // "io.qh.open" with "path[:line]": open it in the code view, as a click on it in the thread would
             DistributedNotificationCenter.default().addObserver(forName: .init("io.qh.open"), object: nil, queue: .main) { n in
                 let p = n.object as? String ?? ""

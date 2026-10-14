@@ -239,11 +239,12 @@ struct CodeView: View {
                         .textSelection(.enabled)
                         .padding(.vertical, 8)
                     }
+                    .defaultScrollAnchor(.topLeading)
                     .onChange(of: lines.count) { _, _ in
                         // land on the line once per file opened; a live reload keeps your place
                         guard landed != target.id else { return }
                         landed = target.id
-                        if let l = target.line { DispatchQueue.main.async { sv.scrollTo(l, anchor: .center) } }
+                        if let l = target.line { DispatchQueue.main.async { sv.scrollTo(l, anchor: UnitPoint(x: 0, y: 0.5)) } }
                     }
                 }
             }

@@ -197,6 +197,7 @@ final class Project: ObservableObject, Identifiable {
     func accept(_ f: FileChange) { client.send(["type": "accept", "tab": current?.name ?? "main", "path": f.path]) }
     func reject(_ f: FileChange) { client.send(["type": "reject", "tab": current?.name ?? "main", "path": f.path]) }
     func loadSessions() { client.send(["type": "sessions"]) }
+    func deleteSession(_ s: SavedSession) { client.send(["type": "delete_session", "id": s.id]) }
     func resume(_ s: SavedSession) {
         if let t = openSessions[s.id] { active = t; return }
         client.send(["type": "resume", "id": s.id])

@@ -208,6 +208,24 @@ fn command(hub: &Arc<Hub>, st: &State, v: &Value) -> Option<String> {
                 .map(|m| json!({"tab": m.name, "id": lock(&m.session).file_stem().map(|s| s.to_string_lossy().to_string())})).collect();
             st.broadcast(&json!({"type": "sessions", "sessions": crate::session::for_project(&cwd, 60), "open": open}));
         }
+        "delete_session" => {
+            // the transcript and its checkpoints; a tab showing it closes first, unless it's the last one
+            let id = v["id"].as_str().unwrap_or("");
+            let dir = crate::session::dir();
+            let path = dir.join(format!("{id}.jsonl"));
+            if id.is_empty() || id.contains(['/', '\\', '.']) || !path.exists() { return Some(format!("no saved session {id}")) }
+            if let Some(m) = hub.names().iter().filter_map(|n| hub.get(n)).find(|m| *lock(&m.session) == path) {
+                if hub.names().len() == 1 { return Some("that session is the only open tab: open another one first".into()) }
+                hub.close(&m.name);
+            }
+            if let Err(e) = std::fs::remove_file(&path) { return Some(e.to_string()) }
+            let _ = std::fs::remove_dir_all(dir.join("checkpoints").join(id));
+            hub.changed();
+            let cwd = hub.names().first().and_then(|n| hub.get(n)).map(|m| m.root.clone()).unwrap_or_default();
+            let open: Vec<Value> = hub.names().iter().filter_map(|n| hub.get(n))
+                .map(|m| json!({"tab": m.name, "id": lock(&m.session).file_stem().map(|s| s.to_string_lossy().to_string())})).collect();
+            st.broadcast(&json!({"type": "sessions", "sessions": crate::session::for_project(&cwd, 60), "open": open}));
+        }
         "resume" => {
             let id = v["id"].as_str().unwrap_or("");
             let path = crate::session::dir().join(format!("{id}.jsonl"));

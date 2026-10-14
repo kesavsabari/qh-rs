@@ -222,6 +222,7 @@ struct SessionRows: View {
     @ObservedObject var project: Project
     @EnvironmentObject var ws: Workspace
     @State private var all = false
+    @State private var deleting: SavedSession?
 
     var body: some View {
         let shown = all ? project.sessions : Array(project.sessions.prefix(8))
@@ -243,7 +244,16 @@ struct SessionRows: View {
                 .padding(.leading, 12)
             }
             .help("\(s.messages) messages · \(s.id)")
+            .contextMenu { Button("Delete Session…", role: .destructive) { deleting = s } }
         }
+        Color.clear.frame(height: 0)
+            .confirmationDialog("Delete this session?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }),
+                                presenting: deleting) { s in
+                Button("Delete", role: .destructive) { project.deleteSession(s) }
+                Button("Cancel", role: .cancel) {}
+            } message: { s in
+                Text("“\(s.title.isEmpty ? s.id : s.title)” and its \(s.messages) messages are removed for good, with its checkpoints. Files in your project aren't touched.")
+            }
         if project.sessions.count > 8 {
             Button(all ? "Show fewer" : "Show all \(project.sessions.count)") { all.toggle() }
                 .buttonStyle(.plain).font(Theme.sans(11.5)).foregroundStyle(Theme.faint).padding(.leading, 28).padding(.vertical, 4)

@@ -429,3 +429,69 @@ pub fn chosen() -> bool {
 pub fn no_model(cfg: &crate::config::Config) -> bool {
     !chosen() && !local_models(&cfg.host).is_some_and(|m| m.contains(&cfg.model))
 }
+
+// ---- the same steps without a terminal, for `qh serve` clients (the Mac app) --------------
+
+/// What a setup screen shows: every source, whether it's connected, and whether qh has a model yet.
+pub fn state() -> Value {
+    let host = crate::config::load().host;
+    let local = local_models(&host);
+    let saved = |n: &str| providers::get(n).is_some_and(|p| !p.key.is_empty());
+    let mut sources = vec![json!({"id": "local", "label": "Local models (Ollama)", "kind": "local",
+        "connected": local.as_ref().is_some_and(|m| !m.is_empty()), "running": local.is_some(),
+        "note": match &local { Some(m) => format!("{} model{} · private, free, uses your GPU", m.len(), if m.len() == 1 { "" } else { "s" }),
+                               None => "Ollama isn't running: get it at ollama.com/download".into() }})];
+    for (id, label, site) in PROVIDERS {
+        let connected = if id == "chatgpt" { crate::chatgpt::signed_in() } else { saved(id) };
+        sources.push(json!({"id": id, "label": label, "kind": if id == "chatgpt" { "signin" } else { "key" },
+            "site": site, "connected": connected,
+            "account": if id == "chatgpt" { crate::chatgpt::account() } else { None }}));
+    }
+    let cfg = crate::config::load();
+    json!({"type": "setup", "needed": no_model(&cfg), "sources": sources,
+           "default": std::fs::read_to_string(state_dir().join("default_model")).unwrap_or_default().trim()})
+}
+
+/// Save and test an API key; a key the provider refuses is never kept. Ok = how many models it unlocked.
+pub fn connect_key(name: &str, key: &str) -> Result<usize, String> {
+    if !PROVIDERS.iter().any(|(id, _, _)| *id == name && *id != "chatgpt") {
+        return Err(format!("{name} doesn't take an API key here"));
+    }
+    providers::set_key(name, key.trim())?;
+    providers::test(name).inspect_err(|_| { let _ = providers::remove_key(name); })
+}
+
+/// Browser sign-in with ChatGPT; `say` gets the "opening your browser" line and the URL. Ok = the account.
+pub fn sign_in_chatgpt(say: &dyn Fn(&str)) -> Result<String, String> {
+    let who = crate::chatgpt::login(say)?;
+    providers::init(&crate::config::load());
+    Ok(who)
+}
+
+/// Every model the connected sources offer, as /model takes them: (id, where it comes from).
+pub fn all_models() -> Vec<(String, String)> {
+    let host = crate::config::load().host;
+    let mut all: Vec<(String, String)> = local_models(&host).unwrap_or_default().into_iter().map(|m| (m, "local".into())).collect();
+    if crate::chatgpt::signed_in() {
+        if let Ok(m) = crate::chatgpt::models() {
+            all.extend(m.into_iter().map(|(id, _)| (providers::display("chatgpt", &id), "ChatGPT".into())));
+        }
+    }
+    for (id, label, _) in PROVIDERS.iter().filter(|(id, _, _)| *id != "chatgpt") {
+        if let Some(p) = providers::get(id).filter(|p| !p.key.is_empty()) {
+            if let Ok(v) = providers::models(&p) {
+                all.extend(v.into_iter().map(|m| (providers::display(id, &m.id), label.to_string())));
+            }
+        }
+    }
+    all
+}
+
+/// Make `model` the default, the way the end of `qh setup` does.
+pub fn set_default(model: &str) -> Result<(), String> {
+    let host = crate::config::load().host;
+    let plain_ollama = providers::parse_model(model).0.is_empty();
+    write_config(&host, plain_ollama.then_some(model))?;
+    std::fs::create_dir_all(state_dir()).map_err(|e| e.to_string())?;
+    std::fs::write(state_dir().join("default_model"), model).map_err(|e| e.to_string())
+}

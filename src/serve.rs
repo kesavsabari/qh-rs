@@ -70,7 +70,8 @@ fn tab_json(hub: &Hub, name: &str, history: bool) -> Value {
 fn snapshot(hub: &Hub) -> Value {
     let tabs: Vec<Value> = hub.names().iter().map(|n| tab_json(hub, n, true)).collect();
     json!({"type": "snapshot", "protocol": PROTOCOL, "version": crate::update::VERSION, "mode": hub.mode_name(),
-        "project": std::env::current_dir().unwrap_or_default(), "tabs": tabs})
+        "project": std::env::current_dir().unwrap_or_default(), "tabs": tabs,
+        "needs_setup": crate::setup::no_model(&hub.cfg)})
 }
 
 /// Hub events → JSON for every client. Confirms keep their reply channel here, keyed by id.
@@ -166,9 +167,54 @@ fn client(hub: Arc<Hub>, st: Arc<State>, s: UnixStream, want: Arc<String>) {
         let v: Value = match serde_json::from_str(&line) { Ok(v) => v, Err(_) => continue };
         if v["type"] == "snapshot" {
             let _ = writeln!(w, "{}", snapshot(&hub));
+        } else if v["type"].as_str().is_some_and(|t| t.starts_with("setup")) {
+            // setup talks to the network (key tests, sign-in): off this thread, answered to this client
+            let (Ok(out), h) = (w.try_clone(), hub.clone()) else { continue };
+            std::thread::spawn(move || setup(&h, &v, out));
         } else if let Some(e) = command(&hub, &st, &v) {
             let _ = writeln!(w, "{}", json!({"type": "error", "message": e, "re": v["type"]}));
         }
+    }
+}
+
+/// The setup screen's commands: state, key, chatgpt, models, default. Each answers with a
+/// `setup_result` (and the fresh `setup` state after anything that changed it).
+fn setup(hub: &Arc<Hub>, v: &Value, w: UnixStream) {
+    let say = |x: &Value| { let _ = writeln!(&w, "{x}"); };
+    let step = v["type"].as_str().unwrap_or("").trim_start_matches("setup_").to_string();
+    let r: Result<Value, String> = match step.as_str() {
+        "setup" | "state" => Ok(Value::Null),
+        "key" => crate::setup::connect_key(v["provider"].as_str().unwrap_or(""), v["key"].as_str().unwrap_or(""))
+            .map(|n| json!({"models": n})),
+        "chatgpt" => {
+            let live = Mutex::new(w.try_clone().ok());
+            crate::setup::sign_in_chatgpt(&|m| if let Some(o) = lock(&live).as_mut() {
+                let _ = writeln!(o, "{}", json!({"type": "setup_progress", "message": m}));
+            }).map(|who| json!({"account": who}))
+        }
+        "models" => Ok(json!({"models": crate::setup::all_models().into_iter()
+            .map(|(id, from)| json!({"id": id, "from": from})).collect::<Vec<_>>()})),
+        "default" => {
+            let m = v["model"].as_str().unwrap_or("");
+            crate::setup::set_default(m).map(|_| {
+                let (p, id) = crate::providers::parse_model(m);
+                hub.set_default_model(&p, &id);
+                // tabs still on the fallback model move to the new default
+                for n in hub.names() {
+                    if let Some(t) = hub.get(&n) { let mut s = lock(&t.set); (s.provider, s.model) = (p.clone(), id.clone()); }
+                }
+                hub.changed();
+                json!({"model": m})
+            })
+        }
+        other => Err(format!("unknown setup step {other}")),
+    };
+    match r {
+        Ok(x) => {
+            if !x.is_null() { say(&json!({"type": "setup_result", "step": step, "ok": true, "data": x})) }
+            say(&crate::setup::state());
+        }
+        Err(e) => say(&json!({"type": "setup_result", "step": step, "ok": false, "error": e})),
     }
 }
 

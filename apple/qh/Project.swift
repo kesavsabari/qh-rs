@@ -61,6 +61,12 @@ final class Project: ObservableObject, Identifiable {
     @Published var mode = ""
     @Published var asks: [Ask] = []
     @Published var state: String = "starting"   // starting | live | closed: <why>
+    @Published var setup: SetupState?
+    @Published var models: [ModelChoice] = []
+    @Published var showSetup = false
+    @Published var setupBusy = false
+    @Published var setupMessage: String?
+    @Published var setupError = false
     private let client: ServeClient
 
     init(path: String, qh: String) {
@@ -103,14 +109,50 @@ final class Project: ObservableObject, Identifiable {
     func closeTab(_ name: String) { client.send(["type": "close_tab", "tab": name]) }
     func shutdown() { client.stop() }
 
+    func loadSetup() {
+        client.send(["type": "setup_state"])
+        client.send(["type": "setup_models"])
+    }
+    func connectKey(_ provider: String, _ key: String) {
+        setupBusy = true; setupError = false; setupMessage = "testing the \(provider) key…"
+        client.send(["type": "setup_key", "provider": provider, "key": key])
+    }
+    func signInChatGPT() {
+        setupBusy = true; setupError = false; setupMessage = "opening your browser to sign in with ChatGPT…"
+        client.send(["type": "setup_chatgpt"])
+    }
+    func setDefault(_ model: String) { client.send(["type": "setup_default", "model": model]) }
+
     // MARK: down
 
     private func handle(_ e: [String: Any]) {
         let type = e["type"] as? String ?? ""
         let tabName = e["tab"] as? String ?? "main"
         switch type {
+        case "setup":
+            setup = SetupState(e)
+            if setup?.needed == true { showSetup = true }
+        case "setup_progress":
+            setupMessage = e["message"] as? String
+        case "setup_result":
+            setupBusy = false
+            let step = e["step"] as? String ?? ""
+            let ok = e["ok"] as? Bool ?? false
+            setupError = !ok
+            let data = e["data"] as? [String: Any] ?? [:]
+            if !ok { setupMessage = e["error"] as? String ?? "that didn't work" }
+            else if step == "models" {
+                models = (data["models"] as? [[String: Any]] ?? []).map { ModelChoice(id: $0["id"] as? String ?? "", from: $0["from"] as? String ?? "") }
+                if !models.isEmpty, setupMessage == nil, setup?.needed == true { setupMessage = "pick a default model below" }
+            } else if step == "default" {
+                setupMessage = "default model: \(data["model"] as? String ?? "")"
+            } else {
+                setupMessage = step == "chatgpt" ? "signed in as \(data["account"] as? String ?? "")" : "connected: \(data["models"] as? Int ?? 0) models"
+                client.send(["type": "setup_models"])
+            }
         case "snapshot":
             state = "live"
+            if e["needs_setup"] as? Bool == true { showSetup = true; loadSetup() }
             mode = e["mode"] as? String ?? ""
             tabs = []
             for t in e["tabs"] as? [[String: Any]] ?? [] {

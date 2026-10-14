@@ -21,6 +21,7 @@ struct QhApp: App {
         .commands {
             CommandGroup(replacing: .newItem) {
                 Button("Open Folder…") { ws.pick() }.keyboardShortcut("o")
+                Button("Models…") { ws.current?.showSetup = true }.keyboardShortcut(",").disabled(ws.current == nil)
                 Button("New Tab") { ws.current?.newTab() }.keyboardShortcut("t").disabled(ws.current == nil)
             }
         }

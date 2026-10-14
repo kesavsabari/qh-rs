@@ -11,7 +11,9 @@ struct ProjectView: View {
             if project.state.hasPrefix("closed") {
                 Banner(text: String(project.state.dropFirst(8)), retry: nil)
             }
-            if let tab = project.current {
+            if project.showSetup {
+                SetupView(project: project)
+            } else if let tab = project.current {
                 ThreadView(tab: tab)
                 ForEach(project.asks.filter { $0.tab == tab.name }) { a in AskCard(ask: a, project: project) }
                 Composer(project: project, tab: tab)
@@ -40,6 +42,10 @@ struct ChatTabBar: View {
                 }
                 .buttonStyle(.plain).help("New tab (⌘T)")
                 Spacer()
+                Button { project.showSetup.toggle() } label: {
+                    Text("models").font(Theme.mono(12)).foregroundStyle(project.showSetup ? Theme.ink : Theme.soft)
+                }
+                .buttonStyle(.plain).padding(.bottom, 9).padding(.trailing, 10).help("Connect models (⌘,)")
                 ModePicker(project: project).padding(.bottom, 6)
             }
             .padding(.horizontal, 12)

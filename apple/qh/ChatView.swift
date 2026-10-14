@@ -42,8 +42,10 @@ extension ProjectView {
                 ThreadView(tab: tab, repliesOnly: project.repliesOnly)
                     .environment(\.openURL, OpenURLAction { url in
                         guard url.scheme == "qh-file" else { return .systemAction }
-                        let line = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "line" }?.value
-                        project.openFile(url.path, line: line.flatMap { Int($0) })
+                        // relative paths make opaque URLs (qh-file:a.py) whose url.path is empty
+                        let c = URLComponents(url: url, resolvingAgainstBaseURL: false)
+                        let line = c?.queryItems?.first { $0.name == "line" }?.value
+                        project.openFile(c?.path ?? url.path, line: line.flatMap { Int($0) })
                         return .handled
                     })
                 ForEach(project.asks.filter { $0.tab == tab.name }) { a in AskCard(ask: a, project: project) }

@@ -47,7 +47,9 @@ enum FileRank {
     /// Git history: files you committed (strongest), then what anyone changed lately. Newer counts more.
     nonisolated static func gitHeat(_ root: String) -> [String: Double] {
         var heat: [String: Double] = [:]
-        let email = Workspace.run("/usr/bin/git", ["-C", root, "config", "user.email"])
+        // who you are to git: user.email, or the default git falls back to when it isn't set
+        let ident = Workspace.run("/usr/bin/git", ["-C", root, "var", "GIT_AUTHOR_IDENT"])
+        let email = ident.split(separator: "<").dropFirst().first?.split(separator: ">").first.map(String.init) ?? ""
         func add(_ args: [String], _ weight: Double) {
             let out = Workspace.run("/usr/bin/git", ["-C", root, "log", "--name-only", "--format="] + args)
             let lines = out.split(separator: "\n")

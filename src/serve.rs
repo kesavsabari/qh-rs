@@ -184,7 +184,14 @@ fn command(hub: &Arc<Hub>, st: &State, v: &Value) -> Option<String> {
             }
             let name = (1..).map(|i| if i == 1 { "resumed".to_string() } else { format!("resumed{i}") }).find(|n| hub.get(n).is_none()).unwrap_or_default();
             let root = hub.names().first().and_then(|n| hub.get(n)).map(|m| m.root.clone());
-            if let Err(e) = hub.add(&name, None, "", "", Some(path), false, root) { return Some(e) }
+            let title = crate::session::for_project(&root.clone().unwrap_or_default(), 200).into_iter()
+                .find(|x| x["id"] == id).and_then(|x| x["title"].as_str().map(String::from)).unwrap_or_default();
+            let m = match hub.add(&name, None, "", "", Some(path), false, root) { Ok(m) => m, Err(e) => return Some(e) };
+            // the tab carries the session's title, not "resumed2": labels only, never the system prompt
+            if !title.is_empty() {
+                *lock(&m.purpose) = title;
+                m.named.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
             hub.changed();
             let mut h = tab_json(hub, &name, true);
             h["type"] = json!("history");

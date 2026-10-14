@@ -220,6 +220,7 @@ final class Project: ObservableObject, Identifiable {
         switch type {
         case "history":
             fill(e)
+            loadSessions()   // so the sidebar marks the session you just opened
         case "sessions":
             sessions = (e["sessions"] as? [[String: Any]] ?? []).map {
                 SavedSession(id: $0["id"] as? String ?? "", title: $0["title"] as? String ?? "",
@@ -246,6 +247,7 @@ final class Project: ObservableObject, Identifiable {
             secret = e["provider"] as? String
         case "active":
             if let a = e["tab"] as? String, tabs.contains(where: { $0.name == a }) { active = a }
+            loadSessions()
         case "commands":
             commands = (e["commands"] as? [[String: Any]] ?? []).filter { $0["sub"] == nil }
                 .map { ($0["cmd"] as? String ?? "", $0["about"] as? String ?? "") }

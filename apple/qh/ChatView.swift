@@ -264,7 +264,7 @@ struct Markdown: View {
     private static let cache: NSCache<NSString, Box> = { let c = NSCache<NSString, Box>(); c.countLimit = 2000; return c }()
     final class Box { let v: AttributedString; init(_ v: AttributedString) { self.v = v } }
 
-    enum Kind { case para, code, heading(Int), bullets }
+    enum Kind { case para, code, heading(Int), bullets, table }
 
     private var parsed: [(kind: Kind, text: String, styled: AttributedString)] {
         Self.blocks(text).map { b in
@@ -301,6 +301,8 @@ struct Markdown: View {
                             .padding(.leading, CGFloat(line.prefix { $0 == " " }.count) * 6)
                         }
                     }
+                case .table:
+                    TableBlock(text: b.text)
                 case .para:
                     Text(b.styled).font(Theme.sans(15)).foregroundStyle(Theme.ink).lineSpacing(3).textSelection(.enabled)
                 }
@@ -348,6 +350,12 @@ struct Markdown: View {
                     continue
                 }
             }
+            if trimmed.hasPrefix("|") {
+                if case .table = curKind {} else { push(); curKind = .table }
+                cur.append(line)
+                continue
+            }
+            if case .table = curKind { push() }
             let bullet = isBullet(line)
             if bullet, case .para = curKind, !cur.isEmpty { push() }
             if !bullet, case .bullets = curKind { push() }
@@ -360,6 +368,47 @@ struct Markdown: View {
 
     static func inline(_ s: String) -> AttributedString {
         (try? AttributedString(markdown: s, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(s)
+    }
+}
+
+/// A markdown table: header row bold, hairline rules, columns sized to content, scrolls sideways if wide.
+struct TableBlock: View {
+    let text: String
+
+    private var rows: [[String]] {
+        text.split(separator: "\n").map { line in
+            var t = line.trimmingCharacters(in: .whitespaces)
+            if t.hasPrefix("|") { t.removeFirst() }
+            if t.hasSuffix("|") { t.removeLast() }
+            return t.split(separator: "|", omittingEmptySubsequences: false).map { $0.trimmingCharacters(in: .whitespaces) }
+        }
+        // the |---|:--:| line only says where the header ends
+        .filter { r in !r.allSatisfy { c in !c.isEmpty && c.allSatisfy { "-: ".contains($0) } } }
+    }
+
+    var body: some View {
+        let r = rows
+        let cols = r.map(\.count).max() ?? 0
+        ScrollView(.horizontal, showsIndicators: false) {
+            Grid(alignment: .topLeading, horizontalSpacing: 18, verticalSpacing: 0) {
+                ForEach(Array(r.enumerated()), id: \.offset) { i, row in
+                    GridRow {
+                        ForEach(0..<cols, id: \.self) { c in
+                            Text(Markdown.inline(c < row.count ? row[c] : ""))
+                                .font(Theme.sans(13.5, medium: i == 0)).foregroundStyle(Theme.ink)
+                                .frame(maxWidth: 340, alignment: .leading)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .textSelection(.enabled)
+                                .padding(.vertical, 7)
+                        }
+                    }
+                    if i < r.count - 1 {
+                        Rectangle().fill(Theme.ink.opacity(i == 0 ? 0.18 : 0.08)).frame(height: 0.5).gridCellColumns(cols)
+                    }
+                }
+            }
+            .padding(.horizontal, 2)
+        }
     }
 }
 

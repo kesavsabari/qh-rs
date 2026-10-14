@@ -170,10 +170,15 @@ struct ItemView: View, Equatable {
     var body: some View {
         switch item.kind {
         case .user(let t):
-            Text(t).font(Theme.sans(15)).foregroundStyle(Theme.ink).textSelection(.enabled)
-                .padding(.horizontal, 14).padding(.vertical, 10)
-                .background(RoundedRectangle(cornerRadius: 8).fill(Theme.hover))
-                .frame(maxWidth: .infinity, alignment: .trailing)
+            // yours: on the right, in a tinted bubble with an orange edge, a clear break before each turn
+            HStack {
+                Spacer(minLength: 80)
+                Text(t).font(Theme.sans(15)).foregroundStyle(Theme.ink).textSelection(.enabled)
+                    .padding(.horizontal, 14).padding(.vertical, 10)
+                    .background(RoundedRectangle(cornerRadius: 12).fill(Theme.accent.opacity(0.12)))
+                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.accent.opacity(0.35)))
+            }
+            .padding(.top, 18)
         case .reply(let t):
             Markdown(text: t)
         case .tool(let name, let args, let ok, let summary, let output):
@@ -256,50 +261,95 @@ struct Markdown: View {
     private static let cache: NSCache<NSString, Box> = { let c = NSCache<NSString, Box>(); c.countLimit = 2000; return c }()
     final class Box { let v: AttributedString; init(_ v: AttributedString) { self.v = v } }
 
-    private var parsed: [(code: Bool, text: String, styled: AttributedString)] {
+    enum Kind { case para, code, heading(Int), bullets }
+
+    private var parsed: [(kind: Kind, text: String, styled: AttributedString)] {
         Self.blocks(text).map { b in
-            if b.code { return (true, b.text, AttributedString()) }
-            if let hit = Self.cache.object(forKey: b.text as NSString) { return (false, b.text, hit.v) }
+            if case .code = b.kind { return (b.kind, b.text, AttributedString()) }
+            let key = b.text as NSString
+            if let hit = Self.cache.object(forKey: key) { return (b.kind, b.text, hit.v) }
             let v = Self.inline(b.text)
-            Self.cache.setObject(Box(v), forKey: b.text as NSString)
-            return (false, b.text, v)
+            Self.cache.setObject(Box(v), forKey: key)
+            return (b.kind, b.text, v)
         }
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             ForEach(Array(parsed.enumerated()), id: \.offset) { _, b in
-                if b.code {
+                switch b.kind {
+                case .code:
                     ScrollView(.horizontal, showsIndicators: false) {
                         Text(b.text).font(Theme.mono(12.5)).foregroundStyle(Theme.ink).textSelection(.enabled).padding(12)
                     }
                     .background(RoundedRectangle(cornerRadius: 6).fill(Theme.side))
                     .overlay(alignment: .topTrailing) { CopyButton(text: b.text).padding(6) }
-                } else {
+                case .heading(let n):
+                    Text(b.styled).font(Theme.sans(n <= 1 ? 20 : n == 2 ? 17 : 15.5, medium: true)).foregroundStyle(Theme.ink)
+                        .textSelection(.enabled).padding(.top, 6)
+                case .bullets:
+                    VStack(alignment: .leading, spacing: 5) {
+                        ForEach(Array(b.text.split(separator: "\n").enumerated()), id: \.offset) { _, line in
+                            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                Text(Self.marker(line)).font(Theme.sans(15)).foregroundStyle(Theme.accent)
+                                Text(Self.inline(Self.stripMarker(line))).font(Theme.sans(15)).foregroundStyle(Theme.ink).lineSpacing(3)
+                                    .textSelection(.enabled)
+                            }
+                            .padding(.leading, CGFloat(line.prefix { $0 == " " }.count) * 6)
+                        }
+                    }
+                case .para:
                     Text(b.styled).font(Theme.sans(15)).foregroundStyle(Theme.ink).lineSpacing(3).textSelection(.enabled)
                 }
             }
         }
     }
 
-    /// Code fences become code blocks; other text splits at blank lines into paragraphs.
-    static func blocks(_ s: String) -> [(code: Bool, text: String)] {
-        var out: [(Bool, String)] = []
-        var cur: [Substring] = [], inCode = false
+    static func isBullet(_ l: Substring) -> Bool {
+        let t = l.drop { $0 == " " }
+        if t.hasPrefix("- ") || t.hasPrefix("* ") || t.hasPrefix("• ") { return true }
+        let digits = t.prefix { $0.isNumber }
+        return !digits.isEmpty && t.dropFirst(digits.count).hasPrefix(". ")
+    }
+    static func marker(_ l: Substring) -> String {
+        let t = l.drop { $0 == " " }
+        let digits = t.prefix { $0.isNumber }
+        return digits.isEmpty ? "•" : digits + "."
+    }
+    static func stripMarker(_ l: Substring) -> String {
+        let t = l.drop { $0 == " " }
+        let digits = t.prefix { $0.isNumber }
+        return String(digits.isEmpty ? t.dropFirst(2) : t.dropFirst(digits.count + 2))
+    }
+
+    /// Code fences, # headings, runs of list lines, and paragraphs (split at blank lines).
+    static func blocks(_ s: String) -> [(kind: Kind, text: String)] {
+        var out: [(Kind, String)] = []
+        var cur: [Substring] = [], curKind: Kind = .para, inCode = false
         func push() {
             let t = cur.joined(separator: "\n")
-            if !t.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { out.append((inCode, t)) }
+            if !t.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { out.append((inCode ? .code : curKind, t)) }
             cur = []
+            curKind = .para
         }
         for line in s.split(separator: "\n", omittingEmptySubsequences: false) {
-            if line.trimmingCharacters(in: .whitespaces).hasPrefix("```") {
-                push()
-                inCode.toggle()
-            } else if !inCode && line.trimmingCharacters(in: .whitespaces).isEmpty {
-                push()
-            } else {
-                cur.append(line)
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("```") { push(); inCode.toggle(); continue }
+            if inCode { cur.append(line); continue }
+            if trimmed.isEmpty { push(); continue }
+            if trimmed.hasPrefix("#") {
+                let level = trimmed.prefix { $0 == "#" }.count
+                if level <= 6, trimmed.dropFirst(level).hasPrefix(" ") {
+                    push()
+                    out.append((.heading(level), String(trimmed.dropFirst(level + 1))))
+                    continue
+                }
             }
+            let bullet = isBullet(line)
+            if bullet, case .para = curKind, !cur.isEmpty { push() }
+            if !bullet, case .bullets = curKind { push() }
+            if bullet { curKind = .bullets }
+            cur.append(line)
         }
         push()
         return out

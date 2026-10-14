@@ -228,6 +228,8 @@ final class Project: ObservableObject, Identifiable {
 
     func answer(_ a: Ask, _ choice: String) {
         asks.removeAll { $0.id == a.id }
+        Notify.clear(self, a.id)
+        Notify.badge()
         client.send(["type": "answer", "id": a.id, "answer": choice])
     }
 
@@ -381,10 +383,11 @@ final class Project: ObservableObject, Identifiable {
             asks.append(Ask(id: e["id"] as? Int ?? -1, tab: tabName, tool: e["tool"] as? String ?? "",
                             detail: Self.detail(e["tool"] as? String ?? "", e["args"]), warn: e["warn"] as? String ?? "",
                             guarded: e["guard"] as? Bool ?? false, always: e["always"] as? String ?? ""))
-            Notify.ask(project: name, tab: tabName, tool: e["tool"] as? String ?? "")
+            if let a = asks.last { Notify.ask(self, a) }
         case "confirm_closed":
             let id = e["id"] as? Int ?? -1
             asks.removeAll { $0.id == id }
+            Notify.clear(self, id)
         default:
             break
         }
@@ -417,7 +420,7 @@ final class Project: ObservableObject, Identifiable {
         tab.tokens = t["tokens"] as? Int ?? tab.tokens
         tab.think = t["think"] as? Bool ?? tab.think
         tab.effort = t["effort"] as? String ?? tab.effort
-        if was && !tab.busy { Notify.done(project: name, tab: tab.name) }
+        if was && !tab.busy { Notify.done(project: self, tab: tab.name) }
     }
 
     /// The one line a tool card shows: the path, command, or query, not the whole JSON.

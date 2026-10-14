@@ -19,6 +19,7 @@ struct ContentView: View {
                 }
         }
         .navigationSplitViewStyle(.balanced)
+        .sheet(isPresented: $ws.palette) { Palette().environmentObject(ws) }
         .toolbar {
             TitleItem(title: ws.title)
             ToolbarItem(placement: .primaryAction) {

@@ -8,6 +8,9 @@ final class Workspace: ObservableObject {
     @Published var projects: [Project] = []
     @Published var active: String?
     @Published var version = ""
+    @Published var palette = false   // ⌘K
+    @Published var waiting = 0   // permissions waiting, every project
+    @Published var working = 0   // tabs running a turn, every project
     /// folder → GitHub repo, for the folders that are team projects (asked from qh itself)
     @Published var teamRepos: [String: String] = [:]
     private var teamsKnown = false   // until qh __team has answered once, don't pick a space from it
@@ -59,6 +62,7 @@ final class Workspace: ObservableObject {
             guard mods == .command, let k = e.charactersIgnoringModifiers else { return e }
             switch k {
             case "o": self.pick(); return nil
+            case "k": self.palette.toggle(); return nil
             case "t": self.current?.newTab(); return self.current == nil ? e : nil
             case "w":
                 guard let p = self.current, let t = p.current else { return e }
@@ -84,6 +88,13 @@ final class Workspace: ObservableObject {
     }
 
     var current: Project? { projects.first { $0.path == active } }
+
+    /// Show one project's tab, in whichever space it lives (from a notification, the menu bar, ⌘K).
+    func focus(_ path: String, tab: String? = nil) {
+        if teamRepos[path] != nil { setSpace("team"); teamPage = .agent } else { setSpace("personal") }
+        active = path
+        if let tab, let p = current, p.tabs.contains(where: { $0.name == tab }) { p.active = tab }
+    }
 
     func setSpace(_ s: String) {
         space = s

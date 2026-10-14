@@ -35,6 +35,7 @@ struct QhApp: App {
             }
             CommandGroup(replacing: .newItem) {
                 Button("Open Folder…") { ws.pick() }.keyboardShortcut("o")
+                Button("Command Palette…") { ws.palette = true }.keyboardShortcut("k")
                 Button("Review Changes") { ws.current?.loadChanges(); ws.current?.showReview = true }.keyboardShortcut("d").disabled(ws.current == nil)
                 Button("Team Space") { ws.setSpace("team") }.keyboardShortcut("t", modifiers: [.command, .shift])
                 Button("Inspector") { ws.toggleInspector() }.keyboardShortcut("i", modifiers: [.command, .option])
@@ -48,6 +49,12 @@ struct QhApp: App {
                 Button("Code") { ws.current?.layout = "code" }.keyboardShortcut("3", modifiers: .control).disabled(ws.current == nil)
             }
         }
+        MenuBarExtra {
+            MenuBarView().environmentObject(ws)
+        } label: {
+            MenuBarLabel().environmentObject(ws)
+        }
+        .menuBarExtraStyle(.window)
     }
 }
 
@@ -70,6 +77,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     case "claims": ws.teamPage = .claims
                     case "activity": ws.teamPage = .activity
                     case "personal", "team": ws.setSpace(page)
+                    case "palette": ws.palette = true
                     default: ws.teamPage = .channel(page)
                     }
                 }

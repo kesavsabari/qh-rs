@@ -46,7 +46,7 @@ struct Palette: View {
                             .padding(.horizontal, 12).frame(height: 32)
                             .background(RoundedRectangle(cornerRadius: 6).fill(i == sel ? Theme.accent.opacity(0.14) : .clear))
                             .contentShape(Rectangle())
-                            .onTapGesture { go(e) }
+                            .hand().onTapGesture { go(e) }
                             .id(i)
                         }
                         if hits.isEmpty {

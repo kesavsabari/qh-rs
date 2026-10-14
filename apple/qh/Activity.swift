@@ -144,7 +144,7 @@ struct ToolRun: View {
                 }
                 .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.hand)
             if open {
                 VStack(alignment: .leading, spacing: 2) {
                     ForEach(items) { i in
@@ -190,7 +190,7 @@ struct ToolLine: View {
                 }
                 .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.hand)
             if open && !(summary.isEmpty && output.isEmpty) {
                 ScrollView {
                     Text(output.isEmpty ? summary : output).font(Theme.mono(11)).foregroundStyle(Theme.ink).textSelection(.enabled)

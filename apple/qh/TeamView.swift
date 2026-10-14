@@ -153,7 +153,7 @@ struct ChannelPage: View {
                             .padding(.horizontal, 10).padding(.vertical, 5)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .contentShape(Rectangle())
-                            .onTapGesture { insert(f) }
+                            .hand().onTapGesture { insert(f) }
                     }
                 }
                 .padding(.vertical, 4)
@@ -166,7 +166,7 @@ struct ChannelPage: View {
                     .onSubmit(send)
                 Button(action: send) { Image(systemName: "arrow.up").font(.system(size: 12, weight: .semibold)).foregroundStyle(.white)
                     .frame(width: 26, height: 26).background(Circle().fill(text.isEmpty ? Theme.faint : Theme.accent)) }
-                    .buttonStyle(.plain).disabled(text.isEmpty)
+                    .buttonStyle(.hand).disabled(text.isEmpty)
             }
             .padding(12)
             .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Theme.side))
@@ -274,7 +274,7 @@ struct PeerPage: View {
         VStack(spacing: 0) {
             PageHeader(title: "\(login) · \(name)", subtitle: [a?.status ?? "", a?.topic ?? ""].filter { !$0.isEmpty }.joined(separator: " · ")) {
                 Button("Message \(login)") { WorkspaceHolder.ws?.teamPage = .channel("@" + login) }
-                    .buttonStyle(.plain).font(Theme.sans(12.5, medium: true)).foregroundStyle(Theme.accent)
+                    .buttonStyle(.hand).font(Theme.sans(12.5, medium: true)).foregroundStyle(Theme.accent)
             }
             ScrollViewReader { sv in
             ScrollView {
@@ -363,7 +363,7 @@ struct PillButton: View {
                 .padding(.horizontal, 12).padding(.vertical, 6)
                 .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(primary ? Theme.accent : Theme.ink.opacity(0.07)))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.hand)
     }
 }
 

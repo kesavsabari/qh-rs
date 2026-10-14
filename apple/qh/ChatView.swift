@@ -72,7 +72,7 @@ struct ChatTabBar: View {
                 Button { project.newTab() } label: {
                     Text("+").font(Theme.mono(14)).foregroundStyle(Theme.faint).frame(width: 30, height: 34).contentShape(Rectangle())
                 }
-                .buttonStyle(.plain).help("New tab (⌘T)")
+                .buttonStyle(.hand).help("New tab (⌘T)")
                 Spacer()
                 Picker("", selection: $project.layout) {
                     Text("Chat").tag("chat")
@@ -85,16 +85,16 @@ struct ChatTabBar: View {
                     Button { project.loadChanges(); project.showReview = true } label: {
                         Text("\(project.changes.count) changed").font(Theme.mono(12)).foregroundStyle(Theme.accent)
                     }
-                    .buttonStyle(.plain).padding(.bottom, 9).padding(.trailing, 10).help("Review changes (⌘D)")
+                    .buttonStyle(.hand).padding(.bottom, 9).padding(.trailing, 10).help("Review changes (⌘D)")
                 }
                 Button { project.showTasks = true } label: {
                     Text("tasks").font(Theme.mono(12)).foregroundStyle(Theme.soft)
                 }
-                .buttonStyle(.plain).padding(.bottom, 9).padding(.trailing, 10).help("Background tasks (⌘⇧B)")
+                .buttonStyle(.hand).padding(.bottom, 9).padding(.trailing, 10).help("Background tasks (⌘⇧B)")
                 Button { project.showSetup.toggle() } label: {
                     Text("models").font(Theme.mono(12)).foregroundStyle(project.showSetup ? Theme.ink : Theme.soft)
                 }
-                .buttonStyle(.plain).padding(.bottom, 9).padding(.trailing, 10).help("Connect models (⌘,)")
+                .buttonStyle(.hand).padding(.bottom, 9).padding(.trailing, 10).help("Connect models (⌘,)")
             }
             .padding(.horizontal, 12)
             .frame(height: 42, alignment: .bottom)
@@ -116,14 +116,14 @@ struct ChatTabButton: View {
                 Button { project.closeTab(tab.name) } label: {
                     Text("×").font(Theme.mono(13)).foregroundStyle(Theme.faint).frame(width: 18, height: 18).contentShape(Rectangle())
                 }
-                .buttonStyle(.plain).help("Close tab (⌘W)")
+                .buttonStyle(.hand).help("Close tab (⌘W)")
             }
         }
         .padding(.leading, 12).padding(.trailing, 8)
         .frame(height: 34)
         .overlay(alignment: .bottom) { Rectangle().fill(on ? Theme.accent : .clear).frame(height: 2) }
         .contentShape(Rectangle())
-        .onTapGesture { project.active = tab.name }
+        .hand().onTapGesture { project.active = tab.name }
     }
 }
 
@@ -267,7 +267,7 @@ struct DiffLine: View {
             HStack(spacing: 10) {
                 Text("edited").foregroundStyle(Theme.faint)
                 Text(path).foregroundStyle(Theme.ink).underline(PathLinks.resolve(path) != nil, color: Theme.faint)
-                    .onTapGesture { ws.current?.openFile(path) }
+                    .hand().onTapGesture { ws.current?.openFile(path) }
                 Text("+\(added)").foregroundStyle(Color(nsColor: .systemGreen))
                 Text("−\(removed)").foregroundStyle(Color(nsColor: .systemRed))
                 Text("review").foregroundStyle(Theme.faint)
@@ -275,7 +275,7 @@ struct DiffLine: View {
             .font(Theme.mono(12))
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.hand)
         .help("Review this session's changes")
     }
 }
@@ -297,14 +297,14 @@ struct ToolCard: View {
                     Text(name).foregroundStyle(Theme.ink)
                     Text(args).foregroundStyle(Theme.soft).lineLimit(1).truncationMode(.middle)
                         .underline(PathLinks.resolve(args) != nil, color: Theme.faint)
-                        .onTapGesture { if PathLinks.resolve(args) != nil { ws.current?.openFile(args) } else { open.toggle() } }
+                        .hand().onTapGesture { if PathLinks.resolve(args) != nil { ws.current?.openFile(args) } else { open.toggle() } }
                     Spacer(minLength: 0)
                     if !summary.isEmpty || !output.isEmpty { Text(open ? "▾" : "▸").foregroundStyle(Theme.faint) }
                 }
                 .font(Theme.mono(12))
                 .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.hand)
             if open {
                 if !summary.isEmpty { Text(summary).font(Theme.mono(11.5)).foregroundStyle(Theme.soft).textSelection(.enabled).padding(.leading, 20) }
                 if !output.isEmpty {
@@ -494,7 +494,7 @@ struct CopyButton: View {
             NSPasteboard.general.setString(text, forType: .string)
             done = true
         } label: { Text(done ? "copied" : "copy").font(Theme.mono(11)).foregroundStyle(Theme.faint) }
-        .buttonStyle(.plain)
+        .buttonStyle(.hand)
     }
 }
 
@@ -586,7 +586,7 @@ struct Composer: View {
                         .font(Theme.mono(12)).padding(.horizontal, 10).padding(.vertical, 5)
                         .background(i == min(sel, sugg.count - 1) ? Theme.hover : .clear)
                         .contentShape(Rectangle())
-                        .onTapGesture { text = s.insert; sel = 0 }
+                        .hand().onTapGesture { text = s.insert; sel = 0 }
                     }
                 }
                 .padding(.vertical, 4)
@@ -599,7 +599,7 @@ struct Composer: View {
                         ForEach(Array(images.enumerated()), id: \.offset) { i, im in
                             HStack(spacing: 4) {
                                 Text("▣ " + im.name).lineLimit(1)
-                                Button("×") { images.remove(at: i) }.buttonStyle(.plain)
+                                Button("×") { images.remove(at: i) }.buttonStyle(.hand)
                             }
                             .font(Theme.mono(11)).foregroundStyle(Theme.accent)
                         }
@@ -640,18 +640,18 @@ struct Composer: View {
                 .onChange(of: text) { _, _ in sel = 0 }
                 HStack(spacing: 14) {
                     Button { project.prompt("/model") } label: { Text(tab.model).font(Theme.mono(11)).foregroundStyle(Theme.faint) }
-                        .buttonStyle(.plain).help("Switch model (/model)")
+                        .buttonStyle(.hand).help("Switch model (/model)")
                     EffortPicker(project: project, tab: tab)
                     ModePicker(project: project, small: true)
                     if tab.tokens >= 1000 { Text("\(tab.tokens / 1000)k tokens").font(Theme.mono(11)).foregroundStyle(Theme.faint) }
                     if let c = tab.cost, c > 0 { Text(String(format: "$%.3f", c)).font(Theme.mono(11)).foregroundStyle(Theme.faint) }
                     Spacer()
                     Button { attachPanel() } label: { Text("+ image").font(Theme.mono(11)).foregroundStyle(Theme.faint) }
-                        .buttonStyle(.plain).help("Attach an image (or paste / drop one)")
+                        .buttonStyle(.hand).help("Attach an image (or paste / drop one)")
                     if tab.busy {
-                        Button("stop") { project.stop() }.buttonStyle(.plain).font(Theme.mono(12)).foregroundStyle(Theme.accent)
+                        Button("stop") { project.stop() }.buttonStyle(.hand).font(Theme.mono(12)).foregroundStyle(Theme.accent)
                     }
-                    Button("send ⏎") { send() }.buttonStyle(.plain).font(Theme.mono(12))
+                    Button("send ⏎") { send() }.buttonStyle(.hand).font(Theme.mono(12))
                         .foregroundStyle(text.isEmpty && images.isEmpty ? Theme.faint : Theme.ink)
                         .disabled(text.isEmpty && images.isEmpty)
                 }
@@ -749,7 +749,7 @@ struct PickerSheet: View {
                             .font(Theme.mono(12.5)).padding(.horizontal, 8).padding(.vertical, 6)
                             .background(RoundedRectangle(cornerRadius: 5).fill(i == sel ? Theme.hover : .clear))
                             .contentShape(Rectangle())
-                            .onTapGesture { project.choose(picker, r.value) }
+                            .hand().onTapGesture { project.choose(picker, r.value) }
                             .id(i)
                         }
                     }

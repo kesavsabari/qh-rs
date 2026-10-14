@@ -31,7 +31,7 @@ struct MenuBarView: View {
                 Spacer()
                 Button("Quit") { NSApp.terminate(nil) }
             }
-            .buttonStyle(.plain).font(Theme.sans(12)).foregroundStyle(Theme.soft)
+            .buttonStyle(.hand).font(Theme.sans(12)).foregroundStyle(Theme.soft)
             .padding(.horizontal, 12).padding(.vertical, 9)
         }
         .frame(width: 340)

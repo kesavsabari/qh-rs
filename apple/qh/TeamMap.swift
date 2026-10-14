@@ -24,7 +24,7 @@ struct MapPage: View {
                                 Text(who == me ? "you" : who).font(Theme.sans(12)).foregroundStyle(focus == nil || focus == who ? Theme.ink : Theme.faint)
                             }
                         }
-                        .buttonStyle(.plain).help("Show only \(who == me ? "your" : who + "'s") work")
+                        .buttonStyle(.hand).help("Show only \(who == me ? "your" : who + "'s") work")
                     }
                 }
             }
@@ -38,7 +38,7 @@ struct MapPage: View {
                 .onContinuousHover { phase in
                     if case .active(let p) = phase { hover = tiles.last { $0.rect.contains(p) } } else { hover = nil }
                 }
-                .onTapGesture {
+                .hand().onTapGesture {
                     guard let h = hover, !h.isDir else { return }
                     ws.teamPage = .agent
                     project.openFile(h.path)

@@ -98,7 +98,7 @@ struct ReviewView: View {
                             .padding(.horizontal, 12).padding(.vertical, 7)
                             .background(cur?.path == f.path ? Theme.hover : .clear)
                             .contentShape(Rectangle())
-                            .onTapGesture { sel = f.path }
+                            .hand().onTapGesture { sel = f.path }
                         }
                     }
                 }

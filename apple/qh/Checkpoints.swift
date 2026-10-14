@@ -49,7 +49,7 @@ private struct CheckpointRow: View {
                     .font(Theme.sans(12.5)).foregroundStyle(Theme.ink).lineLimit(2)
                 Spacer(minLength: 4)
                 if over && !busy {
-                    Button("Rewind", action: rewind).buttonStyle(.plain)
+                    Button("Rewind", action: rewind).buttonStyle(.hand)
                         .font(Theme.sans(11.5, medium: true)).foregroundStyle(Theme.accent)
                         .help("Put these files back as they were before this message")
                 }

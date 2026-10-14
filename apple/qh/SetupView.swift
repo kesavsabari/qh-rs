@@ -16,7 +16,7 @@ struct SetupView: View {
                 Text("Connect your models").font(Theme.sans(24, medium: true)).foregroundStyle(Theme.ink)
                 Spacer()
                 if !(s?.needed ?? true) {
-                    Button("done") { project.showSetup = false }.buttonStyle(.plain).font(Theme.mono(12)).foregroundStyle(Theme.soft)
+                    Button("done") { project.showSetup = false }.buttonStyle(.hand).font(Theme.mono(12)).foregroundStyle(Theme.soft)
                 }
             }
             Text("Tick any mix: everything you connect stays available to switch to.")
@@ -48,7 +48,7 @@ struct SetupView: View {
                                 .background(RoundedRectangle(cornerRadius: 5).fill(s?.def == m.id ? Theme.hover : .clear))
                                 .contentShape(Rectangle())
                             }
-                            .buttonStyle(.plain)
+                            .buttonStyle(.hand)
                         }
                     }
                 }

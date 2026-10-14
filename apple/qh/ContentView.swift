@@ -64,7 +64,7 @@ struct SidebarView: View {
                 Button(action: ws.pick) {
                     Label("Open folder", systemImage: "plus").font(Theme.sans(12.5))
                 }
-                .buttonStyle(.plain).foregroundStyle(Theme.soft)
+                .buttonStyle(.hand).foregroundStyle(Theme.soft)
                 Spacer()
                 Text(ws.version.replacingOccurrences(of: "qh ", with: "v")).font(Theme.mono(11)).foregroundStyle(Theme.faint)
             }
@@ -96,7 +96,7 @@ struct SpaceSwitch: View {
                     .shadow(color: .black.opacity(on ? 0.12 : 0), radius: 1, y: 0.5))
                 .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.hand)
         .help("\(label) projects (⌃Space)")
     }
 }
@@ -126,7 +126,7 @@ struct TeamTabs: View {
                     .shadow(color: .black.opacity(on ? 0.12 : 0), radius: 1, y: 0.5))
                 .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.hand)
     }
 }
 
@@ -152,7 +152,7 @@ struct Row<Content: View>: View {
             .background(RoundedRectangle(cornerRadius: 6, style: .continuous)
                 .fill(Theme.ink.opacity(selected ? 0.09 : over ? 0.04 : 0)))
             .contentShape(Rectangle())
-            .onTapGesture(perform: action)
+            .hand().onTapGesture(perform: action)
             .onHover { h in withAnimation(.easeOut(duration: 0.12)) { over = h } }
     }
 }
@@ -257,7 +257,7 @@ struct SessionRows: View {
             }
         if project.sessions.count > 8 {
             Button(all ? "Show fewer" : "Show all \(project.sessions.count)") { all.toggle() }
-                .buttonStyle(.plain).font(Theme.sans(11.5)).foregroundStyle(Theme.faint).padding(.leading, 28).padding(.vertical, 4)
+                .buttonStyle(.hand).font(Theme.sans(11.5)).foregroundStyle(Theme.faint).padding(.leading, 28).padding(.vertical, 4)
         }
     }
 }
@@ -301,7 +301,7 @@ struct TeamSidebar: View {
                     .padding(.horizontal, 8).padding(.vertical, 6)
                     .contentShape(Rectangle())
                 }
-                .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden)
+                .menuStyle(.button).buttonStyle(.hand).menuIndicator(.hidden)
                 .padding(.horizontal, 8)
                 if let p = ws.projects.first(where: { $0.path == cur }) {
                     TeamNav(project: p)
@@ -498,7 +498,7 @@ struct Empty: View {
                     .padding(.horizontal, 16).padding(.vertical, 9)
                     .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Theme.ink))
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.hand)
             Text("⌘O").font(Theme.mono(11)).foregroundStyle(Theme.faint).padding(.top, 10)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
@@ -526,7 +526,7 @@ struct Missing: View {
                     .padding(.horizontal, 16).padding(.vertical, 9)
                     .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Theme.ink))
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.hand)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         .padding(.horizontal, 72)
@@ -601,7 +601,7 @@ struct AgentInspector: View {
                 }
             }
             if !project.changes.isEmpty {
-                Button("Review all  ⌘D") { project.showReview = true }.buttonStyle(.plain)
+                Button("Review all  ⌘D") { project.showReview = true }.buttonStyle(.hand)
                     .font(Theme.sans(12, medium: true)).foregroundStyle(Theme.accent).padding(.horizontal, 8).padding(.top, 6)
             }
             CheckpointList(project: project)

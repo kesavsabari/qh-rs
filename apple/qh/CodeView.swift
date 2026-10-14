@@ -211,7 +211,7 @@ struct CodeView: View {
                 Button("Reveal in Finder") { NSWorkspace.shared.selectFile(abs, inFileViewerRootedAtPath: "") }
                 Button("Open in your editor") { Editor.open(abs, line: target.line) }.keyboardShortcut("e")
                 if project.layout == "split" {
-                    Button { project.layout = "chat" } label: { Image(systemName: "xmark") }.buttonStyle(.plain)
+                    Button { project.layout = "chat" } label: { Image(systemName: "xmark") }.buttonStyle(.hand)
                         .foregroundStyle(Theme.soft).help("Close the code pane")
                 }
             }

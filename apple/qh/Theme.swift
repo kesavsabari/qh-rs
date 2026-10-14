@@ -86,3 +86,30 @@ struct Cursor: NSViewRepresentable {
         override func viewDidChangeEffectiveAppearance() { needsDisplay = true }
     }
 }
+
+/// Pointing-hand cursor over anything clickable.
+struct Hand: ViewModifier {
+    func body(content: Content) -> some View {
+        content.onContinuousHover { phase in
+            switch phase {
+            case .active: NSCursor.pointingHand.set()
+            case .ended: NSCursor.arrow.set()
+            }
+        }
+    }
+}
+
+extension View {
+    func hand() -> some View { modifier(Hand()) }
+}
+
+/// `.plain` with the pointing hand.
+struct HandButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label.opacity(configuration.isPressed ? 0.6 : 1).hand()
+    }
+}
+
+extension ButtonStyle where Self == HandButtonStyle {
+    static var hand: HandButtonStyle { HandButtonStyle() }
+}

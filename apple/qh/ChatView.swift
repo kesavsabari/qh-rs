@@ -16,6 +16,12 @@ struct ProjectView: View {
                 SetupView(project: project)
             } else if let tab = project.current {
                 ThreadView(tab: tab, repliesOnly: project.repliesOnly)
+                    .environment(\.openURL, OpenURLAction { url in
+                        guard url.scheme == "qh-file" else { return .systemAction }
+                        let line = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "line" }?.value
+                        project.openFile(url.path, line: line.flatMap { Int($0) })
+                        return .handled
+                    })
                 ForEach(project.asks.filter { $0.tab == tab.name }) { a in AskCard(ask: a, project: project) }
                 Composer(project: project, tab: tab)
             } else {
@@ -31,6 +37,9 @@ struct ProjectView: View {
         .sheet(item: $project.picker) { p in PickerSheet(picker: p, project: project) }
         .sheet(isPresented: $project.showReview) { ReviewView(project: project) }
         .sheet(isPresented: $project.showTasks) { TasksView(project: project) }
+        .sheet(item: $project.code) { t in CodeView(target: t, project: project) }
+        // links in the thread point at this project's files
+        .onAppear { if !project.tree.children.isEmpty { PathLinks.use(project.fileSet, root: project.path) } }
     }
 }
 
@@ -60,7 +69,6 @@ struct ChatTabBar: View {
                     Text("models").font(Theme.mono(12)).foregroundStyle(project.showSetup ? Theme.ink : Theme.soft)
                 }
                 .buttonStyle(.plain).padding(.bottom, 9).padding(.trailing, 10).help("Connect models (⌘,)")
-                ModePicker(project: project).padding(.bottom, 6)
             }
             .padding(.horizontal, 12)
             .frame(height: 42, alignment: .bottom)
@@ -110,8 +118,30 @@ struct StatusDot: View {
     }
 }
 
+/// Thinking and its effort, as /think sets it: off, on (the model's default), low, medium, high.
+struct EffortPicker: View {
+    @ObservedObject var project: Project
+    @ObservedObject var tab: ChatTab
+    private let levels = ["off", "on", "low", "medium", "high"]
+
+    var body: some View {
+        let cur = !tab.think ? "off" : tab.effort.isEmpty ? "on" : tab.effort
+        Menu {
+            ForEach(levels, id: \.self) { l in
+                Button { project.prompt("/think \(l)") } label: { Text(l + (l == cur ? "  ✓" : "")) }
+            }
+        } label: {
+            Text(cur == "off" ? "no thinking" : cur == "on" ? "thinking" : "\(cur) effort").font(Theme.mono(11)).foregroundStyle(Theme.faint)
+        }
+        .menuStyle(.borderlessButton).menuIndicator(.hidden)
+        .fixedSize()
+        .help("Thinking effort (/think)")
+    }
+}
+
 struct ModePicker: View {
     @ObservedObject var project: Project
+    var small = false
     private let modes = ["ask", "auto-edit", "auto", "plan"]
 
     var body: some View {
@@ -120,9 +150,9 @@ struct ModePicker: View {
                 Button { project.setMode(m) } label: { Text(m + (m == project.mode ? "  ✓" : "")) }
             }
         } label: {
-            Text(project.mode.isEmpty ? "mode" : project.mode).font(Theme.mono(12)).foregroundStyle(Theme.soft)
+            Text(project.mode.isEmpty ? "mode" : project.mode).font(Theme.mono(small ? 11 : 12)).foregroundStyle(small ? Theme.faint : Theme.soft)
         }
-        .menuStyle(.borderlessButton)
+        .menuStyle(.borderlessButton).menuIndicator(small ? .hidden : .visible)
         .fixedSize()
         .help("Mode: what qh may do without asking")
     }
@@ -202,7 +232,8 @@ struct DiffLine: View {
         Button { ws.current?.loadChanges(); ws.current?.showReview = true } label: {
             HStack(spacing: 10) {
                 Text("edited").foregroundStyle(Theme.faint)
-                Text(path).foregroundStyle(Theme.ink)
+                Text(path).foregroundStyle(Theme.ink).underline(PathLinks.resolve(path) != nil, color: Theme.faint)
+                    .onTapGesture { ws.current?.openFile(path) }
                 Text("+\(added)").foregroundStyle(Color(nsColor: .systemGreen))
                 Text("−\(removed)").foregroundStyle(Color(nsColor: .systemRed))
                 Text("review").foregroundStyle(Theme.faint)
@@ -222,6 +253,7 @@ struct ToolCard: View {
     let summary: String
     let output: String
     @State private var open = false
+    @EnvironmentObject var ws: Workspace
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -230,6 +262,8 @@ struct ToolCard: View {
                     Text(ok == nil ? "◐" : ok! ? "✓" : "✕").foregroundStyle(ok == false ? Color(nsColor: .systemRed) : Theme.accent)
                     Text(name).foregroundStyle(Theme.ink)
                     Text(args).foregroundStyle(Theme.soft).lineLimit(1).truncationMode(.middle)
+                        .underline(PathLinks.resolve(args) != nil, color: Theme.faint)
+                        .onTapGesture { if PathLinks.resolve(args) != nil { ws.current?.openFile(args) } else { open.toggle() } }
                     Spacer(minLength: 0)
                     if !summary.isEmpty || !output.isEmpty { Text(open ? "▾" : "▸").foregroundStyle(Theme.faint) }
                 }
@@ -367,8 +401,10 @@ struct Markdown: View {
     }
 
     static func inline(_ s: String) -> AttributedString {
-        (try? AttributedString(markdown: s, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(s)
+        let a = (try? AttributedString(markdown: s, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(s)
+        return PathLinks.link(a) { PathLinks.resolve($0) != nil }
     }
+    static func clearCache() { cache.removeAllObjects() }
 }
 
 /// A markdown table: header row bold, hairline rules, columns sized to content, scrolls sideways if wide.
@@ -559,10 +595,19 @@ struct Composer: View {
                 }
                 .onKeyPress(.downArrow) { guard !sugg.isEmpty else { return .ignored }; sel = min(sel + 1, sugg.count - 1); return .handled }
                 .onKeyPress(.upArrow) { guard !sugg.isEmpty else { return .ignored }; sel = max(sel - 1, 0); return .handled }
+                .onKeyPress(.escape) {
+                    // Esc closes the popup first, then stops a running turn
+                    if !sugg.isEmpty { text += " "; return .handled }
+                    guard tab.busy else { return .ignored }
+                    project.stop()
+                    return .handled
+                }
                 .onChange(of: text) { _, _ in sel = 0 }
                 HStack(spacing: 14) {
                     Button { project.prompt("/model") } label: { Text(tab.model).font(Theme.mono(11)).foregroundStyle(Theme.faint) }
                         .buttonStyle(.plain).help("Switch model (/model)")
+                    EffortPicker(project: project, tab: tab)
+                    ModePicker(project: project, small: true)
                     if tab.tokens >= 1000 { Text("\(tab.tokens / 1000)k tokens").font(Theme.mono(11)).foregroundStyle(Theme.faint) }
                     if let c = tab.cost, c > 0 { Text(String(format: "$%.3f", c)).font(Theme.mono(11)).foregroundStyle(Theme.faint) }
                     Spacer()

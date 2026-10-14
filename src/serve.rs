@@ -1,7 +1,7 @@
 //! `qh serve`: one core per project behind a user-only Unix socket, for the Mac app (and later
 //! VS Code and the TUI). JSON lines both ways. A client's first line is
 //! `{"type":"hello","token":"…"}`; it then gets a snapshot and every hub event, tagged with its tab.
-//! Up: prompt, answer (to a confirm), stop, mode, model, new_tab, close_tab.
+//! Up: prompt, answer (to a confirm), stop, mode, model, new_tab, close_tab, files.
 
 use crate::hub::{lock, Answer, Event, Hub};
 use serde_json::{json, Value};
@@ -143,6 +143,35 @@ fn team_state(chan: Option<&str>) -> Value {
            "activity": activity, "chan": chan, "messages": msgs, "agents": agents})
 }
 
+/// The project's files for the app's tree and @ picker, relative and sorted: git's view (tracked plus
+/// untracked, .gitignore respected) in a repo, else a walk that skips the usual build folders. 20k max.
+fn project_files(root: &Path) -> Vec<String> {
+    const MAX: usize = 20000;
+    let git = std::process::Command::new("git").args(["ls-files", "-z", "--cached", "--others", "--exclude-standard"])
+        .current_dir(root).stderr(std::process::Stdio::null()).output();
+    let mut out: Vec<String> = match git {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).split('\0')
+            .filter(|f| !f.is_empty() && root.join(f).is_file()).take(MAX).map(String::from).collect(),
+        _ => {
+            const SKIP: [&str; 10] = [".git", "node_modules", "target", "build", ".build", "dist", ".next", "DerivedData", "__pycache__", ".venv"];
+            let (mut out, mut stack) = (vec![], vec![root.to_path_buf()]);
+            while let Some(d) = stack.pop() {
+                for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+                    let (p, name) = (e.path(), e.file_name().to_string_lossy().to_string());
+                    if name.starts_with('.') || SKIP.contains(&name.as_str()) { continue }
+                    if p.is_dir() { stack.push(p) } else if let Ok(r) = p.strip_prefix(root) { out.push(r.to_string_lossy().to_string()) }
+                }
+                if out.len() >= MAX { break }
+            }
+            out.truncate(MAX);
+            out
+        }
+    };
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// One client's commands. Returns an error line for a bad command, nothing when it worked.
 fn command(hub: &Arc<Hub>, st: &State, v: &Value) -> Option<String> {
     let tab = v["tab"].as_str().unwrap_or("main");
@@ -215,6 +244,10 @@ fn command(hub: &Arc<Hub>, st: &State, v: &Value) -> Option<String> {
             let rows: Vec<Value> = crate::team::transcript_rows(login, session).into_iter()
                 .map(|(role, text)| json!({"role": role, "text": text})).collect();
             st.broadcast(&json!({"type": "team_transcript", "login": login, "session": session, "rows": rows}));
+        }
+        "files" => {
+            let root = hub.get(tab).map(|m| m.root.clone()).unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+            st.broadcast(&json!({"type": "files", "tab": tab, "root": root, "files": project_files(&root)}));
         }
         "tasks" => st.broadcast(&json!({"type": "tasks", "tab": tab, "text": crate::bg::list(tab)})),
         "changes" => {
@@ -406,4 +439,28 @@ pub fn run(hub: Arc<Hub>, rx: Receiver<crate::ui::Ui>) -> i32 {
         std::thread::spawn(move || client(h, st, s, want));
     }
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn project_files_follow_gitignore() {
+        let d = std::env::temp_dir().join(format!("qh-serve-files-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        for (f, body) in [("src/a.rs", "x"), (".gitignore", "out/\n*.log\n"), ("out/b.js", "x"), ("debug.log", "x"), ("README.md", "x")] {
+            let p = d.join(f);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        }
+        // no repo yet: a plain walk, hidden files skipped
+        assert_eq!(project_files(&d), ["README.md", "debug.log", "out/b.js", "src/a.rs"]);
+        let ok = std::process::Command::new("git").args(["init", "-q"]).current_dir(&d).status().is_ok_and(|s| s.success());
+        if ok {
+            // a repo: untracked files show, ignored ones don't
+            assert_eq!(project_files(&d), [".gitignore", "README.md", "src/a.rs"]);
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }

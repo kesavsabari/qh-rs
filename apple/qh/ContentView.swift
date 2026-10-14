@@ -593,9 +593,11 @@ struct AgentInspector: View {
                     .font(Theme.sans(12, medium: true)).foregroundStyle(Theme.accent).padding(.horizontal, 8).padding(.top, 6)
             }
             CheckpointList(project: project)
+            Header(text: "Files", trailing: project.files.isEmpty ? "" : "\(project.files.count)")
+            FileTree(project: project)
         }
         .padding(10)
-        .onAppear { project.loadChanges() }
+        .onAppear { project.loadChanges(); project.loadFiles() }
     }
 }
 

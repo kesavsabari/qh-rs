@@ -70,9 +70,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                 }
             }
+            // "io.qh.open" with "path[:line]": open it in the code view, as a click on it in the thread would
+            DistributedNotificationCenter.default().addObserver(forName: .init("io.qh.open"), object: nil, queue: .main) { n in
+                let p = n.object as? String ?? ""
+                MainActor.assumeIsolated { Notify.workspace?.current?.openFile(p) }
+            }
             DistributedNotificationCenter.default().addObserver(forName: .init("io.qh.snapshot"), object: nil, queue: .main) { _ in
                 MainActor.assumeIsolated {
-                    guard let w = NSApp.windows.first(where: { $0.isVisible && $0.contentView != nil }), let v = w.contentView?.superview ?? w.contentView,
+                    guard let main = NSApp.windows.first(where: { $0.isVisible && $0.contentView != nil && $0.sheetParent == nil }), case let w = main.attachedSheet ?? main, let v = w.contentView?.superview ?? w.contentView,
                           let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) else { return }
                     v.cacheDisplay(in: v.bounds, to: rep)
                     try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: "/tmp/qh-window.png"))

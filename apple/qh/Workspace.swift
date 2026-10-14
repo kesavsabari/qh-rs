@@ -52,6 +52,8 @@ final class Workspace: ObservableObject {
         }
         Notify.workspace = self
         Notify.setup()
+        // back where you were: the project open when the app last quit
+        if let last = UserDefaults.standard.string(forKey: "lastOpen"), FileManager.default.fileExists(atPath: last) { open(last) }
     }
 
     var current: Project? { projects.first { $0.path == active } }
@@ -86,6 +88,7 @@ final class Workspace: ObservableObject {
             projects.append(Project(path: path, qh: qh))
         }
         active = path
+        UserDefaults.standard.set(path, forKey: "lastOpen")
     }
 
     func close(_ p: Project) {

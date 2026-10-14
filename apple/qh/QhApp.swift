@@ -4,6 +4,12 @@ import SwiftUI
 struct QhApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
     @StateObject private var ws: Workspace
+    @AppStorage("appearance") private var look = "system"
+
+    /// Light, dark, or follow the Mac: every Theme colour has both, so this is all it takes.
+    static func apply(_ v: String) {
+        NSApp.appearance = v == "light" ? NSAppearance(named: .aqua) : v == "dark" ? NSAppearance(named: .darkAqua) : nil
+    }
 
     init() {
         Theme.registerFonts()
@@ -19,6 +25,14 @@ struct QhApp: App {
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1280, height: 820)
         .commands {
+            CommandGroup(after: .toolbar) {
+                Picker("Appearance", selection: $look) {
+                    Text("System").tag("system")
+                    Text("Light").tag("light")
+                    Text("Dark").tag("dark")
+                }
+                .onChange(of: look) { _, v in QhApp.apply(v) }
+            }
             CommandGroup(replacing: .newItem) {
                 Button("Open Folder…") { ws.pick() }.keyboardShortcut("o")
                 Button("Review Changes") { ws.current?.loadChanges(); ws.current?.showReview = true }.keyboardShortcut("d").disabled(ws.current == nil)
@@ -33,6 +47,10 @@ struct QhApp: App {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ n: Notification) {
+        QhApp.apply(UserDefaults.standard.string(forKey: "appearance") ?? "system")
+    }
+
     func applicationWillTerminate(_ n: Notification) {
         MainActor.assumeIsolated { Notify.workspace?.shutdown() }
     }

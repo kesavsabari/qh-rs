@@ -148,7 +148,7 @@ struct ThreadView: View {
                     if tab.items.isEmpty {
                         Text("Ask qh anything about this project.").font(Theme.sans(15)).foregroundStyle(Theme.faint).padding(.top, 40)
                     }
-                    ForEach(shown) { item in ItemView(item: item) }
+                    ForEach(shown) { item in ItemView(item: item).equatable() }
                     if tab.status == "working" { Thinking() }
                     Color.clear.frame(height: 1).id("end")
                 }
@@ -163,8 +163,9 @@ struct ThreadView: View {
     }
 }
 
-struct ItemView: View {
+struct ItemView: View, Equatable {
     let item: Item
+    static func == (a: ItemView, b: ItemView) -> Bool { a.item == b.item }
 
     var body: some View {
         switch item.kind {
@@ -250,9 +251,24 @@ struct ToolCard: View {
 struct Markdown: View {
     let text: String
 
+    /// Styled text per block (paragraph run or code block), cached by the block's own text: while a
+    /// reply streams, every finished block is a cache hit and only the one being written is parsed.
+    private static let cache: NSCache<NSString, Box> = { let c = NSCache<NSString, Box>(); c.countLimit = 2000; return c }()
+    final class Box { let v: AttributedString; init(_ v: AttributedString) { self.v = v } }
+
+    private var parsed: [(code: Bool, text: String, styled: AttributedString)] {
+        Self.blocks(text).map { b in
+            if b.code { return (true, b.text, AttributedString()) }
+            if let hit = Self.cache.object(forKey: b.text as NSString) { return (false, b.text, hit.v) }
+            let v = Self.inline(b.text)
+            Self.cache.setObject(Box(v), forKey: b.text as NSString)
+            return (false, b.text, v)
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            ForEach(Array(Self.blocks(text).enumerated()), id: \.offset) { _, b in
+            ForEach(Array(parsed.enumerated()), id: \.offset) { _, b in
                 if b.code {
                     ScrollView(.horizontal, showsIndicators: false) {
                         Text(b.text).font(Theme.mono(12.5)).foregroundStyle(Theme.ink).textSelection(.enabled).padding(12)
@@ -260,27 +276,32 @@ struct Markdown: View {
                     .background(RoundedRectangle(cornerRadius: 6).fill(Theme.side))
                     .overlay(alignment: .topTrailing) { CopyButton(text: b.text).padding(6) }
                 } else {
-                    Text(Self.inline(b.text)).font(Theme.sans(15)).foregroundStyle(Theme.ink).lineSpacing(3).textSelection(.enabled)
+                    Text(b.styled).font(Theme.sans(15)).foregroundStyle(Theme.ink).lineSpacing(3).textSelection(.enabled)
                 }
             }
         }
     }
 
+    /// Code fences become code blocks; other text splits at blank lines into paragraphs.
     static func blocks(_ s: String) -> [(code: Bool, text: String)] {
         var out: [(Bool, String)] = []
         var cur: [Substring] = [], inCode = false
+        func push() {
+            let t = cur.joined(separator: "\n")
+            if !t.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { out.append((inCode, t)) }
+            cur = []
+        }
         for line in s.split(separator: "\n", omittingEmptySubsequences: false) {
             if line.trimmingCharacters(in: .whitespaces).hasPrefix("```") {
-                let t = cur.joined(separator: "\n")
-                if !t.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { out.append((inCode, t)) }
-                cur = []
+                push()
                 inCode.toggle()
+            } else if !inCode && line.trimmingCharacters(in: .whitespaces).isEmpty {
+                push()
             } else {
                 cur.append(line)
             }
         }
-        let t = cur.joined(separator: "\n")
-        if !t.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { out.append((inCode, t)) }
+        push()
         return out
     }
 

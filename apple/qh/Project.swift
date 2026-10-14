@@ -2,8 +2,8 @@ import Foundation
 import SwiftUI
 
 /// One thing in a tab's thread.
-struct Item: Identifiable {
-    enum Kind {
+struct Item: Identifiable, Equatable {
+    enum Kind: Equatable {
         case user(String)
         case reply(String)
         case tool(name: String, args: String, ok: Bool?, summary: String, output: String)
@@ -39,6 +39,28 @@ final class ChatTab: ObservableObject, Identifiable {
     var busy: Bool { status == "working" || status == "confirm" }
 
     init(name: String) { self.name = name }
+
+    /// Streamed tokens wait here and land together, about 15 times a second, so a fast model
+    /// redraws the thread a few dozen times a second instead of once per token.
+    private var pending = ""
+    private var flushing = false
+
+    func stream(_ text: String) {
+        pending += text
+        guard !flushing else { return }
+        flushing = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.066) { [weak self] in
+            MainActor.assumeIsolated { self?.flush() }
+        }
+    }
+
+    func flush() {
+        flushing = false
+        guard !pending.isEmpty else { return }
+        let t = pending
+        pending = ""
+        append(text: t)
+    }
 
     /// Streaming text joins the reply it belongs to; anything else in between starts a new one.
     func append(text: String) {
@@ -183,6 +205,7 @@ final class Project: ObservableObject, Identifiable {
     private func handle(_ e: [String: Any]) {
         let type = e["type"] as? String ?? ""
         let tabName = e["tab"] as? String ?? "main"
+        if type != "text", let t = tabs.first(where: { $0.name == tabName }) { t.flush() }
         switch type {
         case "history":
             fill(e)
@@ -249,7 +272,7 @@ final class Project: ObservableObject, Identifiable {
             tabs.removeAll { !names.contains($0.name) }
             if !names.contains(active) { active = names.first ?? "main" }
         case "text":
-            tab(tabName).append(text: e["delta"] as? String ?? "")
+            tab(tabName).stream(e["delta"] as? String ?? "")
         case "tool_call":
             tab(tabName).items.append(Item(kind: .tool(name: e["name"] as? String ?? "", args: Self.brief(e["args"]), ok: nil, summary: "", output: "")))
         case "tool_result":

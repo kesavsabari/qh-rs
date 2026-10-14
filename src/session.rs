@@ -105,14 +105,36 @@ fn id(p: &Path) -> String {
 /// This folder's saved sessions for a sidebar, newest first: id, title (the first request),
 /// message count, last change (unix seconds), path.
 pub fn for_project(cwd: &Path, n: usize) -> Vec<Value> {
-    project(&dir(), cwd).into_iter().filter(|(_, m)| m.iter().any(|x| x["role"] == "user")).take(n).map(|(p, msgs)| {
-        // the title is the first real request, not a /command typed before the app ran them
-        let first = msgs.iter().filter(|m| m["role"] == "user").map(text).find(|t| !t.trim_start().starts_with('/'))
-            .or_else(|| msgs.iter().find(|m| m["role"] == "user").map(text)).unwrap_or_default();
-        let when = std::fs::metadata(&p).and_then(|m| m.modified()).ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
-        serde_json::json!({"id": id(&p), "title": cut(&first, 70), "messages": msgs.len(), "when": when, "path": p})
-    }).collect()
+    // the sidebar asks after every turn: only files that changed since last time are read again
+    type Seen = (std::time::SystemTime, bool, String, usize); // modified, in this folder, title, messages
+    static SEEN: std::sync::Mutex<Option<std::collections::HashMap<PathBuf, Seen>>> = std::sync::Mutex::new(None);
+    let tag = format!("working in {}.", cwd.display());
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir()).into_iter().flatten().flatten().map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "jsonl")).collect();
+    files.sort();
+    let mut g = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    let seen = g.get_or_insert_with(Default::default);
+    let mut out = vec![];
+    for p in files.into_iter().rev() {
+        let Ok(meta) = std::fs::metadata(&p) else { continue };
+        let modified = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+        let fresh = seen.get(&p).is_some_and(|s| s.0 == modified);
+        if !fresh {
+            let msgs = load(&p);
+            let here = msgs.iter().find(|m| m["role"] == "system").and_then(|m| m["content"].as_str()).is_some_and(|c| c.contains(&tag));
+            // the title is the first real request, not a /command typed before the app ran them
+            let users: Vec<String> = msgs.iter().filter(|m| m["role"] == "user").map(text).collect();
+            let first = users.iter().find(|t| !t.trim_start().starts_with('/')).or(users.first()).cloned().unwrap_or_default();
+            let title = if users.is_empty() { String::new() } else { cut(&first, 70) };
+            seen.insert(p.clone(), (modified, here, title, msgs.len()));
+        }
+        let (_, here, title, count) = &seen[&p];
+        if !*here || title.is_empty() { continue }
+        let when = modified.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        out.push(serde_json::json!({"id": id(&p), "title": title, "messages": count, "when": when, "path": p}));
+        if out.len() >= n { break }
+    }
+    out
 }
 
 /// The past_sessions tool: list (no args), search (`query`) or read (`id`) this folder's sessions.

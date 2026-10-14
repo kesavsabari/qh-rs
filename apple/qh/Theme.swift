@@ -55,16 +55,34 @@ enum Theme {
     }
 }
 
-/// The blinking orange cursor of the qh mark.
-struct Cursor: View {
+/// The blinking orange cursor of the qh mark. The blink is a Core Animation layer animation, so
+/// it runs in the window server: the app does no work per blink (a SwiftUI timer redrew the view
+/// twice a second and kept the app at a few % CPU while idle).
+struct Cursor: NSViewRepresentable {
     var width: CGFloat
     var height: CGFloat
-    var body: some View {
-        TimelineView(.periodic(from: .now, by: 0.55)) { ctx in
-            Rectangle()
-                .fill(Theme.accent)
-                .frame(width: width, height: height)
-                .opacity(Int(ctx.date.timeIntervalSinceReferenceDate / 0.55) % 2 == 0 ? 1 : 0)
+
+    func makeNSView(context: Context) -> BlinkView { BlinkView() }
+    func updateNSView(_ v: BlinkView, context: Context) {}
+    func sizeThatFits(_ p: ProposedViewSize, nsView: BlinkView, context: Context) -> CGSize? { CGSize(width: width, height: height) }
+
+    final class BlinkView: NSView {
+        override init(frame: NSRect) {
+            super.init(frame: frame)
+            wantsLayer = true
+            let blink = CAKeyframeAnimation(keyPath: "opacity")
+            blink.values = [1, 1, 0, 0]
+            blink.keyTimes = [0, 0.5, 0.5, 1]
+            blink.duration = 1.1
+            blink.repeatCount = .infinity
+            layer?.add(blink, forKey: "blink")
         }
+        required init?(coder: NSCoder) { nil }
+        override func updateLayer() {
+            let dark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            layer?.backgroundColor = Theme.ns(dark ? 0xFF5A2A : 0xFF4D1C).cgColor
+        }
+        override var wantsUpdateLayer: Bool { true }
+        override func viewDidChangeEffectiveAppearance() { needsDisplay = true }
     }
 }

@@ -23,6 +23,15 @@ struct DiffRow: Identifiable {
 }
 
 enum Diff {
+    /// Just the +/− counts, for the file list: no rows built.
+    static func counts(_ before: String?, _ after: String?) -> (added: Int, removed: Int) {
+        let a = (before ?? "").split(separator: "\n", omittingEmptySubsequences: false)
+        let b = (after ?? "").split(separator: "\n", omittingEmptySubsequences: false)
+        var add = 0, rem = 0
+        for c in b.difference(from: a) { if case .insert = c { add += 1 } else { rem += 1 } }
+        return (add, rem)
+    }
+
     /// Line diff with 3 lines of context around each change; long unchanged runs fold.
     static func rows(_ before: String?, _ after: String?) -> [DiffRow] {
         let a = (before ?? "").split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
@@ -78,12 +87,12 @@ struct ReviewView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 1) {
                         ForEach(files) { f in
-                            let rows = Diff.rows(f.before, f.after)
+                            let n = Diff.counts(f.before, f.after)
                             HStack(spacing: 6) {
                                 Text(f.short).foregroundStyle(Theme.ink).lineLimit(1).truncationMode(.head)
                                 Spacer(minLength: 4)
-                                Text("+\(rows.filter { $0.kind == .added }.count)").foregroundStyle(Color(nsColor: .systemGreen))
-                                Text("−\(rows.filter { $0.kind == .removed }.count)").foregroundStyle(Color(nsColor: .systemRed))
+                                Text("+\(n.added)").foregroundStyle(Color(nsColor: .systemGreen))
+                                Text("−\(n.removed)").foregroundStyle(Color(nsColor: .systemRed))
                             }
                             .font(Theme.mono(12))
                             .padding(.horizontal, 12).padding(.vertical, 7)
@@ -117,9 +126,10 @@ struct ReviewView: View {
                     }
                     .font(Theme.mono(12)).padding(12)
                     Rectangle().fill(Theme.rule).frame(height: 1)
+                    let rows = Diff.rows(f.before, f.after)
                     ScrollView([.vertical, .horizontal]) {
                         LazyVStack(alignment: .leading, spacing: 0) {
-                            ForEach(Diff.rows(f.before, f.after)) { r in row(r) }
+                            ForEach(rows) { r in row(r) }
                         }
                         .padding(.vertical, 8)
                     }

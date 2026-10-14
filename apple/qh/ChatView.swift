@@ -584,6 +584,9 @@ struct Composer: View {
         .frame(maxWidth: 720)
         .padding(.horizontal, 24).padding(.bottom, 18).padding(.top, 4)
         .onAppear { focused = true; if project.commands.isEmpty { project.loadCommands() } }
+        .onChange(of: project.draft) { _, d in
+            if let d { text = d; focused = true; project.draft = nil }
+        }
         .onDrop(of: [.fileURL, .image], isTargeted: $dropping) { providers in
             for p in providers {
                 _ = p.loadObject(ofClass: URL.self) { url, _ in

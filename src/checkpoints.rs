@@ -6,8 +6,42 @@ use std::path::{Path, PathBuf};
 
 pub struct Checkpoints {
     dir: PathBuf,
-    stack: Vec<Map<String, Value>>, // abs path -> content, or null if it did not exist
+    stack: Vec<Snap>,
     original: Map<String, Value>,
+}
+
+/// One tool call's snapshot, tagged with the user message (0-based) whose turn made it.
+struct Snap {
+    turn: usize,
+    prompt: String,
+    files: Map<String, Value>, // abs path -> content, or null if it did not exist
+}
+
+impl Snap {
+    fn from_json(m: Map<String, Value>) -> Snap {
+        match m.get("files").and_then(|f| f.as_object()) {
+            Some(f) => Snap { turn: m["turn"].as_u64().unwrap_or(0) as usize,
+                prompt: m["prompt"].as_str().unwrap_or("").into(), files: f.clone() },
+            None => Snap { turn: 0, prompt: String::new(), files: m }, // before checkpoints had turns
+        }
+    }
+
+    fn to_json(&self) -> Value {
+        serde_json::json!({"turn": self.turn, "prompt": self.prompt, "files": self.files})
+    }
+
+    /// Put every file back as it was before this snapshot.
+    fn restore(&self) -> Vec<String> {
+        let mut names = vec![];
+        for (path, content) in &self.files {
+            match content.as_str() {
+                Some(c) => { let _ = std::fs::write(path, c); }
+                None => { let _ = std::fs::remove_file(path); }
+            }
+            names.push(Path::new(path).file_name().unwrap_or_default().to_string_lossy().to_string());
+        }
+        names
+    }
 }
 
 fn read_json(p: &Path) -> Option<Map<String, Value>> {
@@ -19,7 +53,7 @@ impl Checkpoints {
         let mut stack = vec![];
         for i in 1.. {
             match read_json(&dir.join(format!("{i}.json"))) {
-                Some(s) => stack.push(s),
+                Some(s) => stack.push(Snap::from_json(s)),
                 None => break,
             }
         }
@@ -39,7 +73,7 @@ impl Checkpoints {
         }
     }
 
-    pub fn snapshot(&mut self, name: &str, a: &Value, cwd: &Path) {
+    pub fn snapshot(&mut self, name: &str, a: &Value, cwd: &Path, turn: usize, prompt: &str) {
         let paths = Self::paths_for(name, a, cwd);
         if paths.is_empty() {
             return;
@@ -52,24 +86,39 @@ impl Checkpoints {
             self.original.entry(k.clone()).or_insert_with(|| v.clone());
             snap.insert(k, v);
         }
-        self.stack.push(snap.clone());
+        let snap = Snap { turn, prompt: prompt.chars().take(200).collect(), files: snap };
         let _ = std::fs::create_dir_all(&self.dir);
-        let _ = std::fs::write(self.dir.join(format!("{}.json", self.stack.len())), Value::Object(snap).to_string());
+        let _ = std::fs::write(self.dir.join(format!("{}.json", self.stack.len() + 1)), snap.to_json().to_string());
+        self.stack.push(snap);
         let _ = std::fs::write(self.dir.join("original.json"), Value::Object(self.original.clone()).to_string());
     }
 
     pub fn undo(&mut self) -> String {
         let Some(snap) = self.stack.pop() else { return "nothing to undo".into() };
         let _ = std::fs::remove_file(self.dir.join(format!("{}.json", self.stack.len() + 1)));
-        let mut names = vec![];
-        for (path, content) in &snap {
-            match content.as_str() {
-                Some(c) => { let _ = std::fs::write(path, c); }
-                None => { let _ = std::fs::remove_file(path); }
-            }
-            names.push(Path::new(path).file_name().unwrap_or_default().to_string_lossy().to_string());
+        format!("restored {}", snap.restore().join(", "))
+    }
+
+    /// The turns that changed files, oldest first: (turn, its prompt, absolute paths it touched).
+    pub fn turns(&self) -> Vec<(usize, String, Vec<String>)> {
+        let mut out: Vec<(usize, String, Vec<String>)> = vec![];
+        for s in &self.stack {
+            if out.last().map(|l| l.0) != Some(s.turn) { out.push((s.turn, s.prompt.clone(), vec![])) }
+            let files = &mut out.last_mut().unwrap().2;
+            for p in s.files.keys() { if !files.contains(p) { files.push(p.clone()) } }
         }
-        format!("restored {}", names.join(", "))
+        out
+    }
+
+    /// Put files back as they were before user message `turn` was sent, newest change first.
+    pub fn rewind(&mut self, turn: usize) -> Vec<String> {
+        let mut names = vec![];
+        while self.stack.last().is_some_and(|s| s.turn >= turn) {
+            let snap = self.stack.pop().unwrap();
+            let _ = std::fs::remove_file(self.dir.join(format!("{}.json", self.stack.len() + 1)));
+            for n in snap.restore() { if !names.contains(&n) { names.push(n) } }
+        }
+        names
     }
 
     /// Every file changed this session: (absolute path, before or None if it was new, now or None if deleted).
@@ -119,7 +168,7 @@ mod review_tests {
         std::fs::write(&b, "old b").unwrap();
         let mut c = Checkpoints::new(d.join("ck"));
         for f in [&a, &b] {
-            c.snapshot("write_file", &serde_json::json!({"path": f.to_string_lossy()}), &d);
+            c.snapshot("write_file", &serde_json::json!({"path": f.to_string_lossy()}), &d, 0, "");
         }
         std::fs::write(&a, "new a").unwrap();
         std::fs::write(&b, "new b").unwrap();
@@ -131,6 +180,38 @@ mod review_tests {
         c.accept(&kb);
         assert_eq!(std::fs::read_to_string(&b).unwrap(), "new b");
         assert!(c.changes().is_empty());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
+#[cfg(test)]
+mod rewind_tests {
+    use super::*;
+
+    #[test]
+    fn rewind_goes_back_before_a_turn_and_survives_reload() {
+        let d = std::env::temp_dir().join(format!("qh-rewind-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&d);
+        let (a, b) = (d.join("a.txt"), d.join("b.txt"));
+        std::fs::write(&a, "a0").unwrap();
+        let w = |c: &mut Checkpoints, f: &Path, text: &str, turn| {
+            c.snapshot("write_file", &serde_json::json!({"path": f.to_string_lossy()}), &d, turn, &format!("turn {turn}"));
+            std::fs::write(f, text).unwrap();
+        };
+        let mut c = Checkpoints::new(d.join("ck"));
+        w(&mut c, &a, "a1", 0);
+        w(&mut c, &a, "a2", 2);
+        w(&mut c, &b, "b2", 2); // b is new in turn 2
+        w(&mut c, &a, "a3", 3);
+        let mut c = Checkpoints::new(d.join("ck")); // reloaded from disk
+        let t = c.turns();
+        assert_eq!(t.iter().map(|x| x.0).collect::<Vec<_>>(), vec![0, 2, 3]);
+        assert_eq!(t[1].1, "turn 2");
+        assert_eq!(t[1].2.len(), 2);
+        c.rewind(2);
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "a1");
+        assert!(!b.exists());
+        assert_eq!(Checkpoints::new(d.join("ck")).turns().len(), 1);
         let _ = std::fs::remove_dir_all(&d);
     }
 }

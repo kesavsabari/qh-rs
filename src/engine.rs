@@ -790,7 +790,12 @@ relevant files first, then call ask_model again with the code, error or plan pas
         && !hub.confirm(m, name, &args, None) {
         return "denied by user".into();
     }
-    lock(&m.turn).ckpt.snapshot(name, &args, &cwd);
+    let (turn, prompt) = { // which user message this turn answers, so the app can rewind to before it
+        let msgs = lock(&m.msgs);
+        let users: Vec<&Value> = msgs.iter().filter(|x| x["role"] == "user").collect();
+        (users.len().saturating_sub(1), users.last().and_then(|x| x["content"].as_str()).unwrap_or("").to_string())
+    };
+    lock(&m.turn).ckpt.snapshot(name, &args, &cwd, turn, &prompt);
     let sb = if name == "bash" { hub.sandbox_ctx(m) } else { crate::sandbox::Ctx { root: m.root.clone(), proxy: None, tab: m.name.clone() } };
     // `/allow localhost:3000`: addresses the user let this session's browser open
     let browse: Vec<String> = if crate::browser::TOOLS.contains(&name) {

@@ -90,6 +90,8 @@ final class Project: ObservableObject, Identifiable {
     @Published var setup: SetupState?
     @Published var picker: PickerState?
     @Published var changes: [FileChange] = []
+    @Published var checkpoints: [Checkpoint] = []
+    @Published var draft: String?   // text to put back in the composer (after a rewind)
     @Published var team: TeamState?
     @Published var transcript: (key: String, rows: [(role: String, text: String)]) = ("", [])
     @Published var sessions: [SavedSession] = []
@@ -164,7 +166,14 @@ final class Project: ObservableObject, Identifiable {
         prompt("\(p.cmd) \(value)")
     }
 
-    func loadChanges() { client.send(["type": "changes", "tab": current?.name ?? "main"]) }
+    func loadChanges() {
+        client.send(["type": "changes", "tab": current?.name ?? "main"])
+        client.send(["type": "checkpoints", "tab": current?.name ?? "main"])
+    }
+    /// Files back to before message `turn`; with `chat`, the conversation from there goes too.
+    func rewind(_ turn: Int, chat: Bool) {
+        client.send(["type": "rewind", "tab": current?.name ?? "main", "turn": turn, "chat": chat])
+    }
     func accept(_ f: FileChange) { client.send(["type": "accept", "tab": current?.name ?? "main", "path": f.path]) }
     func reject(_ f: FileChange) { client.send(["type": "reject", "tab": current?.name ?? "main", "path": f.path]) }
     func loadSessions() { client.send(["type": "sessions"]) }
@@ -254,6 +263,16 @@ final class Project: ObservableObject, Identifiable {
             changes = (e["files"] as? [[String: Any]] ?? []).map {
                 FileChange(path: $0["path"] as? String ?? "", root: root, before: $0["before"] as? String, after: $0["after"] as? String)
             }
+        case "checkpoints":
+            if tabName == (current?.name ?? "main") {
+                checkpoints = (e["items"] as? [[String: Any]] ?? []).map {
+                    Checkpoint(turn: $0["turn"] as? Int ?? 0, prompt: $0["prompt"] as? String ?? "", files: $0["files"] as? [String] ?? [])
+                }
+            }
+        case "rewound":
+            let names = e["restored"] as? [String] ?? []
+            tab(tabName).items.append(Item(kind: .notice(names.isEmpty ? "rewound: no files to restore" : "rewound: restored \(names.joined(separator: ", "))")))
+            if let p = e["prompt"] as? String, !p.isEmpty { draft = p }
         case "picker":
             picker = PickerState(e)
         case "secret":

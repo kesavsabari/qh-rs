@@ -69,6 +69,12 @@ fn tab_json(hub: &Hub, name: &str, history: bool) -> Value {
     v
 }
 
+/// The turns that changed files, for the app's checkpoint timeline.
+fn checkpoints_json(tab: &str, c: &crate::checkpoints::Checkpoints) -> Value {
+    let items: Vec<Value> = c.turns().into_iter().map(|(turn, prompt, files)| json!({"turn": turn, "prompt": prompt, "files": files})).collect();
+    json!({"type": "checkpoints", "tab": tab, "items": items})
+}
+
 fn snapshot(hub: &Hub) -> Value {
     let tabs: Vec<Value> = hub.names().iter().map(|n| tab_json(hub, n, true)).collect();
     json!({"type": "snapshot", "protocol": PROTOCOL, "version": crate::update::VERSION, "mode": hub.mode_name(),
@@ -224,6 +230,39 @@ fn command(hub: &Arc<Hub>, st: &State, v: &Value) -> Option<String> {
             if v["type"] == "accept" { t.ckpt.accept(path) } else if let Err(e) = t.ckpt.reject(path) { return Some(e) }
             let files: Vec<Value> = t.ckpt.changes().into_iter().map(|(p, b, a)| json!({"path": p, "before": b, "after": a})).collect();
             st.broadcast(&json!({"type": "changes", "tab": tab, "root": m.root, "files": files}));
+        }
+        "checkpoints" => {
+            let Some(m) = hub.get(tab) else { return Some(format!("no tab {tab}")) };
+            st.broadcast(&checkpoints_json(tab, &lock(&m.turn).ckpt));
+        }
+        "rewind" => {
+            // files back to before user message `turn`; with "chat", the conversation too
+            let Some(m) = hub.get(tab) else { return Some(format!("no tab {tab}")) };
+            if m.status() != "idle" { return Some("busy: stop the turn first".into()) }
+            let Some(turn) = v["turn"].as_u64().map(|t| t as usize) else { return Some("rewind needs turn".into()) };
+            let restored = lock(&m.turn).ckpt.rewind(turn);
+            let mut prompt = String::new();
+            if v["chat"].as_bool().unwrap_or(false) {
+                let mut msgs = lock(&m.msgs);
+                if let Some(i) = msgs.iter().enumerate().filter(|(_, x)| x["role"] == "user").nth(turn).map(|(i, _)| i) {
+                    prompt = msgs[i]["content"].as_str().unwrap_or("").to_string();
+                    msgs.truncate(i);
+                    crate::session::save(&lock(&m.session), &msgs);
+                    m.touched(&msgs);
+                }
+                drop(msgs);
+                hub.save();
+                let mut h = tab_json(hub, tab, true);
+                h["type"] = json!("history");
+                st.broadcast(&h);
+            }
+            st.broadcast(&json!({"type": "rewound", "tab": tab, "turn": turn, "restored": restored, "prompt": prompt}));
+            let t = lock(&m.turn);
+            st.broadcast(&checkpoints_json(tab, &t.ckpt));
+            let files: Vec<Value> = t.ckpt.changes().into_iter().map(|(p, b, a)| json!({"path": p, "before": b, "after": a})).collect();
+            st.broadcast(&json!({"type": "changes", "tab": tab, "root": m.root, "files": files}));
+            drop(t);
+            hub.changed();
         }
         "mode" => if !hub.set_mode(v["mode"].as_str().unwrap_or("")) { return Some("unknown mode".into()) } else { hub.changed() },
         "model" => {

@@ -28,6 +28,8 @@ mod sandbox;
 mod sandbox_linux;
 mod sandbox_macos;
 mod sandbox_windows;
+#[cfg(unix)]
+mod serve;
 mod session;
 mod setup;
 mod skills;
@@ -73,10 +75,11 @@ struct Args {
     mode: Option<String>,
     json: bool,
     max_turns: Option<usize>,
+    serve: bool,
 }
 
 fn parse() -> Args {
-    let mut a = Args { resume: None, profile: None, model: None, think: false, print: vec![], yes: false, ctx: None, stats: None, mode: None, json: false, max_turns: None };
+    let mut a = Args { resume: None, profile: None, model: None, think: false, print: vec![], yes: false, ctx: None, stats: None, mode: None, json: false, max_turns: None, serve: false };
     let mut it = std::env::args().skip(1).peekable();
     while let Some(x) = it.next() {
         match x.as_str() {
@@ -90,6 +93,7 @@ fn parse() -> Args {
             "-y" | "--yes" => a.yes = true,
             "--mode" => a.mode = it.next(),
             "--json" => a.json = true,
+            "serve" => a.serve = true,
             "--max-turns" => match it.next().and_then(|v| v.parse().ok()).filter(|n| *n > 0) {
                 Some(n) => a.max_turns = Some(n),
                 None => {
@@ -277,6 +281,16 @@ fn main() {
         let opts = Headless { stats: args.stats.as_deref(), json: args.json, max_turns: args.max_turns };
         let code = headless(&hub, &args.print, rx, &opts);
         bg::kill_all(); // its background tasks end with it, as in the TUI (seen live: dev servers outlived qh -p)
+        browser::shutdown();
+        lsp::shutdown();
+        std::process::exit(code);
+    }
+    if args.serve {
+        #[cfg(unix)]
+        let code = serve::run(hub, rx);
+        #[cfg(not(unix))]
+        let code = { eprintln!("qh serve: not on Windows yet"); 2 };
+        bg::kill_all();
         browser::shutdown();
         lsp::shutdown();
         std::process::exit(code);

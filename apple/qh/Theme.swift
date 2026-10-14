@@ -27,8 +27,8 @@ enum Theme {
         }
     }
 
-    private static func dyn(_ light: UInt32, _ dark: UInt32) -> Color {
-        Color(NSColor(name: nil) { ap in
+    private static func dyn(_ light: UInt32, _ dark: UInt32) -> SwiftUI.Color {
+        SwiftUI.Color(NSColor(name: nil) { ap in
             ns(ap.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark : light)
         })
     }

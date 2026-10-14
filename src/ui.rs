@@ -513,7 +513,7 @@ pub fn run(hub: Arc<Hub>, tx: Sender<Ui>, rx: Receiver<Ui>) -> std::io::Result<(
     res
 }
 
-fn suggest_rule(tool: &str, a: &Value, rules: &[String]) -> String {
+pub fn suggest_rule(tool: &str, a: &Value, rules: &[String]) -> String {
     if tool == "network" {
         return format!("net:{}", a["host"].as_str().unwrap_or(""));
     }

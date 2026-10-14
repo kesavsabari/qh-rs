@@ -4,7 +4,7 @@ name: qh
 options:
   bundleIdPrefix: io.github.kesavsabari
   deploymentTarget:
-    macOS: "13.0"
+    macOS: "14.0"
   createIntermediateGroups: true
 packages:
   SwiftTerm:
@@ -12,7 +12,7 @@ packages:
     from: 1.2.0
 settings:
   base:
-    MARKETING_VERSION: 0.1.0
+    MARKETING_VERSION: 0.3.0
     CURRENT_PROJECT_VERSION: 1
     SWIFT_VERSION: 5.0
 targets:
@@ -29,7 +29,7 @@ targets:
         CFBundleDisplayName: qh
         CFBundleName: qh
         LSApplicationCategoryType: public.app-category.developer-tools
-        LSMinimumSystemVersion: "13.0"
+        LSMinimumSystemVersion: "14.0"
         NSHumanReadableCopyright: MIT licensed
     settings:
       base:

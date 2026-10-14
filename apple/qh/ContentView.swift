@@ -8,22 +8,14 @@ struct ContentView: View {
         HStack(spacing: 0) {
             Sidebar()
             Rectangle().fill(Theme.rule).frame(width: 1)
-            VStack(spacing: 0) {
-                TabBar()
-                ZStack {
-                    Theme.paper
-                    if ws.qh == nil {
-                        Missing()
-                    } else if ws.tabs.isEmpty {
-                        Empty()
-                    }
-                    // every tab stays alive; only the active one shows
-                    ForEach(ws.tabs) { t in
-                        TerminalHost(tab: t)
-                            .padding(EdgeInsets(top: 12, leading: 16, bottom: 8, trailing: 6))
-                            .opacity(t.id == ws.active ? 1 : 0)
-                            .allowsHitTesting(t.id == ws.active)
-                    }
+            ZStack {
+                Theme.paper
+                if ws.qh == nil {
+                    Missing()
+                } else if let p = ws.current {
+                    ProjectView(project: p).id(p.path)
+                } else {
+                    Empty()
                 }
             }
         }
@@ -49,7 +41,7 @@ struct Sidebar: View {
 
             ScrollView {
                 VStack(spacing: 1) {
-                    ForEach(ws.projects, id: \.self) { p in ProjectRow(path: p) }
+                    ForEach(ws.recent, id: \.self) { p in ProjectRow(path: p) }
                 }
             }
 
@@ -80,8 +72,8 @@ struct ProjectRow: View {
     @State private var over = false
 
     var body: some View {
-        let on = ws.current?.path == path
-        let live = ws.tabs.contains { $0.path == path && !$0.done }
+        let on = ws.active == path
+        let live = ws.projects.first { $0.path == path }
         Button { ws.open(path) } label: {
             HStack(spacing: 0) {
                 VStack(alignment: .leading, spacing: 1) {
@@ -89,7 +81,7 @@ struct ProjectRow: View {
                     Text(Workspace.short(path)).font(Theme.mono(11)).foregroundStyle(Theme.faint).lineLimit(1).truncationMode(.head)
                 }
                 Spacer(minLength: 6)
-                if live { Circle().fill(Theme.accent).frame(width: 6, height: 6) }
+                if let live { LiveDot(project: live) }
             }
             .padding(.horizontal, 8).padding(.vertical, 8)
             .background(RoundedRectangle(cornerRadius: 6).fill(on || over ? Theme.hover : .clear))
@@ -103,48 +95,22 @@ struct ProjectRow: View {
         .help(path)
         .contextMenu {
             Button("Show in Finder") { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: path) }
+            if let live { Button("Stop qh here") { ws.close(live) } }
             Button("Remove from list") { ws.forget(path) }
         }
     }
 }
 
-struct TabBar: View {
-    @EnvironmentObject var ws: Workspace
-
+/// A project's dot in the sidebar: solid when something waits for you, pulsing while it works.
+struct LiveDot: View {
+    @ObservedObject var project: Project
     var body: some View {
-        VStack(spacing: 0) {
-            HStack(alignment: .bottom, spacing: 2) {
-                ForEach(ws.tabs) { t in TabButton(tab: t) }
-                Spacer()
-            }
-            .padding(.horizontal, 12)
-            .frame(height: 42, alignment: .bottom)
-            Rectangle().fill(Theme.rule).frame(height: 1)
+        if project.waiting > 0 {
+            Text("\(project.waiting)").font(Theme.mono(10)).foregroundStyle(Theme.paper)
+                .padding(.horizontal, 5).background(Capsule().fill(Theme.accent))
+        } else {
+            Circle().fill(Theme.accent).frame(width: 6, height: 6)
         }
-        .background(Theme.paper)
-    }
-}
-
-struct TabButton: View {
-    @EnvironmentObject var ws: Workspace
-    @ObservedObject var tab: QhTab
-
-    var body: some View {
-        let on = tab.id == ws.active
-        HStack(spacing: 10) {
-            Text(tab.name).font(Theme.mono(12)).foregroundStyle(on ? Theme.ink : Theme.soft)
-            Button { ws.close(tab) } label: {
-                Text("×").font(Theme.mono(13)).foregroundStyle(Theme.faint).frame(width: 18, height: 18).contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .help("Close tab (⌘W)")
-        }
-        .padding(.leading, 14).padding(.trailing, 8)
-        .frame(height: 34)
-        .overlay(alignment: .bottom) { Rectangle().fill(on ? Theme.accent : .clear).frame(height: 2) }
-        .opacity(tab.done ? 0.55 : 1)
-        .contentShape(Rectangle())
-        .onTapGesture { ws.show(tab) }
     }
 }
 
@@ -162,9 +128,9 @@ struct Empty: View {
                     .padding(.horizontal, 20).padding(.vertical, 13).background(Theme.ink)
             }
             .buttonStyle(.plain)
-            if !ws.projects.isEmpty {
+            if !ws.recent.isEmpty {
                 HStack(spacing: 22) {
-                    ForEach(ws.projects.prefix(5), id: \.self) { p in
+                    ForEach(ws.recent.prefix(5), id: \.self) { p in
                         Button(Workspace.short(p)) { ws.open(p) }.buttonStyle(.plain).font(Theme.mono(12)).foregroundStyle(Theme.soft)
                     }
                 }

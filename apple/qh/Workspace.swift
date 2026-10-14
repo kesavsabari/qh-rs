@@ -1,19 +1,18 @@
 import AppKit
 import SwiftUI
 
-/// The projects you've opened and the tabs running qh in them.
+/// The folders you've opened, and the ones open now, each with its own `qh serve`.
 @MainActor
 final class Workspace: ObservableObject {
-    @Published var projects: [String]
-    @Published var tabs: [QhTab] = []
-    @Published var active: UUID?
+    @Published var recent: [String]
+    @Published var projects: [Project] = []
+    @Published var active: String?
     @Published var version = ""
     let qh: String?
     private var keys: Any?
-    private var look: NSKeyValueObservation?
 
     init() {
-        projects = UserDefaults.standard.stringArray(forKey: "projects") ?? []
+        recent = UserDefaults.standard.stringArray(forKey: "projects") ?? []
         qh = Workspace.findQh()
         if let qh {
             Task.detached {
@@ -21,52 +20,53 @@ final class Workspace: ObservableObject {
                 await MainActor.run { self.version = v }
             }
         }
-        // ⌘O open · ⌘W close the tab (not the window) · ⌘1–9 switch tabs
+        // ⌘O open · ⌘T new tab · ⌘W close the tab (not the window) · ⌘1–9 switch tabs · Esc stop
         keys = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] e in
-            guard let self, e.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command, let k = e.charactersIgnoringModifiers else { return e }
+            guard let self else { return e }
+            let mods = e.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            if e.keyCode == 53, mods.isEmpty, let p = self.current, p.current?.busy == true { p.stop(); return nil }
+            guard mods == .command, let k = e.charactersIgnoringModifiers else { return e }
             switch k {
             case "o": self.pick(); return nil
-            case "w" where self.current != nil: self.close(self.current!); return nil
+            case "t": self.current?.newTab(); return self.current == nil ? e : nil
+            case "w":
+                guard let p = self.current, let t = p.current else { return e }
+                if p.tabs.count > 1 { p.closeTab(t.name) } else { self.close(p) }
+                return nil
             case "1"..."9":
+                guard let p = self.current else { return e }
                 let i = Int(k)! - 1
-                if i < self.tabs.count { self.show(self.tabs[i]); return nil }
+                if i < p.tabs.count { p.active = p.tabs[i].name; return nil }
                 return e
             default: return e
             }
         }
-        // light ⇄ dark: repaint the terminals
-        look = NSApplication.shared.observe(\.effectiveAppearance) { [weak self] _, _ in
-            Task { @MainActor in self?.tabs.forEach { Theme.paint($0.view) } }
-        }
+        Notify.workspace = self
+        Notify.setup()
     }
 
-    var current: QhTab? { tabs.first { $0.id == active } }
+    var current: Project? { projects.first { $0.path == active } }
 
     func open(_ path: String) {
-        if let t = tabs.first(where: { $0.path == path && !$0.done }) { return show(t) }
-        guard let qh else { return }
-        projects = [path] + projects.filter { $0 != path }
-        projects = Array(projects.prefix(14))
-        UserDefaults.standard.set(projects, forKey: "projects")
-        let t = QhTab(path: path, qh: qh)
-        tabs.append(t)
-        show(t)
+        recent = Array(([path] + recent.filter { $0 != path }).prefix(14))
+        UserDefaults.standard.set(recent, forKey: "projects")
+        if !projects.contains(where: { $0.path == path }), let qh {
+            projects.append(Project(path: path, qh: qh))
+        }
+        active = path
     }
 
-    func show(_ t: QhTab) {
-        active = t.id
-        DispatchQueue.main.async { t.view.window?.makeFirstResponder(t.view) }
+    func close(_ p: Project) {
+        p.shutdown()
+        projects.removeAll { $0.path == p.path }
+        if active == p.path { active = projects.last?.path }
     }
 
-    func close(_ t: QhTab) {
-        t.stop()
-        tabs.removeAll { $0.id == t.id }
-        if active == t.id { active = tabs.last?.id }
-    }
+    func shutdown() { projects.forEach { $0.shutdown() } }
 
     func forget(_ path: String) {
-        projects.removeAll { $0 == path }
-        UserDefaults.standard.set(projects, forKey: "projects")
+        recent.removeAll { $0 == path }
+        UserDefaults.standard.set(recent, forKey: "projects")
     }
 
     func pick() {

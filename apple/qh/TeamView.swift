@@ -173,22 +173,48 @@ struct ChannelPage: View {
             .frame(maxWidth: 720)
             .padding(.horizontal, 24).padding(.bottom, 18)
         }
+        .onAppear { project.loadHeat() }
     }
 
-    /// Files matching the @word being typed (teammates share the repo, so the path means the same file to them).
     private var suggestions: [String] {
-        guard let at = text.split(separator: " ", omittingEmptySubsequences: false).last, at.hasPrefix("@"), at.count > 1 else { return [] }
-        let q = at.dropFirst().lowercased()
-        return Array(project.files.lazy.filter { $0.lowercased().contains(q) }.prefix(6))
+        guard let q = mentionQuery else { return [] }
+        return FileRank.rank(project.files, query: q, heat: heat).filter { project.fileSet.contains($0) }
+    }
+
+    /// The words typed after the last @ ("@auth ctrl" → "auth ctrl"), until it's a finished mention.
+    private var mentionQuery: String? {
+        guard let at = text.lastIndex(of: "@"), at == text.startIndex || text[text.index(before: at)] == " " else { return nil }
+        let q = String(text[text.index(after: at)...])
+        let first = q.split(separator: " ", omittingEmptySubsequences: false).first.map(String.init) ?? ""
+        if project.fileSet.contains(first.split(separator: ":").first.map(String.init) ?? "") { return nil }
+        if q.split(separator: " ").count > 3 { return nil }
+        if (project.team?.people ?? []).contains(where: { $0.login.lowercased() == first.lowercased() }) { return nil } // @teammate ping
+        return q
+    }
+
+    /// git history + what this chat and your teammates are on right now
+    private var heat: [String: Double] {
+        var h = project.gitHeat
+        for c in project.changes { h[c.short, default: 0] += 6 }                 // your agent's edits this session
+        for m in project.team?.messages ?? [] {                                   // mentioned in this channel
+            for w in m.text.split(separator: " ") where w.hasPrefix("@") {
+                let f = String(w.dropFirst()).split(separator: ":").first.map(String.init) ?? ""
+                if project.fileSet.contains(f) { h[f, default: 0] += 5 }
+            }
+        }
+        for a in project.team?.agents ?? [] {                                     // teammates' live files
+            for f in a.files + a.edits.map(\.file) { h[f, default: 0] += 3 }
+        }
+        return h
     }
 
     private func insert(_ f: String) {
-        let last = text.split(separator: " ", omittingEmptySubsequences: false).last ?? ""
-        text = String(text.dropLast(last.count)) + "@" + f + " "
+        guard let at = text.lastIndex(of: "@") else { return }
+        text = String(text[..<at]) + "@" + f + " "
     }
 
     private func send() {
-        if let f = suggestions.first, !text.hasSuffix(" ") { insert(f); return }
+        if let q = mentionQuery, !q.isEmpty, !q.contains(" "), let f = suggestions.first { insert(f); return }
         let s = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !s.isEmpty else { return }
         project.teamSend(chan, s)

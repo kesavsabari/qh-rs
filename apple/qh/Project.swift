@@ -103,6 +103,18 @@ final class Project: ObservableObject, Identifiable {
     @Published var commands: [(cmd: String, about: String)] = []
     lazy var files: [String] = Self.listFiles(path)
     lazy var fileSet: Set<String> = Set(files)
+    /// how much each file matters to you, from git history (filled in the background)
+    var gitHeat: [String: Double] = [:]
+    private var heatLoaded = false
+    func loadHeat() {
+        guard !heatLoaded else { return }
+        heatLoaded = true
+        let root = path
+        Task.detached {
+            let h = FileRank.gitHeat(root)
+            await MainActor.run { self.gitHeat = h }
+        }
+    }
     @Published var models: [ModelChoice] = []
     @Published var showSetup = false
     @Published var setupBusy = false

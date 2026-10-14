@@ -284,8 +284,7 @@ struct TeamNav: View {
                 Header(text: "Agents")
                 page(.agent, icon: "sparkles", "Your agent", trailing: project.current?.busy == true ? "working" : "")
                 ForEach(t?.agents ?? []) { a in
-                    page(.peer(a.login, a.name), icon: a.online ? "person.crop.circle.fill" : "person.crop.circle",
-                         "\(a.login) · \(a.name)", trailing: a.status)
+                    page(.peer(a.login, a.name), icon: "", avatar: a.login, "\(a.login) · \(a.name)", trailing: a.status)
                 }
                 Header(text: "Inbox")
                 page(.requests, icon: "tray", "Requests", badge: t?.waiting.count ?? 0)
@@ -310,9 +309,14 @@ struct TeamNav: View {
         let dm = c.id.hasPrefix("@")
         return Row(selected: on, action: { ws.teamPage = .channel(c.id); project.loadTeam(c.id) }) {
             HStack(spacing: 8) {
-                Image(systemName: dm ? (c.online ? "circle.fill" : "circle") : "number")
-                    .font(.system(size: dm ? 7 : 11)).foregroundStyle(dm && c.online ? Theme.accent : Theme.soft)
-                    .frame(width: 14)
+                if dm {
+                    Avatar(name: String(c.id.dropFirst()), size: 16).overlay(alignment: .bottomTrailing) {
+                        Circle().fill(c.online ? Color(nsColor: .systemGreen) : Theme.faint).frame(width: 6, height: 6)
+                            .overlay(Circle().stroke(Theme.side, lineWidth: 1)).offset(x: 2, y: 2)
+                    }
+                } else {
+                    Image(systemName: "number").font(.system(size: 11)).foregroundStyle(Theme.soft).frame(width: 16)
+                }
                 Text(c.label.trimmingCharacters(in: CharacterSet(charactersIn: "#@")))
                     .font(Theme.sans(13, medium: c.unread > 0)).foregroundStyle(c.unread > 0 || on ? Theme.ink : Theme.soft)
                 Spacer()
@@ -321,14 +325,18 @@ struct TeamNav: View {
         }
     }
 
-    private func page(_ p: TeamPage, icon: String, _ label: String, trailing: String = "", badge: Int = 0) -> some View {
+    private func page(_ p: TeamPage, icon: String, avatar: String = "", _ label: String, trailing: String = "", badge: Int = 0) -> some View {
         Row(selected: ws.teamPage == p, action: {
             ws.teamPage = p
             if case .peer(let l, let s) = p { project.loadTranscript(l, s) }
         }) {
             HStack(spacing: 8) {
-                Image(systemName: icon).font(.system(size: 11.5)).foregroundStyle(Theme.soft).frame(width: 14)
-                    .symbolRenderingMode(.hierarchical)
+                if avatar.isEmpty {
+                    Image(systemName: icon).font(.system(size: 11.5)).foregroundStyle(Theme.soft).frame(width: 16)
+                        .symbolRenderingMode(.hierarchical)
+                } else {
+                    Avatar(name: avatar, size: 16)
+                }
                 Text(label).foregroundStyle(ws.teamPage == p ? Theme.ink : Theme.soft).lineLimit(1)
                 Spacer(minLength: 4)
                 if badge > 0 {

@@ -115,6 +115,7 @@ struct ChannelPage: View {
         VStack(spacing: 0) {
             PageHeader(title: chan.hasPrefix("@") ? String(chan.dropFirst()) : chan,
                        subtitle: chan == "#team" ? "everyone in \(t?.repo ?? "the team")" : chan.hasPrefix("@") ? "direct message" : "group")
+            ScrollViewReader { sv in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
                     if msgs.isEmpty {
@@ -134,12 +135,15 @@ struct ChannelPage: View {
                             }
                         }
                     }
+                    Color.clear.frame(height: 1).id("end")
                 }
                 .frame(maxWidth: 720, alignment: .leading)
                 .padding(24)
                 .frame(maxWidth: .infinity)
             }
-            .defaultScrollAnchor(.bottom)
+            .onChange(of: msgs.count) { _, _ in sv.scrollTo("end", anchor: .bottom) }
+            .onAppear { sv.scrollTo("end", anchor: .bottom) }
+            }
             HStack(spacing: 8) {
                 TextField("Message \(chan)", text: $text, axis: .vertical).textFieldStyle(.plain).font(Theme.sans(14)).lineLimit(1...6)
                     .onSubmit(send)
@@ -165,12 +169,14 @@ struct ChannelPage: View {
 
 struct Avatar: View {
     let name: String
+    var size: CGFloat = 28
     var body: some View {
-        let hue = Double(abs(name.hashValue % 360)) / 360
-        RoundedRectangle(cornerRadius: 7, style: .continuous)
-            .fill(Color(hue: hue, saturation: 0.25, brightness: 0.55))
-            .frame(width: 28, height: 28)
-            .overlay(Text(String(name.prefix(1)).uppercased()).font(Theme.sans(12, medium: true)).foregroundStyle(.white))
+        // a stable colour per login (hashValue changes every launch)
+        let hue = Double(name.unicodeScalars.reduce(0) { ($0 * 31 + Int($1.value)) % 360 }) / 360
+        RoundedRectangle(cornerRadius: size / 4, style: .continuous)
+            .fill(Color(hue: hue, saturation: 0.3, brightness: 0.55))
+            .frame(width: size, height: size)
+            .overlay(Text(String(name.prefix(1)).uppercased()).font(Theme.sans(size * 0.43, medium: true)).foregroundStyle(.white))
     }
 }
 
@@ -188,6 +194,7 @@ struct PeerPage: View {
                 Button("Message \(login)") { WorkspaceHolder.ws?.teamPage = .channel("@" + login) }
                     .buttonStyle(.plain).font(Theme.sans(12.5, medium: true)).foregroundStyle(Theme.accent)
             }
+            ScrollViewReader { sv in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
                     if rows.isEmpty {
@@ -202,12 +209,15 @@ struct PeerPage: View {
                             Markdown(text: r.text)
                         }
                     }
+                    Color.clear.frame(height: 1).id("end")
                 }
                 .frame(maxWidth: 720, alignment: .leading)
                 .padding(24)
                 .frame(maxWidth: .infinity)
             }
-            .defaultScrollAnchor(.bottom)
+            .onChange(of: rows.count) { _, _ in sv.scrollTo("end", anchor: .bottom) }
+            .onAppear { sv.scrollTo("end", anchor: .bottom) }
+            }
         }
     }
 }

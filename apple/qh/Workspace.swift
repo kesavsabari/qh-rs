@@ -32,16 +32,7 @@ final class Workspace: ObservableObject {
     var title: String {
         if space == "team" {
             guard let p = teamProject else { return "Team" }
-            let name = (p as NSString).lastPathComponent
-            switch teamPage {
-            case .agent: return "\(name) · your agent"
-            case .channel(let c): return "\(name) · \(c)"
-            case .peer(let l, let s): return "\(name) · \(l)/\(s)"
-            case .requests: return "\(name) · requests"
-            case .members: return "\(name) · members"
-            case .claims: return "\(name) · claims"
-            case .activity: return "\(name) · activity"
-            }
+            return (p as NSString).lastPathComponent + (teamPage == .agent ? " · your agent" : "")
         }
         guard let p = personalProject else { return "qh" }
         return [p.name, p.current?.purpose.isEmpty == false ? p.current!.purpose : p.current?.name ?? ""].filter { !$0.isEmpty }.joined(separator: " · ")

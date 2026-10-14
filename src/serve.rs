@@ -96,7 +96,10 @@ fn pump(hub: Arc<Hub>, st: Arc<State>, rx: Receiver<crate::ui::Ui>) {
             Event::Done { tokens } => st.broadcast(&json!({"type": "turn_done", "tab": tab, "tokens": tokens})),
             Event::Log(l) => st.broadcast(&json!({"type": "log", "tab": tab, "message": l})),
             ev => {
+                // the app shows what a tool returned, not just its one-line summary
+                let output = match &ev { Event::ToolResult { result, .. } => Some(result.chars().take(8000).collect::<String>()), _ => None };
                 for mut v in crate::jsonl::events(&ev, last.entry(tab.clone()).or_default()) {
+                    if v["type"] == "tool_result" { if let Some(o) = &output { v["output"] = json!(o) } }
                     v["tab"] = json!(tab);
                     st.broadcast(&v);
                 }
@@ -135,6 +138,20 @@ fn command(hub: &Arc<Hub>, st: &State, v: &Value) -> Option<String> {
             st.broadcast(&json!({"type": "confirm_closed", "id": id}));
         }
         "stop" => hub.interrupt(tab),
+        "changes" => {
+            let Some(m) = hub.get(tab) else { return Some(format!("no tab {tab}")) };
+            let files: Vec<Value> = lock(&m.turn).ckpt.changes().into_iter()
+                .map(|(p, b, a)| json!({"path": p, "before": b, "after": a})).collect();
+            st.broadcast(&json!({"type": "changes", "tab": tab, "root": m.root, "files": files}));
+        }
+        "accept" | "reject" => {
+            let Some(m) = hub.get(tab) else { return Some(format!("no tab {tab}")) };
+            let path = v["path"].as_str().unwrap_or("");
+            let mut t = lock(&m.turn);
+            if v["type"] == "accept" { t.ckpt.accept(path) } else if let Err(e) = t.ckpt.reject(path) { return Some(e) }
+            let files: Vec<Value> = t.ckpt.changes().into_iter().map(|(p, b, a)| json!({"path": p, "before": b, "after": a})).collect();
+            st.broadcast(&json!({"type": "changes", "tab": tab, "root": m.root, "files": files}));
+        }
         "mode" => if !hub.set_mode(v["mode"].as_str().unwrap_or("")) { return Some("unknown mode".into()) } else { hub.changed() },
         "model" => {
             let Some(m) = hub.get(tab) else { return Some(format!("no tab {tab}")) };

@@ -29,6 +29,7 @@ struct ProjectView: View {
         }
         .background(Theme.paper)
         .sheet(item: $project.picker) { p in PickerSheet(picker: p, project: project) }
+        .sheet(isPresented: $project.showReview) { ReviewView(project: project) }
     }
 }
 
@@ -44,6 +45,12 @@ struct ChatTabBar: View {
                 }
                 .buttonStyle(.plain).help("New tab (⌘T)")
                 Spacer()
+                if !project.changes.isEmpty {
+                    Button { project.loadChanges(); project.showReview = true } label: {
+                        Text("\(project.changes.count) changed").font(Theme.mono(12)).foregroundStyle(Theme.accent)
+                    }
+                    .buttonStyle(.plain).padding(.bottom, 9).padding(.trailing, 10).help("Review changes (⌘D)")
+                }
                 Button { project.showSetup.toggle() } label: {
                     Text("models").font(Theme.mono(12)).foregroundStyle(project.showSetup ? Theme.ink : Theme.soft)
                 }
@@ -153,16 +160,10 @@ struct ItemView: View {
                 .frame(maxWidth: .infinity, alignment: .trailing)
         case .reply(let t):
             Markdown(text: t)
-        case .tool(let name, let args, let ok, let summary):
-            ToolCard(name: name, args: args, ok: ok, summary: summary)
+        case .tool(let name, let args, let ok, let summary, let output):
+            ToolCard(name: name, args: args, ok: ok, summary: summary, output: output)
         case .diff(let path, let added, let removed):
-            HStack(spacing: 10) {
-                Text("edited").foregroundStyle(Theme.faint)
-                Text(path).foregroundStyle(Theme.ink)
-                Text("+\(added)").foregroundStyle(Color(nsColor: .systemGreen))
-                Text("−\(removed)").foregroundStyle(Color(nsColor: .systemRed))
-            }
-            .font(Theme.mono(12))
+            DiffLine(path: path, added: added, removed: removed)
         case .notice(let t):
             Text(t).font(Theme.mono(12)).foregroundStyle(Theme.faint).textSelection(.enabled)
         case .error(let t):
@@ -171,11 +172,32 @@ struct ItemView: View {
     }
 }
 
+struct DiffLine: View {
+    let path: String, added: Int, removed: Int
+    @EnvironmentObject var ws: Workspace
+    var body: some View {
+        Button { ws.current?.loadChanges(); ws.current?.showReview = true } label: {
+            HStack(spacing: 10) {
+                Text("edited").foregroundStyle(Theme.faint)
+                Text(path).foregroundStyle(Theme.ink)
+                Text("+\(added)").foregroundStyle(Color(nsColor: .systemGreen))
+                Text("−\(removed)").foregroundStyle(Color(nsColor: .systemRed))
+                Text("review").foregroundStyle(Theme.faint)
+            }
+            .font(Theme.mono(12))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Review this session's changes")
+    }
+}
+
 struct ToolCard: View {
     let name: String
     let args: String
     let ok: Bool?
     let summary: String
+    let output: String
     @State private var open = false
 
     var body: some View {
@@ -186,14 +208,22 @@ struct ToolCard: View {
                     Text(name).foregroundStyle(Theme.ink)
                     Text(args).foregroundStyle(Theme.soft).lineLimit(1).truncationMode(.middle)
                     Spacer(minLength: 0)
-                    if !summary.isEmpty { Text(open ? "▾" : "▸").foregroundStyle(Theme.faint) }
+                    if !summary.isEmpty || !output.isEmpty { Text(open ? "▾" : "▸").foregroundStyle(Theme.faint) }
                 }
                 .font(Theme.mono(12))
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            if open && !summary.isEmpty {
-                Text(summary).font(Theme.mono(11.5)).foregroundStyle(Theme.soft).textSelection(.enabled).padding(.leading, 20)
+            if open {
+                if !summary.isEmpty { Text(summary).font(Theme.mono(11.5)).foregroundStyle(Theme.soft).textSelection(.enabled).padding(.leading, 20) }
+                if !output.isEmpty {
+                    ScrollView {
+                        Text(output).font(Theme.mono(11.5)).foregroundStyle(Theme.ink).textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(maxHeight: 280)
+                    .padding(8).background(RoundedRectangle(cornerRadius: 5).fill(Theme.side))
+                }
             }
         }
         .padding(.horizontal, 12).padding(.vertical, 8)

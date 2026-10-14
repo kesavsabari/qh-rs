@@ -6,7 +6,7 @@ struct Item: Identifiable {
     enum Kind {
         case user(String)
         case reply(String)
-        case tool(name: String, args: String, ok: Bool?, summary: String)
+        case tool(name: String, args: String, ok: Bool?, summary: String, output: String)
         case diff(path: String, added: Int, removed: Int)
         case notice(String)
         case error(String)
@@ -63,6 +63,8 @@ final class Project: ObservableObject, Identifiable {
     @Published var state: String = "starting"   // starting | live | closed: <why>
     @Published var setup: SetupState?
     @Published var picker: PickerState?
+    @Published var changes: [FileChange] = []
+    @Published var showReview = false
     @Published var secret: String?          // provider whose API key the composer is asking for
     @Published var commands: [(cmd: String, about: String)] = []
     lazy var files: [String] = Self.listFiles(path)
@@ -115,6 +117,9 @@ final class Project: ObservableObject, Identifiable {
         prompt("\(p.cmd) \(value)")
     }
 
+    func loadChanges() { client.send(["type": "changes", "tab": current?.name ?? "main"]) }
+    func accept(_ f: FileChange) { client.send(["type": "accept", "tab": current?.name ?? "main", "path": f.path]) }
+    func reject(_ f: FileChange) { client.send(["type": "reject", "tab": current?.name ?? "main", "path": f.path]) }
     func loadCommands() { client.send(["type": "commands", "tab": current?.name ?? "main"]) }
 
     /// Project files for @ mentions: skips what's never worth mentioning, stops at 20k.
@@ -164,6 +169,11 @@ final class Project: ObservableObject, Identifiable {
         let type = e["type"] as? String ?? ""
         let tabName = e["tab"] as? String ?? "main"
         switch type {
+        case "changes":
+            let root = e["root"] as? String ?? path
+            changes = (e["files"] as? [[String: Any]] ?? []).map {
+                FileChange(path: $0["path"] as? String ?? "", root: root, before: $0["before"] as? String, after: $0["after"] as? String)
+            }
         case "picker":
             picker = PickerState(e)
         case "secret":
@@ -209,7 +219,7 @@ final class Project: ObservableObject, Identifiable {
                     } else {
                         if !text.isEmpty { tab.items.append(Item(kind: .reply(text))) }
                         for name in m["tools"] as? [String] ?? [] {
-                            tab.items.append(Item(kind: .tool(name: name, args: "", ok: true, summary: "")))
+                            tab.items.append(Item(kind: .tool(name: name, args: "", ok: true, summary: "", output: "")))
                         }
                     }
                 }
@@ -225,14 +235,16 @@ final class Project: ObservableObject, Identifiable {
         case "text":
             tab(tabName).append(text: e["delta"] as? String ?? "")
         case "tool_call":
-            tab(tabName).items.append(Item(kind: .tool(name: e["name"] as? String ?? "", args: Self.brief(e["args"]), ok: nil, summary: "")))
+            tab(tabName).items.append(Item(kind: .tool(name: e["name"] as? String ?? "", args: Self.brief(e["args"]), ok: nil, summary: "", output: "")))
         case "tool_result":
             let t = tab(tabName)
-            if let i = t.items.lastIndex(where: { if case .tool(_, _, nil, _) = $0.kind { return true }; return false }),
-               case .tool(let n, let a, _, _) = t.items[i].kind {
-                t.items[i].kind = .tool(name: n, args: a, ok: e["ok"] as? Bool ?? true, summary: e["summary"] as? String ?? "")
+            if let i = t.items.lastIndex(where: { if case .tool(_, _, nil, _, _) = $0.kind { return true }; return false }),
+               case .tool(let n, let a, _, _, _) = t.items[i].kind {
+                t.items[i].kind = .tool(name: n, args: a, ok: e["ok"] as? Bool ?? true, summary: e["summary"] as? String ?? "",
+                                        output: e["output"] as? String ?? "")
             }
         case "diff":
+            loadChanges()
             tab(tabName).items.append(Item(kind: .diff(path: e["path"] as? String ?? "", added: e["added"] as? Int ?? 0, removed: e["removed"] as? Int ?? 0)))
         case "notice", "compact":
             let msg = e["message"] as? String ?? "compacted the conversation"

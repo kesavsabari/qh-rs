@@ -74,6 +74,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                 }
             }
+            // "io.qh.project" with a folder: open that project in Personal
+            DistributedNotificationCenter.default().addObserver(forName: .init("io.qh.project"), object: nil, queue: .main) { n in
+                let p = n.object as? String ?? ""
+                MainActor.assumeIsolated { Notify.workspace?.setSpace("personal"); Notify.workspace?.open(p) }
+            }
             // "io.qh.open" with "path[:line]": open it in the code view, as a click on it in the thread would
             DistributedNotificationCenter.default().addObserver(forName: .init("io.qh.open"), object: nil, queue: .main) { n in
                 let p = n.object as? String ?? ""

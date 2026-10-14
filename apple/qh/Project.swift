@@ -112,7 +112,8 @@ final class Project: ObservableObject, Identifiable {
     @Published var code: CodeTarget?
     /// main area: "chat", "split" (chat and code side by side) or "code" (tree and file)
     @Published var layout = "chat"
-    @Published var edits = 0   // bumps on every agent edit, so an open file reloads
+    /// files added or removed anywhere in the project refresh the tree
+    private lazy var folderWatch = FolderWatch(path) { [weak self] in self?.loadFiles() }
     func loadFiles() { client.send(["type": "files", "tab": current?.name ?? "main"]) }
     func absolute(_ rel: String) -> String { rel.hasPrefix("/") ? rel : path + "/" + rel }
     /// Opens a path from anywhere (the tree, a link in the thread, a tool card) in the code view.
@@ -282,6 +283,7 @@ final class Project: ObservableObject, Identifiable {
             files = list
             fileSet = Set(list)
             tree = FileNode.build(list)
+            _ = folderWatch
             PathLinks.use(fileSet, root: path)
         case "tasks":
             tasks = e["text"] as? String ?? ""
@@ -361,7 +363,6 @@ final class Project: ObservableObject, Identifiable {
             }
         case "diff":
             loadChanges()
-            edits += 1
             tab(tabName).items.append(Item(kind: .diff(path: e["path"] as? String ?? "", added: e["added"] as? Int ?? 0, removed: e["removed"] as? Int ?? 0)))
         case "notice", "compact":
             let msg = e["message"] as? String ?? "compacted the conversation"

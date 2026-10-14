@@ -194,6 +194,9 @@ struct CodeView: View {
     @ObservedObject var project: Project
     @State private var lines: [String] = []
     @State private var note = ""
+    @State private var reloads = 0          // bumps when the file changes on disk
+    @State private var watch: FileWatch?
+    @State private var landed = ""          // the target we've already scrolled to
 
     var body: some View {
         let abs = project.absolute(target.path)
@@ -235,6 +238,9 @@ struct CodeView: View {
                         .padding(.vertical, 8)
                     }
                     .onChange(of: lines.count) { _, _ in
+                        // land on the line once per file opened; a live reload keeps your place
+                        guard landed != target.id else { return }
+                        landed = target.id
                         if let l = target.line { DispatchQueue.main.async { sv.scrollTo(l, anchor: .center) } }
                     }
                 }
@@ -242,7 +248,9 @@ struct CodeView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.paper)
-        .task(id: "\(target.id)#\(project.edits)") { load(abs) }   // reloads when the agent edits
+        .task(id: "\(target.id)#\(reloads)") { load(abs) }
+        .onAppear { watch = FileWatch(abs) { reloads += 1 } }
+        .onChange(of: target.id) { _, _ in watch = FileWatch(project.absolute(target.path)) { reloads += 1 } }
     }
 
     private func load(_ abs: String) {

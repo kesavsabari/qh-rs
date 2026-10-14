@@ -198,8 +198,13 @@ struct SessionRows: View {
         let shown = all ? project.sessions : Array(project.sessions.prefix(8))
         ForEach(shown) { s in
             let tab = project.openSessions[s.id]
-            let on = ws.active == project.path && tab != nil && tab == project.current?.name
-            Row(selected: on, action: { ws.active = project.path; project.resume(s) }) {
+            let here = ws.space == "personal" || ws.teamPage == .agent
+            let on = here && ws.active == project.path && tab != nil && tab == project.current?.name
+            Row(selected: on, action: {
+                ws.active = project.path
+                if ws.space == "team" { ws.teamPage = .agent }
+                project.resume(s)
+            }) {
                 HStack(spacing: 8) {
                     Circle().fill(tab != nil ? Theme.accent : .clear).frame(width: 5, height: 5)
                     Text(s.title.isEmpty ? s.id : s.title).foregroundStyle(on ? Theme.ink : Theme.soft).lineLimit(1)
@@ -291,6 +296,15 @@ struct TeamNav: View {
                 if let t, !t.running {
                     EmptyHint(icon: "antenna.radiowaves.left.and.right.slash", text: "Team mode isn't connected here.", hint: "/team on")
                 }
+                // what needs you first, then your own work, then the conversation, then the team
+                if let n = t?.waiting.count, n > 0 {
+                    Header(text: "Needs you")
+                    page(.requests, icon: "tray.full", "Requests", badge: n)
+                }
+                Header(text: "Your agent")
+                page(.agent, icon: "sparkles", project.current.map { $0.purpose.isEmpty ? $0.name : $0.purpose } ?? "Your agent",
+                     trailing: project.current?.busy == true ? "working" : "")
+                SessionRows(project: project)
                 Header(text: "Channels")
                 ForEach(t?.channels.filter { !$0.id.hasPrefix("@") } ?? []) { c in channel(c) }
                 let dms = t?.channels.filter { $0.id.hasPrefix("@") } ?? []
@@ -298,14 +312,14 @@ struct TeamNav: View {
                     Header(text: "Direct messages")
                     ForEach(dms) { c in channel(c) }
                 }
-                Header(text: "Agents")
-                page(.agent, icon: "sparkles", "Your agent", trailing: project.current?.busy == true ? "working" : "")
-                ForEach(t?.agents ?? []) { a in
-                    page(.peer(a.login, a.name), icon: "", avatar: a.login, "\(a.login) · \(a.name)", trailing: a.status)
+                if let agents = t?.agents, !agents.isEmpty {
+                    Header(text: "Teammates' agents")
+                    ForEach(agents) { a in
+                        page(.peer(a.login, a.name), icon: "", avatar: a.login, "\(a.login) · \(a.name)", trailing: a.status)
+                    }
                 }
-                Header(text: "Inbox")
-                page(.requests, icon: "tray", "Requests", badge: t?.waiting.count ?? 0)
                 Header(text: "Team")
+                if (t?.waiting.count ?? 0) == 0 { page(.requests, icon: "tray", "Requests") }
                 page(.members, icon: "person.2", "Members", trailing: "\(t?.people.filter(\.online).count ?? 0)/\(t?.people.count ?? 0)")
                 page(.claims, icon: "lock.doc", "Claims")
                 page(.activity, icon: "waveform.path.ecg", "Activity")

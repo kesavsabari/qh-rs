@@ -302,7 +302,7 @@ struct TeamNav: View {
                     page(.requests, icon: "tray.full", "Requests", badge: n)
                 }
                 Header(text: "Your agent")
-                page(.agent, icon: "sparkles", project.current.map { $0.purpose.isEmpty ? $0.name : $0.purpose } ?? "Your agent",
+                page(.agent, icon: "sparkles", "Agent",
                      trailing: project.current?.busy == true ? "working" : "")
                 SessionRows(project: project)
                 Header(text: "Channels")

@@ -67,6 +67,8 @@ struct SidebarView: View {
                 .buttonStyle(.hand).foregroundStyle(Theme.soft)
                 Spacer()
                 Text(ws.version.replacingOccurrences(of: "qh ", with: "v")).font(Theme.mono(11)).foregroundStyle(Theme.faint)
+                SettingsLink { Image(systemName: "gearshape").font(.system(size: 12.5)) }
+                    .buttonStyle(.hand).foregroundStyle(Theme.soft).help("Settings (⌘,)")
             }
             .padding(.horizontal, 14).padding(.vertical, 10)
         }

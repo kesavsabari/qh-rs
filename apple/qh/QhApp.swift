@@ -33,9 +33,9 @@ struct QhApp: App {
                 }
                 .onChange(of: look) { _, v in QhApp.apply(v) }
             }
-            // SwiftUI left Settings… without its ⌘, so bind it here
+            // settings live in the main window, not a separate one
             CommandGroup(replacing: .appSettings) {
-                SettingsLink { Text("Settings…") }.keyboardShortcut(",")
+                Button("Settings…") { ws.settings.toggle() }.keyboardShortcut(",")
             }
             CommandGroup(replacing: .newItem) {
                 Button("Open Folder…") { ws.pick() }.keyboardShortcut("o")
@@ -52,9 +52,6 @@ struct QhApp: App {
                 Button("Chat and Code") { ws.current?.layout = "split" }.keyboardShortcut("2", modifiers: .control).disabled(ws.current == nil)
                 Button("Code") { ws.current?.layout = "code" }.keyboardShortcut("3", modifiers: .control).disabled(ws.current == nil)
             }
-        }
-        Settings {
-            SettingsView().environmentObject(ws)
         }
         MenuBarExtra {
             MenuBarView().environmentObject(ws)

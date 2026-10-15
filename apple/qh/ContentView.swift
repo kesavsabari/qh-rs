@@ -44,7 +44,7 @@ struct SidebarView: View {
 
     var body: some View {
         Group {
-            if ws.space == "team" { TeamSidebar() } else { PersonalSidebar() }
+            if ws.settings { SettingsNav() } else if ws.space == "team" { TeamSidebar() } else { PersonalSidebar() }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             HStack(spacing: 4) {
@@ -52,8 +52,8 @@ struct SidebarView: View {
                 Spacer()
                 Button(action: ws.pick) { Image(systemName: "folder.badge.plus").font(.system(size: 12.5)) }
                     .buttonStyle(.hand).foregroundStyle(Theme.soft).help("Open folder (⌘O)")
-                SettingsLink { Image(systemName: "gearshape").font(.system(size: 12.5)) }
-                    .buttonStyle(.hand).foregroundStyle(Theme.soft).help("Settings (⌘,) · \(ws.version)")
+                Button { ws.settings.toggle() } label: { Image(systemName: "gearshape").font(.system(size: 12.5)) }
+                    .buttonStyle(.hand).foregroundStyle(ws.settings ? Theme.ink : Theme.soft).help("Settings (⌘,) · \(ws.version)")
             }
             .padding(.horizontal, 14).padding(.vertical, 10)
         }
@@ -459,6 +459,8 @@ struct DetailView: View {
     var body: some View {
         if ws.qh == nil {
             Missing()
+        } else if ws.settings {
+            SettingsView()
         } else if ws.space == "team" {
             if let p = ws.projects.first(where: { $0.path == ws.teamProject }) {
                 if ws.teamPage == .agent { ProjectView(project: p).id(p.path) } else { TeamPageView(project: p) }

@@ -9,6 +9,7 @@ final class Workspace: ObservableObject {
     @Published var active: String?
     @Published var version = ""
     @Published var palette = false   // ⌘K
+    @Published var settings = false  // ⌘, : settings take over the sidebar and the card, in this window
     @Published var waiting = 0   // permissions waiting, every project
     @Published var working = 0   // tabs running a turn, every project
     /// folder → GitHub repo, for the folders that are team projects (asked from qh itself)
@@ -97,6 +98,7 @@ final class Workspace: ObservableObject {
     }
 
     func setSpace(_ s: String) {
+        settings = false   // picking a space or a project leaves settings
         if s == "team" && space != "team" { teamPage = .agent }   // the team space opens on Work, not Messages
         space = s
         UserDefaults.standard.set(s, forKey: "space")
@@ -125,6 +127,7 @@ final class Workspace: ObservableObject {
     }
 
     func open(_ path: String) {
+        settings = false
         recent = Array(([path] + recent.filter { $0 != path }).prefix(14))
         UserDefaults.standard.set(recent, forKey: "projects")
         refreshTeams()

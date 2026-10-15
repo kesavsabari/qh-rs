@@ -2,28 +2,45 @@ import SwiftUI
 
 /// ⌘, : qh's settings. Everything but Appearance lives in config.toml, read and written through
 /// `qh __config`, so the terminal and the app always agree.
+enum SettingsTabs {
+    static let all: [(String, String)] = [("General", "gearshape"), ("Models", "cpu"), ("Safety", "lock.shield"),
+                                          ("Team", "person.2"), ("Appearance", "paintbrush"), ("Advanced", "slider.horizontal.3")]
+}
+
+/// The sidebar while settings are open: back to your work, then the sections as tabs.
+struct SettingsNav: View {
+    @EnvironmentObject var ws: Workspace
+    @AppStorage("settingsTab") private var tab = "General"
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Row(selected: false, action: { ws.settings = false }) {
+                Label("Back", systemImage: "chevron.left").foregroundStyle(Theme.soft)
+            }
+            .keyboardShortcut(.escape, modifiers: [])
+            Header(text: "Settings")
+            ForEach(SettingsTabs.all, id: \.0) { t in
+                Row(selected: tab == t.0, action: { tab = t.0 }) {
+                    Label(t.0, systemImage: t.1).foregroundStyle(tab == t.0 ? Theme.ink : Theme.soft)
+                }
+            }
+            Spacer()
+            Text(ws.version.replacingOccurrences(of: "qh ", with: "v") + " · config.toml")
+                .font(Theme.mono(10.5)).foregroundStyle(Theme.faint).padding(.horizontal, 8).padding(.bottom, 4)
+        }
+        .padding(.horizontal, 8).padding(.top, 4)
+    }
+}
+
+/// ⌘, : the open section, in the main card like any other page.
 struct SettingsView: View {
     @EnvironmentObject var ws: Workspace
     @StateObject private var cfg = ConfigStore()
     @AppStorage("settingsTab") private var tab = "General"
-    private let tabs: [(String, String)] = [("General", "gearshape"), ("Models", "cpu"), ("Safety", "lock.shield"),
-                                            ("Team", "person.2"), ("Appearance", "paintbrush"), ("Advanced", "slider.horizontal.3")]
 
-    // the Zen layout: sections as tabs on the ground, the open one in a floating card
     var body: some View {
-        HStack(alignment: .top, spacing: 8) {
-            VStack(alignment: .leading, spacing: 2) {
-                ForEach(tabs, id: \.0) { t in
-                    Row(selected: tab == t.0, action: { tab = t.0 }) {
-                        Label(t.0, systemImage: t.1).foregroundStyle(tab == t.0 ? Theme.ink : Theme.soft)
-                    }
-                }
-                Spacer()
-                Text(ws.version.replacingOccurrences(of: "qh ", with: "v") + " · config.toml")
-                    .font(Theme.mono(10.5)).foregroundStyle(Theme.faint).padding(.horizontal, 8).padding(.bottom, 6)
-            }
-            .frame(width: 170)
-            .padding(.top, 6)
+        VStack(spacing: 0) {
+            PageHeader(title: tab, subtitle: tab == "Appearance" ? "this Mac" : "saved to config.toml")
             Group {
                 switch tab {
                 case "Models": Models(cfg: cfg)
@@ -35,18 +52,16 @@ struct SettingsView: View {
                 }
             }
             .scrollContentBackground(.hidden)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Theme.paper, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(Theme.line, lineWidth: 0.5))
-            .overlay(alignment: .bottom) {
-                if let e = cfg.error {
-                    Text(e).font(Theme.sans(11.5)).foregroundStyle(.red).padding(8)
-                }
+            .tint(Theme.ink)   // switches in ink: orange stays for live things
+            .frame(maxWidth: 720)
+            .padding(.horizontal, 8)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+        .overlay(alignment: .bottom) {
+            if let e = cfg.error {
+                Text(e).font(Theme.sans(11.5)).foregroundStyle(.red).padding(8)
             }
         }
-        .padding(8)
-        .frame(width: 720, height: 500)
-        .background(Theme.ground)
         .onAppear { cfg.qh = ws.qh; cfg.load() }
     }
 }

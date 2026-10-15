@@ -33,6 +33,10 @@ struct QhApp: App {
                 }
                 .onChange(of: look) { _, v in QhApp.apply(v) }
             }
+            // SwiftUI left Settings… without its ⌘, so bind it here
+            CommandGroup(replacing: .appSettings) {
+                SettingsLink { Text("Settings…") }.keyboardShortcut(",")
+            }
             CommandGroup(replacing: .newItem) {
                 Button("Open Folder…") { ws.pick() }.keyboardShortcut("o")
                 Button("Command Palette…") { ws.palette = true }.keyboardShortcut("k")

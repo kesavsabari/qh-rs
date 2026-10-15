@@ -194,10 +194,14 @@ struct ThreadView: View {
         return tab.items.filter { if case .user = $0.kind { return true }; if case .reply = $0.kind { return true }; return false }
     }
 
+    @State private var pinned = true
+
     var body: some View {
         ScrollViewReader { sv in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 14) {
+                // not lazy: a lazy stack guesses row heights and corrects them as you scroll, which
+                // made the whole thread jump
+                VStack(alignment: .leading, spacing: 14) {
                     let blocks = Activity.blocks(shown)
                     ForEach(Array(blocks.enumerated()), id: \.element.id) { i, b in
                         switch b {
@@ -212,11 +216,11 @@ struct ThreadView: View {
                 .padding(.horizontal, 24).padding(.vertical, 20)
                 .frame(maxWidth: .infinity)
             }
-            // start at the bottom without a jump: scrolling a lazy stack before its rows are measured
-            // left long sessions blank until you scrolled
             .defaultScrollAnchor(.bottom)
-            .onChange(of: tab.items.count) { _, _ in DispatchQueue.main.async { sv.scrollTo("end", anchor: .bottom) } }
-            .onChange(of: tab.status) { _, _ in DispatchQueue.main.async { sv.scrollTo("end", anchor: .bottom) } }
+            .atBottom($pinned)
+            // follow new output only while you're at the bottom: scrolled up to read, you stay put
+            .onChange(of: tab.items.count) { _, _ in if pinned { DispatchQueue.main.async { sv.scrollTo("end", anchor: .bottom) } } }
+            .onChange(of: tab.status) { _, _ in if pinned { DispatchQueue.main.async { sv.scrollTo("end", anchor: .bottom) } } }
         }
         .overlay(alignment: .top) {
             // outside the scroll view: it's anchored to the bottom, and this belongs at the top
@@ -778,5 +782,18 @@ struct Banner: View {
         Text(text.isEmpty ? "qh stopped" : text).font(Theme.mono(12)).foregroundStyle(Theme.accent)
             .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 28).padding(.vertical, 8)
             .background(Theme.side)
+    }
+}
+
+extension View {
+    /// Keeps `pinned` true while the scroll view sits at (or near) its bottom.
+    @ViewBuilder func atBottom(_ pinned: Binding<Bool>) -> some View {
+        if #available(macOS 15.0, *) {
+            onScrollGeometryChange(for: Bool.self) { g in
+                g.contentOffset.y + g.containerSize.height >= g.contentSize.height - 60
+            } action: { _, v in pinned.wrappedValue = v }
+        } else {
+            self
+        }
     }
 }

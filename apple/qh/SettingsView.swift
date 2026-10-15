@@ -5,24 +5,49 @@ import SwiftUI
 struct SettingsView: View {
     @EnvironmentObject var ws: Workspace
     @StateObject private var cfg = ConfigStore()
+    @AppStorage("settingsTab") private var tab = "General"
+    private let tabs: [(String, String)] = [("General", "gearshape"), ("Models", "cpu"), ("Safety", "lock.shield"),
+                                            ("Team", "person.2"), ("Appearance", "paintbrush"), ("Advanced", "slider.horizontal.3")]
 
+    // the Zen layout: sections as tabs on the ground, the open one in a floating card
     var body: some View {
-        TabView {
-            General(cfg: cfg).tabItem { Label("General", systemImage: "gearshape") }
-            Models(cfg: cfg).tabItem { Label("Models", systemImage: "cpu") }
-            Safety(cfg: cfg).tabItem { Label("Safety", systemImage: "lock.shield") }
-            TeamTab(cfg: cfg).tabItem { Label("Team", systemImage: "person.2") }
-            Appearance().tabItem { Label("Appearance", systemImage: "paintbrush") }
-            Advanced(cfg: cfg).tabItem { Label("Advanced", systemImage: "slider.horizontal.3") }
-        }
-        .frame(width: 520)
-        .frame(minHeight: 380)
-        .onAppear { cfg.qh = ws.qh; cfg.load() }
-        .overlay(alignment: .bottom) {
-            if let e = cfg.error {
-                Text(e).font(Theme.sans(11.5)).foregroundStyle(.red).padding(8)
+        HStack(alignment: .top, spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(tabs, id: \.0) { t in
+                    Row(selected: tab == t.0, action: { tab = t.0 }) {
+                        Label(t.0, systemImage: t.1).foregroundStyle(tab == t.0 ? Theme.ink : Theme.soft)
+                    }
+                }
+                Spacer()
+                Text(ws.version.replacingOccurrences(of: "qh ", with: "v") + " · config.toml")
+                    .font(Theme.mono(10.5)).foregroundStyle(Theme.faint).padding(.horizontal, 8).padding(.bottom, 6)
+            }
+            .frame(width: 170)
+            .padding(.top, 6)
+            Group {
+                switch tab {
+                case "Models": Models(cfg: cfg)
+                case "Safety": Safety(cfg: cfg)
+                case "Team": TeamTab(cfg: cfg)
+                case "Appearance": Appearance()
+                case "Advanced": Advanced(cfg: cfg)
+                default: General(cfg: cfg)
+                }
+            }
+            .scrollContentBackground(.hidden)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Theme.paper, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(Theme.line, lineWidth: 0.5))
+            .overlay(alignment: .bottom) {
+                if let e = cfg.error {
+                    Text(e).font(Theme.sans(11.5)).foregroundStyle(.red).padding(8)
+                }
             }
         }
+        .padding(8)
+        .frame(width: 720, height: 500)
+        .background(Theme.ground)
+        .onAppear { cfg.qh = ws.qh; cfg.load() }
     }
 }
 

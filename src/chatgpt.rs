@@ -535,7 +535,8 @@ pub fn chat(model: &str, messages: &[Value], tools: &[Value], think: &str,
         // the Codex backend takes plain function tools, no namespaces
         input.iter_mut().filter_map(Value::as_object_mut).for_each(|i| { i.remove("namespace"); });
     }
-    let mut body = json!({"model": model, "instructions": instructions, "input": input, "store": false, "stream": true});
+    let mut body = json!({"model": model, "instructions": instructions, "input": input, "store": false, "stream": true,
+                          "prompt_cache_key": crate::backend::cache_key(messages)});
     if !tools.is_empty() {
         let fns: Vec<Value> = tools.iter().map(|t| {
             let f = &t["function"];

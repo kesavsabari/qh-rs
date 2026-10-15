@@ -195,12 +195,47 @@ fn image_parts(text: &str, imgs: &[Value]) -> Value {
     Value::from(parts)
 }
 
+/// A key that stays the same for one conversation (its system prompt and first message), so
+/// OpenAI-style automatic caching routes every turn to the same cache.
+pub fn cache_key(messages: &[Value]) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for m in messages.iter().take(2) { m["content"].to_string().hash(&mut h) }
+    format!("qh-{:016x}", h.finish())
+}
+
+/// Mark one OpenAI-format message as a cache breakpoint (OpenRouter passes `cache_control` on
+/// to Anthropic and Gemini): its content becomes text parts, the last one marked.
+fn mark_cache(m: &mut Value) {
+    let parts = match m["content"].take() {
+        Value::String(t) if !t.is_empty() => vec![json!({"type": "text", "text": t})],
+        Value::Array(a) => a,
+        other => { m["content"] = other; return }
+    };
+    let mut parts = parts;
+    if let Some(last) = parts.iter_mut().rev().find(|p| p["type"] == "text") {
+        last["cache_control"] = json!({"type": "ephemeral"});
+    }
+    m["content"] = Value::from(parts);
+}
+
 /// Any OpenAI-compatible /chat/completions server: OpenRouter, OpenAI, Groq, DeepSeek,
 /// LM Studio, llama.cpp, vLLM…
 pub fn openai(base: &str, key: &str, model: &str, messages: &[Value], tools: &[Value], think: &str,
               on: &mut dyn FnMut(bool, &str) -> bool) -> Result<Reply, Error> {
-    let mut body = json!({"model": model, "messages": to_openai(messages), "stream": true,
+    let mut msgs = to_openai(messages);
+    // OpenRouter's Claude and Gemini models cache only what's marked: the system prompt and the
+    // newest message, so each turn reads everything before it from the cache
+    let marked = base.contains("openrouter.ai") && (model.starts_with("anthropic/") || model.starts_with("google/"));
+    if marked {
+        if let Some(m) = msgs.first_mut().filter(|m| m["role"] == "system") { mark_cache(m) }
+        if let Some(m) = msgs.last_mut().filter(|m| m["role"] != "system") { mark_cache(m) }
+    }
+    let mut body = json!({"model": model, "messages": msgs, "stream": true,
                           "stream_options": {"include_usage": true}});
+    if base.contains("api.openai.com") {
+        body["prompt_cache_key"] = json!(cache_key(messages));
+    }
     if !tools.is_empty() {
         body["tools"] = Value::from(tools.to_vec());
     }
@@ -350,12 +385,21 @@ pub fn anthropic(base: &str, key: &str, model: &str, messages: &[Value], tools: 
                  on: &mut dyn FnMut(bool, &str) -> bool) -> Result<Reply, Error> {
     let (system, msgs) = to_anthropic(messages);
     let mut body = json!({"model": model, "max_tokens": 16000, "messages": msgs, "stream": true});
+    // cache breakpoints: tools, the system prompt and the newest message. Each turn then reads
+    // the whole conversation so far from the cache (a tenth of the price) instead of resending it
+    let eph = json!({"type": "ephemeral"});
     if !system.is_empty() {
-        body["system"] = system.into();
+        body["system"] = json!([{"type": "text", "text": system, "cache_control": eph}]);
     }
     if !tools.is_empty() {
-        body["tools"] = tools.iter().map(|t| json!({"name": t["function"]["name"],
+        let mut t: Vec<Value> = tools.iter().map(|t| json!({"name": t["function"]["name"],
             "description": t["function"]["description"], "input_schema": t["function"]["parameters"]})).collect();
+        if let Some(l) = t.last_mut() { l["cache_control"] = eph.clone() }
+        body["tools"] = t.into();
+    }
+    if let Some(b) = body["messages"].as_array_mut().and_then(|m| m.last_mut()).and_then(|m| m["content"].as_array_mut())
+        .and_then(|c| c.iter_mut().rev().find(|b| !matches!(b["type"].as_str(), Some("thinking" | "redacted_thinking")))) {
+        b["cache_control"] = eph;
     }
     let adaptive = !think.is_empty() && adaptive_models().lock().unwrap_or_else(|e| e.into_inner()).contains(model);
     if !think.is_empty() {

@@ -5,7 +5,7 @@ use crate::providers::{Kind, Provider};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 pub struct Reply {
@@ -215,7 +215,15 @@ pub fn openai(base: &str, key: &str, model: &str, messages: &[Value], tools: &[V
         body["reasoning_effort"] = json!(think);
     }
     let key = Some(key).filter(|k| !k.is_empty());
-    let r = post(&format!("{}/chat/completions", base.trim_end_matches('/')), &body, key)?;
+    let url = format!("{}/chat/completions", base.trim_end_matches('/'));
+    let r = match post(&url, &body, key) {
+        // some models (Claude Sonnet 5.5 on OpenRouter) always reason: send it again without "off"
+        Err(Error::Other(m)) if body.get("reasoning").is_some() && m.contains("Reasoning is mandatory") => {
+            body.as_object_mut().unwrap().remove("reasoning");
+            post(&url, &body, key)?
+        }
+        r => r?,
+    };
     let (mut content, mut prompt, mut total) = (String::new(), 0, 0);
     let mut usage = crate::usage::Calls::default();
     let mut calls: BTreeMap<u64, (String, String)> = BTreeMap::new();
@@ -282,7 +290,7 @@ fn to_anthropic(messages: &[Value]) -> (String, Vec<Value>) {
         match s(m, "role") {
             "system" => system.push_str(s(m, "content")),
             "assistant" => {
-                let mut blocks = vec![];
+                let mut blocks: Vec<Value> = m["anthropic_thinking"].as_array().cloned().unwrap_or_default();
                 if !s(m, "content").is_empty() {
                     blocks.push(json!({"type": "text", "text": s(m, "content")}));
                 }
@@ -317,6 +325,26 @@ fn to_anthropic(messages: &[Value]) -> (String, Vec<Value>) {
     (system, out)
 }
 
+/// Models that refused budget thinking this run: they get adaptive thinking from then on.
+fn adaptive_models() -> &'static Mutex<std::collections::HashSet<String>> {
+    static M: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    M.get_or_init(Default::default)
+}
+
+/// Budget thinking (`enabled` + budget_tokens) for older Claude models; adaptive + an effort
+/// level for the ones that only take that.
+fn thinking_body(body: &mut Value, think: &str, adaptive: bool) {
+    if adaptive {
+        body["thinking"] = json!({"type": "adaptive"});
+        let effort = if matches!(think, "low" | "high") { think } else { "medium" };
+        body["output_config"] = json!({"effort": effort});
+    } else {
+        let budget = match think { "low" => 4000, "high" => 14000, _ => 8000 }; // under max_tokens
+        body["thinking"] = json!({"type": "enabled", "budget_tokens": budget});
+        if let Some(o) = body.as_object_mut() { o.remove("output_config"); }
+    }
+}
+
 /// Anthropic Messages API with an API key (console.anthropic.com).
 pub fn anthropic(base: &str, key: &str, model: &str, messages: &[Value], tools: &[Value], think: &str,
                  on: &mut dyn FnMut(bool, &str) -> bool) -> Result<Reply, Error> {
@@ -329,20 +357,30 @@ pub fn anthropic(base: &str, key: &str, model: &str, messages: &[Value], tools: 
         body["tools"] = tools.iter().map(|t| json!({"name": t["function"]["name"],
             "description": t["function"]["description"], "input_schema": t["function"]["parameters"]})).collect();
     }
+    let adaptive = !think.is_empty() && adaptive_models().lock().unwrap_or_else(|e| e.into_inner()).contains(model);
     if !think.is_empty() {
-        let budget = match think { "low" => 4000, "high" => 14000, _ => 8000 }; // under max_tokens
-        body["thinking"] = json!({"type": "enabled", "budget_tokens": budget});
+        thinking_body(&mut body, think, adaptive);
     }
     let url = format!("{}/v1/messages", base.trim_end_matches('/'));
-    let r = http().post(&url).set("Content-Type", "application/json").set("x-api-key", key)
+    let send = |body: &Value| http().post(&url).set("Content-Type", "application/json").set("x-api-key", key)
         .set("anthropic-version", "2023-06-01").send_string(&body.to_string()).map_err(|e| match e {
             ureq::Error::Status(code, r) => status_error(code, r),
             ureq::Error::Transport(t) => Error::Connect(t.to_string()),
-        })?;
+        });
+    let r = match send(&body) {
+        // newer models (Opus 5.5, Sonnet 5.5) take only adaptive thinking; older ones only budgets
+        Err(Error::Other(m)) if !think.is_empty() && !adaptive && m.contains("thinking.type.adaptive") => {
+            adaptive_models().lock().unwrap_or_else(|e| e.into_inner()).insert(model.to_string());
+            thinking_body(&mut body, think, true);
+            send(&body)?
+        }
+        r => r?,
+    };
     let (mut content, mut prompt, mut out_tokens) = (String::new(), 0u64, 0u64);
     let mut usage = crate::usage::Calls::default();
     let mut calls: Vec<(String, String)> = vec![]; // (name, json input so far)
     let mut current_tool: Option<usize> = None;
+    let mut thinking: Vec<Value> = vec![];
     for line in BufReader::new(r.into_reader()).lines() {
         let line = line.map_err(|e| Error::Other(e.to_string()))?;
         let Some(data) = line.strip_prefix("data: ") else { continue };
@@ -356,6 +394,12 @@ pub fn anthropic(base: &str, key: &str, model: &str, messages: &[Value], tools: 
             }
             "content_block_start" => {
                 let b = &ev["content_block"];
+                // thinking goes back with the tool results, signature and all, or the API refuses the turn
+                match s(b, "type") {
+                    "thinking" => thinking.push(json!({"type": "thinking", "thinking": "", "signature": ""})),
+                    "redacted_thinking" => thinking.push(b.clone()),
+                    _ => {}
+                }
                 current_tool = (s(b, "type") == "tool_use").then(|| {
                     calls.push((s(b, "name").to_string(), String::new()));
                     calls.len() - 1
@@ -370,7 +414,15 @@ pub fn anthropic(base: &str, key: &str, model: &str, messages: &[Value], tools: 
                             return Err(Error::Cancelled);
                         }
                     }
-                    "thinking_delta" if !on(true, s(d, "thinking")) => return Err(Error::Cancelled),
+                    "thinking_delta" => {
+                        if let Some(t) = thinking.last_mut().filter(|t| t["type"] == "thinking") {
+                            t["thinking"] = json!(format!("{}{}", s(t, "thinking"), s(d, "thinking")));
+                        }
+                        if !on(true, s(d, "thinking")) { return Err(Error::Cancelled) }
+                    }
+                    "signature_delta" => if let Some(t) = thinking.last_mut().filter(|t| t["type"] == "thinking") {
+                        t["signature"] = json!(format!("{}{}", s(t, "signature"), s(d, "signature")));
+                    },
                     "input_json_delta" => {
                         if let Some(i) = current_tool {
                             calls[i].1.push_str(s(d, "partial_json"));
@@ -390,6 +442,9 @@ pub fn anthropic(base: &str, key: &str, model: &str, messages: &[Value], tools: 
             let args: Value = serde_json::from_str(&a).unwrap_or(json!({}));
             json!({"function": {"name": name, "arguments": args}})
         }).collect();
+    }
+    if !thinking.is_empty() {
+        msg["anthropic_thinking"] = Value::from(thinking);
     }
     usage.output = out_tokens;
     Ok(Reply { msg, prompt, total: prompt + out_tokens, usage, plan_pct: None })

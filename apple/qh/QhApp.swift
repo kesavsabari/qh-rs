@@ -41,13 +41,16 @@ struct QhApp: App {
                 Button("Inspector") { ws.toggleInspector() }.keyboardShortcut("i", modifiers: [.command, .option])
                 Button("Background Tasks") { ws.current?.showTasks = true }.keyboardShortcut("b", modifiers: [.command, .shift]).disabled(ws.current == nil)
                 Button("Replies Only") { ws.current?.repliesOnly.toggle() }.keyboardShortcut("r").disabled(ws.current == nil)
-                Button("Models…") { ws.current?.showSetup = true }.keyboardShortcut(",").disabled(ws.current == nil)
+                Button("Models…") { ws.current?.showSetup = true }.keyboardShortcut("m", modifiers: [.command, .shift]).disabled(ws.current == nil)
                 Button("New Tab") { ws.current?.newTab() }.keyboardShortcut("t").disabled(ws.current == nil)
                 Divider()
                 Button("Chat") { ws.current?.layout = "chat" }.keyboardShortcut("1", modifiers: .control).disabled(ws.current == nil)
                 Button("Chat and Code") { ws.current?.layout = "split" }.keyboardShortcut("2", modifiers: .control).disabled(ws.current == nil)
                 Button("Code") { ws.current?.layout = "code" }.keyboardShortcut("3", modifiers: .control).disabled(ws.current == nil)
             }
+        }
+        Settings {
+            SettingsView().environmentObject(ws)
         }
         MenuBarExtra {
             MenuBarView().environmentObject(ws)

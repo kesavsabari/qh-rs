@@ -84,7 +84,7 @@ final class Workspace: ObservableObject {
         WorkspaceHolder.ws = self
         Notify.setup()
         // back where you were: the project open when the app last quit
-        if let last = UserDefaults.standard.string(forKey: "lastOpen"), FileManager.default.fileExists(atPath: last) { open(last) }
+        if UserDefaults.standard.object(forKey: "reopenLast") as? Bool ?? true, let last = UserDefaults.standard.string(forKey: "lastOpen"), FileManager.default.fileExists(atPath: last) { open(last) }
     }
 
     var current: Project? { projects.first { $0.path == active } }

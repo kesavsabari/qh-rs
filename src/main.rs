@@ -174,6 +174,15 @@ fn main() {
         println!("{}", serde_json::Value::Object(out));
         std::process::exit(0);
     }
+    // the Mac app's Settings window: `qh __config` prints the settings, `qh __config set k v` sets one
+    if argv.get(1).map(String::as_str) == Some("__config") {
+        match (argv.get(2).map(String::as_str), argv.get(3), argv.get(4)) {
+            (None, ..) => println!("{}", config::dump()),
+            (Some("set"), Some(k), Some(v)) => if let Err(e) = config::set_raw(k, v) { eprintln!("{e}"); std::process::exit(1) },
+            _ => { eprintln!("usage: qh __config [set <key|table.key> <toml value, empty to remove>]"); std::process::exit(2) }
+        }
+        std::process::exit(0);
+    }
     if argv.get(1).map(String::as_str) == Some("__tool") {
         std::process::exit(tool_once(&argv[2..]));
     }

@@ -89,32 +89,66 @@ pub fn state_dir() -> PathBuf {
 /// Set one top-level `key = "value"` in config.toml, keeping the rest of the file (comments,
 /// tables) as it is: an existing line is replaced, otherwise the setting goes above the first table.
 pub fn set(key: &str, value: &str) -> Result<PathBuf, String> {
-    let path = std::env::var("QH_CONFIG").map(PathBuf::from).unwrap_or_else(|_| crate::platform::config_base().join("config.toml"));
+    set_raw(key, &quote(value))
+}
+
+/// Set `key` (or `table.key`) to a TOML literal (`"x"`, `true`, `3`, `["a"]`); an empty
+/// literal removes the line. The rest of the file stays as it is.
+pub fn set_raw(key: &str, literal: &str) -> Result<PathBuf, String> {
+    if !literal.is_empty() && format!("x = {literal}").parse::<toml::Table>().is_err() {
+        return Err(format!("not a TOML value: {literal}"));
+    }
+    let path = config_file();
     let text = std::fs::read_to_string(&path).unwrap_or_default();
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
+    let (table, k) = key.rsplit_once('.').map(|(t, k)| (Some(t), k)).unwrap_or((None, key));
+    let out = set_in_table(&text, table, k, literal);
+    // never write a file qh itself can't read back
+    out.parse::<toml::Table>().map_err(|e| format!("config.toml would not parse: {e}"))?;
     // private: it can hold a relay's secret
-    crate::platform::write_private(&path, set_in(&text, key, value).as_bytes()).map_err(|e| e.to_string())?;
+    crate::platform::write_private(&path, out.as_bytes()).map_err(|e| e.to_string())?;
     Ok(path)
 }
 
+pub fn config_file() -> PathBuf {
+    std::env::var("QH_CONFIG").map(PathBuf::from).unwrap_or_else(|_| crate::platform::config_base().join("config.toml"))
+}
+
+fn quote(v: &str) -> String {
+    format!("\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+#[cfg(test)]
 fn set_in(text: &str, key: &str, value: &str) -> String {
-    let line = format!("{key} = \"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""));
+    set_in_table(text, None, key, &quote(value))
+}
+
+/// The edit itself: in `[table]` (or the top level), replace `key`'s line or add it; an empty
+/// literal drops it. A missing table is added at the end.
+fn set_in_table(text: &str, table: Option<&str>, key: &str, literal: &str) -> String {
+    let line = (!literal.is_empty()).then(|| format!("{key} = {literal}"));
     let mut out: Vec<String> = vec![];
-    let (mut done, mut in_table) = (false, false);
+    let mut done = line.is_none();
+    let mut here = table.is_none(); // inside the section we edit
+    let mut seen = table.is_none();
     for l in text.lines() {
         let t = l.trim_start();
         if t.starts_with('[') {
-            if !done {
-                out.push(line.clone());
+            let name = t.trim_start_matches('[').split(']').next().unwrap_or("").trim();
+            if here && !done {
+                // the section ends: add before the blank lines that close it
+                let at = out.iter().rposition(|x| !x.trim().is_empty()).map_or(0, |i| i + 1);
+                out.insert(at, line.clone().unwrap());
                 done = true;
             }
-            in_table = true;
+            here = table == Some(name) && !t.starts_with("[[");
+            seen |= here;
         }
-        if !in_table && t.split('=').next().is_some_and(|k| k.trim() == key) {
+        if here && !t.starts_with('[') && t.split('=').next().is_some_and(|k| k.trim() == key) {
             if !done {
-                out.push(line.clone());
+                out.push(line.clone().unwrap());
                 done = true;
             }
             continue;
@@ -122,9 +156,29 @@ fn set_in(text: &str, key: &str, value: &str) -> String {
         out.push(l.to_string());
     }
     if !done {
-        out.push(line);
+        let l = line.unwrap();
+        if !seen {
+            if out.last().is_some_and(|x| !x.trim().is_empty()) { out.push(String::new()) }
+            out.push(format!("[{}]", table.unwrap()));
+        }
+        out.push(l);
     }
     out.join("\n") + "\n"
+}
+
+/// What the Mac app's Settings window shows: the settings as qh reads them.
+pub fn dump() -> serde_json::Value {
+    let c = load();
+    serde_json::json!({
+        "path": config_file(), "model": c.model, "fallback_model": c.fallback_model, "ask_model": c.ask_model,
+        "fetch_model": c.fetch_model, "cost_warn": c.cost_warn, "cloud_ctx": c.cloud_ctx, "ctx": c.ctx,
+        "compact_at": c.compact_at, "mode": c.mode, "notify": c.notify, "update_check": c.update_check,
+        "relay": c.relay, "team_share_files": c.team_share_files, "sandbox": c.sandbox,
+        "sandbox_write": c.sandbox_write, "sandbox_hosts": c.sandbox_hosts, "sandbox_network": c.sandbox_network,
+        "lsp": c.lsp, "lsp_wait_ms": c.lsp_wait_ms, "openrouter_key": !c.openrouter_key.is_empty(),
+        "providers": c.providers.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>(),
+        "hooks": c.hooks.len(), "mcp": c.mcp.iter().map(|m| m.name.clone()).collect::<Vec<_>>(),
+    })
 }
 
 /// The built-in settings, before config.toml.
@@ -179,9 +233,7 @@ pub fn load_cached() -> &'static Config {
 
 pub fn load() -> Config {
     let mut c = load_defaults();
-    let path = std::env::var("QH_CONFIG")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| crate::platform::config_base().join("config.toml"));
+    let path = config_file();
     if let Some(t) = std::fs::read_to_string(&path).ok().and_then(|s| s.parse::<toml::Table>().ok()) {
         // it holds secrets (a relay's key, API keys): only its owner may read it
         let secret = t.get("relay").and_then(|v| v.as_str()).is_some_and(|r| r.contains('#'))
@@ -342,5 +394,21 @@ mod tests {
         assert_eq!(super::set_in("", "relay", "say \"hi\""), "relay = \"say \\\"hi\\\"\"\n");
         let parsed: toml::Table = super::set_in("", "relay", "a\\b\"c").parse().unwrap();
         assert_eq!(parsed["relay"].as_str(), Some("a\\b\"c"));
+    }
+
+    #[test]
+    fn set_raw_edits_tables() {
+        let t = "model = \"a\"\n\n[sandbox]\nmode = \"on\"\n\n[routing]\nask_model = \"x\"\n";
+        let out = super::set_in_table(t, Some("sandbox"), "network", "\"open\"");
+        assert_eq!(out, "model = \"a\"\n\n[sandbox]\nmode = \"on\"\nnetwork = \"open\"\n\n[routing]\nask_model = \"x\"\n");
+        let out = super::set_in_table(t, Some("sandbox"), "mode", "\"off\"");
+        assert!(out.contains("[sandbox]\nmode = \"off\"\n"));
+        let out = super::set_in_table(t, Some("routing"), "ask_model", "");
+        assert_eq!(out.parse::<toml::Table>().unwrap()["routing"].as_table().unwrap().len(), 0);
+        let out = super::set_in_table("model = \"a\"\n", Some("sandbox"), "writable", "[\"/tmp\"]");
+        assert_eq!(out, "model = \"a\"\n\n[sandbox]\nwritable = [\"/tmp\"]\n");
+        let out = super::set_in_table(t, None, "notify", "\"off\"");
+        assert!(out.starts_with("model = \"a\"\n\nnotify = \"off\"\n[sandbox]") || out.parse::<toml::Table>().unwrap()["notify"].as_str() == Some("off"));
+        assert_eq!(super::set_in_table(t, None, "model", ""), t.replacen("model = \"a\"\n", "", 1));
     }
 }

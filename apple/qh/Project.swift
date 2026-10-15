@@ -111,7 +111,7 @@ final class Project: ObservableObject, Identifiable {
     @Published var tree = FileNode(name: "", path: "", isDir: true)
     @Published var code: CodeTarget?
     /// main area: "chat", "split" (chat and code side by side) or "code" (tree and file)
-    @Published var layout = "chat"
+    @Published var layout = UserDefaults.standard.string(forKey: "defaultLayout") ?? "chat"
     /// files added or removed anywhere in the project refresh the tree
     private lazy var folderWatch = FolderWatch(path) { [weak self] in self?.loadFiles() }
     func loadFiles() { client.send(["type": "files", "tab": current?.name ?? "main"]) }

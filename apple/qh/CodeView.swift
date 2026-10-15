@@ -198,6 +198,7 @@ struct CodeView: View {
     @State private var watch: FileWatch?
     @State private var landed = ""          // the target we've already scrolled to
     @State private var width: CGFloat = 0   // widest line: a lazy stack only measures the rows on screen
+    @AppStorage("codeSize") private var codeSize = 12.0   // Settings → Appearance
 
     var body: some View {
         let abs = project.absolute(target.path)
@@ -229,7 +230,7 @@ struct CodeView: View {
                                     Text(Syntax.color(l, lang)).fixedSize(horizontal: true, vertical: false)
                                     Spacer(minLength: 0)
                                 }
-                                .font(Theme.mono(12))
+                                .font(Theme.mono(codeSize))
                                 .padding(.vertical, 1)
                                 .background(target.line == i + 1 ? Theme.accent.opacity(0.14) : .clear)
                                 .id(i + 1)
@@ -251,7 +252,7 @@ struct CodeView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.paper)
-        .task(id: "\(target.id)#\(reloads)") { load(abs) }
+        .task(id: "\(target.id)#\(reloads)#\(codeSize)") { load(abs) }
         .onAppear { watch = FileWatch(abs) { reloads += 1 } }
         .onChange(of: target.id) { _, _ in watch = FileWatch(project.absolute(target.path)) { reloads += 1 } }
     }
@@ -264,7 +265,7 @@ struct CodeView: View {
         let s = String(decoding: d, as: UTF8.self)
         lines = s.split(separator: "\n", omittingEmptySubsequences: false).map { String($0.replacingOccurrences(of: "\t", with: "    ")) }
         if lines.last == "" { lines.removeLast() }
-        let cw = ("M" as NSString).size(withAttributes: [.font: Theme.monoNS(12)]).width
+        let cw = ("M" as NSString).size(withAttributes: [.font: Theme.monoNS(codeSize)]).width
         width = 62 + CGFloat(lines.map(\.count).max() ?? 0) * cw + 24
     }
 }

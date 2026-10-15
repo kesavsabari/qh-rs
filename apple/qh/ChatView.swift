@@ -25,7 +25,7 @@ struct ProjectView: View {
                 chat
             }
         }
-        .background(Theme.paper)
+        .background(Theme.card)
         .sheet(item: $project.picker) { p in PickerSheet(picker: p, project: project) }
         .sheet(isPresented: $project.showReview) { ReviewView(project: project) }
         .sheet(isPresented: $project.showTasks) { TasksView(project: project) }
@@ -73,14 +73,10 @@ struct ChatTabBar: View {
                     Text("+").font(Theme.mono(14)).foregroundStyle(Theme.faint).frame(width: 30, height: 34).contentShape(Rectangle())
                 }
                 .buttonStyle(.hand).help("New tab (⌘T)")
+                Text(project.name).font(Theme.mono(12)).foregroundStyle(Theme.faint).lineLimit(1)
+                    .padding(.leading, 8).padding(.bottom, 9)
                 Spacer()
-                Picker("", selection: $project.layout) {
-                    Text("Chat").tag("chat")
-                    Text("Split").tag("split")
-                    Text("Code").tag("code")
-                }
-                .pickerStyle(.segmented).labelsHidden().fixedSize().controlSize(.small)
-                .padding(.bottom, 7).padding(.trailing, 12).help("Chat, chat and code side by side, or code (⌃1 ⌃2 ⌃3)")
+                LayoutSwitch(layout: $project.layout).padding(.bottom, 5).padding(.trailing, 12)
                 if !project.changes.isEmpty {
                     Button { project.loadChanges(); project.showReview = true } label: {
                         Text("\(project.changes.count) changed").font(Theme.mono(12)).foregroundStyle(Theme.accent)
@@ -97,9 +93,35 @@ struct ChatTabBar: View {
                 .buttonStyle(.hand).padding(.bottom, 9).padding(.trailing, 10).help("Connect models (⌘,)")
             }
             .padding(.horizontal, 12)
-            .frame(height: 42, alignment: .bottom)
-            Rectangle().fill(Theme.rule).frame(height: 1)
+            .frame(height: 44, alignment: .bottom)
         }
+    }
+}
+
+/// Chat | Split | Code, as a quiet pill group.
+struct LayoutSwitch: View {
+    @Binding var layout: String
+    var body: some View {
+        HStack(spacing: 2) {
+            seg("Chat", "chat")
+            seg("Split", "split")
+            seg("Code", "code")
+        }
+        .padding(2)
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Theme.tile))
+        .help("Chat, chat and code side by side, or code (⌃1 ⌃2 ⌃3)")
+    }
+
+    private func seg(_ label: String, _ tag: String) -> some View {
+        let on = layout == tag
+        return Button { layout = tag } label: {
+            Text(label).font(Theme.sans(12)).foregroundStyle(on ? Theme.ink : Theme.soft)
+                .padding(.horizontal, 10).frame(height: 24)
+                .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(on ? Theme.card : .clear)
+                    .shadow(color: .black.opacity(on ? 0.08 : 0), radius: 1, y: 0.5))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.hand)
     }
 }
 
@@ -120,8 +142,9 @@ struct ChatTabButton: View {
             }
         }
         .padding(.leading, 12).padding(.trailing, 8)
-        .frame(height: 34)
-        .overlay(alignment: .bottom) { Rectangle().fill(on ? Theme.accent : .clear).frame(height: 2) }
+        .frame(height: 28)
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(on ? Theme.tile : .clear))
+        .padding(.bottom, 5)
         .contentShape(Rectangle())
         .hand().onTapGesture { project.active = tab.name }
     }
@@ -212,7 +235,7 @@ struct ThreadView: View {
                     if tab.status == "working" { ThinkingRow(tab: tab) }
                     Color.clear.frame(height: 1).id("end")
                 }
-                .frame(maxWidth: 720, alignment: .leading)
+                .frame(maxWidth: 700, alignment: .leading)
                 .padding(.horizontal, 24).padding(.vertical, 20)
                 .frame(maxWidth: .infinity)
             }
@@ -241,12 +264,12 @@ struct ItemView: View, Equatable {
     var body: some View {
         switch item.kind {
         case .user(let t):
-            // yours: on the right, in a tinted bubble with an orange edge, a clear break before each turn
+            // yours: on the right, in a grey bubble, a clear break before each turn
             HStack {
                 Spacer(minLength: 80)
                 Text(t).font(Theme.sans(15)).foregroundStyle(Theme.ink).textSelection(.enabled)
                     .padding(.horizontal, 14).padding(.vertical, 10)
-                    .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Theme.ink.opacity(0.07)))
+                    .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Theme.tile))
             }
             .padding(.top, 18)
         case .reply(let t):
@@ -263,24 +286,27 @@ struct ItemView: View, Equatable {
     }
 }
 
+/// An edit, as a file card: the path, the counts, and Review (keep or undo per file there).
 struct DiffLine: View {
     let path: String, added: Int, removed: Int
     @EnvironmentObject var ws: Workspace
     var body: some View {
-        Button { ws.current?.loadChanges(); ws.current?.showReview = true } label: {
-            HStack(spacing: 10) {
-                Text("edited").foregroundStyle(Theme.faint)
-                Text(path).foregroundStyle(Theme.ink).underline(PathLinks.resolve(path) != nil, color: Theme.faint)
-                    .hand().onTapGesture { ws.current?.openFile(path) }
-                Text("+\(added)").foregroundStyle(Color(nsColor: .systemGreen))
-                Text("−\(removed)").foregroundStyle(Color(nsColor: .systemRed))
-                Text("review").foregroundStyle(Theme.faint)
+        HStack(spacing: 12) {
+            Image(systemName: "doc").font(.system(size: 12)).foregroundStyle(Theme.soft)
+            Text(path).font(Theme.mono(13)).foregroundStyle(Theme.ink).lineLimit(1).truncationMode(.middle)
+                .underline(PathLinks.resolve(path) != nil, color: Theme.faint)
+                .hand().onTapGesture { ws.current?.openFile(path) }
+            Spacer(minLength: 8)
+            Text("+\(added) −\(removed)").font(Theme.mono(12)).foregroundStyle(Theme.soft)
+            Button { ws.current?.loadChanges(); ws.current?.showReview = true } label: {
+                Text("Review").font(Theme.sans(12)).foregroundStyle(Theme.card)
+                    .padding(.horizontal, 12).frame(height: 28)
+                    .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(Theme.ink))
             }
-            .font(Theme.mono(12))
-            .contentShape(Rectangle())
+            .buttonStyle(.hand).help("Keep or undo this session's changes (⌘D)")
         }
-        .buttonStyle(.hand)
-        .help("Review this session's changes")
+        .padding(.horizontal, 12).padding(.vertical, 8)
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Theme.line, lineWidth: 1))
     }
 }
 
@@ -297,9 +323,9 @@ struct ToolCard: View {
         VStack(alignment: .leading, spacing: 6) {
             Button { open.toggle() } label: {
                 HStack(spacing: 8) {
-                    Text(ok == nil ? "◐" : ok! ? "✓" : "✕").foregroundStyle(ok == false ? Color(nsColor: .systemRed) : Theme.accent)
-                    Text(name).foregroundStyle(Theme.ink)
-                    Text(args).foregroundStyle(Theme.soft).lineLimit(1).truncationMode(.middle)
+                    Text(ok == nil ? "◐" : ok! ? "✓" : "✕").foregroundStyle(ok == nil ? Theme.accent : ok! ? Theme.faint : Color(nsColor: .systemRed))
+                    Text(name).foregroundStyle(Theme.soft)
+                    Text(args).foregroundStyle(Theme.faint).lineLimit(1).truncationMode(.middle)
                         .underline(PathLinks.resolve(args) != nil, color: Theme.faint)
                         .hand().onTapGesture { if PathLinks.resolve(args) != nil { ws.current?.openFile(args) } else { open.toggle() } }
                     Spacer(minLength: 0)
@@ -321,9 +347,7 @@ struct ToolCard: View {
                 }
             }
         }
-        .padding(.horizontal, 12).padding(.vertical, 8)
-        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Theme.ink.opacity(0.03)))
-        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Theme.ink.opacity(0.08), lineWidth: 0.5))
+        .padding(.vertical, 1)
     }
 }
 
@@ -511,48 +535,65 @@ struct Thinking: View {
     }
 }
 
-/// A permission, inline above the composer: exactly what would run, and the three answers.
+/// A permission, inline above the composer: a grey card with exactly what would run and the
+/// three answers. Orange only when it crosses a safety line.
 struct AskCard: View {
     let ask: Ask
     @ObservedObject var project: Project
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("qh wants to run").foregroundStyle(Theme.soft)
-                Text(ask.tool).foregroundStyle(Theme.ink)
-                if ask.guarded { Text("· crosses a safety line").foregroundStyle(Theme.accent) }
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text("Run \(ask.tool)?").font(Theme.sans(14, medium: true)).foregroundStyle(Theme.ink)
+                if ask.guarded { Text("crosses a safety line").font(Theme.mono(12)).foregroundStyle(Theme.accent) }
             }
-            .font(Theme.mono(12))
             ScrollView {
-                Text(ask.detail).font(Theme.mono(12)).foregroundStyle(Theme.ink).textSelection(.enabled)
+                Text(ask.detail).font(Theme.mono(12.5)).foregroundStyle(Theme.soft).textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             .frame(maxHeight: 220)
-            .padding(10)
-            .background(RoundedRectangle(cornerRadius: 6).fill(Theme.side))
+            .fixedSize(horizontal: false, vertical: true)
             if !ask.warn.isEmpty { Text(ask.warn).font(Theme.mono(11.5)).foregroundStyle(Theme.accent) }
-            HStack(spacing: 10) {
-                Button("Allow") { project.answer(ask, "yes") }.keyboardShortcut(.return, modifiers: .command)
-                if !ask.always.isEmpty {
-                    Button("Always allow \(ask.always)") { project.answer(ask, "always") }
+            HStack(spacing: 6) {
+                AskButton(title: "Allow once", key: "⌘⏎", fill: Theme.ink, text: Theme.card) { project.answer(ask, "yes") }
+                    .keyboardShortcut(.return, modifiers: .command)
+                if !ask.always.isEmpty && !ask.guarded {
+                    AskButton(title: "Always for \(ask.always)", fill: Theme.card, text: Theme.ink) { project.answer(ask, "always") }
                 }
-                Button("Deny") { project.answer(ask, "no") }.keyboardShortcut(.delete, modifiers: .command)
-                Spacer()
-                Text("⌘⏎ allow · ⌘⌫ deny").font(Theme.mono(11)).foregroundStyle(Theme.faint)
+                AskButton(title: "Deny", key: "⌘⌫", fill: .clear, text: Theme.soft) { project.answer(ask, "no") }
+                    .keyboardShortcut(.delete, modifiers: .command)
+                Spacer(minLength: 0)
             }
-            .font(Theme.mono(12))
         }
         .padding(14)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.paper))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.accent.opacity(0.7)))
-        .frame(maxWidth: 820)
-        .padding(.horizontal, 28).padding(.bottom, 10)
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Theme.tile))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(ask.guarded ? Theme.accent.opacity(0.7) : .clear))
+        .frame(maxWidth: 700)
+        .padding(.horizontal, 24).padding(.bottom, 10)
     }
 }
 
-/// ⏎ sends, ⇧⏎ new line, Esc stops a running turn. `/` offers commands, `@` project files,
-/// ⌘V or a drop attaches images. When a command asks for an API key the field masks it.
+struct AskButton: View {
+    let title: String
+    var key = ""
+    let fill: SwiftUI.Color
+    let text: SwiftUI.Color
+    let action: () -> Void
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Text(title).lineLimit(1)
+                if !key.isEmpty { Text(key).font(Theme.mono(11)).opacity(0.6) }
+            }
+            .font(Theme.sans(13)).foregroundStyle(text)
+            .padding(.horizontal, 14).frame(height: 32)
+            .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(fill))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.hand)
+    }
+}
+
 struct Composer: View {
     @ObservedObject var project: Project
     @ObservedObject var tab: ChatTab
@@ -613,7 +654,7 @@ struct Composer: View {
                     if let p = project.secret {
                         SecureField("paste your \(p) API key, ⏎ to save", text: $text).onSubmit(send)
                     } else {
-                        TextField(tab.busy ? "qh is working — Esc to stop, or type to queue" : "Message qh   / commands   @ files",
+                        TextField(tab.busy ? "qh is working — Esc to stop, or type to queue" : "Ask anything · / commands · @ files",
                                   text: $text, axis: .vertical)
                             .lineLimit(1...10)
                     }
@@ -643,6 +684,8 @@ struct Composer: View {
                 }
                 .onChange(of: text) { _, _ in sel = 0 }
                 HStack(spacing: 14) {
+                    Button { attachPanel() } label: { Image(systemName: "plus").font(.system(size: 13)).foregroundStyle(Theme.soft).frame(width: 24, height: 24) }
+                        .buttonStyle(.hand).help("Attach an image (or paste / drop one)").accessibilityLabel("Attach")
                     Button { project.prompt("/model") } label: { Text(tab.model).font(Theme.mono(11)).foregroundStyle(Theme.faint) }
                         .buttonStyle(.hand).help("Switch model (/model)")
                     EffortPicker(project: project, tab: tab)
@@ -650,22 +693,25 @@ struct Composer: View {
                     if tab.tokens >= 1000 { Text("\(tab.tokens / 1000)k tokens").font(Theme.mono(11)).foregroundStyle(Theme.faint) }
                     if let c = tab.cost, c > 0 { Text(String(format: "$%.3f", c)).font(Theme.mono(11)).foregroundStyle(Theme.faint) }
                     Spacer()
-                    Button { attachPanel() } label: { Text("+ image").font(Theme.mono(11)).foregroundStyle(Theme.faint) }
-                        .buttonStyle(.hand).help("Attach an image (or paste / drop one)")
                     if tab.busy {
                         Button("stop") { project.stop() }.buttonStyle(.hand).font(Theme.mono(12)).foregroundStyle(Theme.accent)
                     }
-                    Button("send ⏎") { send() }.buttonStyle(.hand).font(Theme.mono(12))
-                        .foregroundStyle(text.isEmpty && images.isEmpty ? Theme.faint : Theme.ink)
-                        .disabled(text.isEmpty && images.isEmpty)
+                    let empty = text.isEmpty && images.isEmpty
+                    Button { send() } label: {
+                        Image(systemName: "arrow.up").font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.card)
+                            .frame(width: 30, height: 30)
+                            .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(empty ? Theme.faint : Theme.ink))
+                    }
+                    .buttonStyle(.hand).disabled(empty).help("Send (⏎)").accessibilityLabel("Send")
                 }
             }
-            .padding(14)
-            .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Theme.side))
+            .padding(.horizontal, 14).padding(.top, 14).padding(.bottom, 8)
+            .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Theme.card)
+                .shadow(color: .black.opacity(0.06), radius: 9, y: 4))
             .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(dropping ? Theme.accent : focused ? Theme.accent.opacity(0.55) : Theme.ink.opacity(0.1), lineWidth: focused || dropping ? 1 : 0.5))
+                .stroke(dropping ? Theme.accent : Theme.line, lineWidth: 1))
         }
-        .frame(maxWidth: 720)
+        .frame(maxWidth: 700)
         .padding(.horizontal, 24).padding(.bottom, 18).padding(.top, 4)
         .onAppear { focused = true; if project.commands.isEmpty { project.loadCommands() } }
         .onChange(of: project.draft) { _, d in

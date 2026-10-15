@@ -58,7 +58,7 @@ struct TeamState {
     }
 }
 
-/// A page title bar inside the content column: title, one line under it, actions on the right.
+/// A page title inside the card: big title, one quiet line beside it, actions on the right. No rule.
 struct PageHeader<Trailing: View>: View {
     let title: String
     let subtitle: String
@@ -66,13 +66,12 @@ struct PageHeader<Trailing: View>: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
-                Text(title).font(Theme.sans(17, medium: true)).foregroundStyle(Theme.ink)
-                Text(subtitle).font(Theme.sans(12.5)).foregroundStyle(Theme.faint).lineLimit(1)
+                Text(title).font(Theme.sans(20, medium: true)).foregroundStyle(Theme.ink)
+                Text(subtitle).font(Theme.sans(13)).foregroundStyle(Theme.soft).lineLimit(1)
                 Spacer()
                 trailing
             }
-            .padding(.horizontal, 24).padding(.vertical, 14)
-            Rectangle().fill(Theme.ink.opacity(0.08)).frame(height: 0.5)
+            .padding(.horizontal, 24).padding(.top, 20).padding(.bottom, 8)
         }
     }
 }
@@ -335,8 +334,7 @@ struct RequestsPage: View {
                         }
                         .padding(16)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Theme.side))
-                        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Theme.ink.opacity(0.08), lineWidth: 0.5))
+                        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Theme.side))
                     }
                 }
                 .frame(maxWidth: 720)
@@ -358,10 +356,11 @@ struct PillButton: View {
     let action: () -> Void
     var body: some View {
         Button(action: action) {
-            Text(title).font(Theme.sans(12.5, medium: true))
-                .foregroundStyle(primary ? .white : Theme.ink)
-                .padding(.horizontal, 12).padding(.vertical, 6)
-                .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(primary ? Theme.accent : Theme.ink.opacity(0.07)))
+            // ink for the main answer, a raised card for the rest: orange stays for live things
+            Text(title).font(Theme.sans(13))
+                .foregroundStyle(primary ? Theme.paper : Theme.ink)
+                .padding(.horizontal, 14).frame(height: 32)
+                .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(primary ? Theme.ink : Theme.paper))
         }
         .buttonStyle(.hand)
     }

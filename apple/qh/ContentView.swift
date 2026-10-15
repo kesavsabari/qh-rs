@@ -12,8 +12,14 @@ struct ContentView: View {
             SidebarView()
                 .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 340)
         } detail: {
+            // Zen: no chrome around the work, just the chat floating as a card on the ground
             DetailView()
-                .background(Theme.paper)
+                .background(Theme.card, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(Theme.line, lineWidth: 0.5))
+                .padding([.leading, .trailing, .bottom], 8)
+                .background(Theme.ground)
+                .toolbarBackground(Theme.ground, for: .windowToolbar)
+                .toolbarBackground(.visible, for: .windowToolbar)
                 .inspector(isPresented: $ws.inspector) {
                     InspectorView().inspectorColumnWidth(min: 260, ideal: 300, max: 420)
                 }
@@ -21,7 +27,6 @@ struct ContentView: View {
         .navigationSplitViewStyle(.balanced)
         .sheet(isPresented: $ws.palette) { Palette().environmentObject(ws) }
         .toolbar {
-            TitleItem(title: ws.title)
             ToolbarItem(placement: .primaryAction) {
                 Button { withAnimation(.smooth(duration: 0.25)) { ws.toggleInspector() } } label: {
                     Image(systemName: "sidebar.right")
@@ -29,21 +34,6 @@ struct ContentView: View {
                 .help("Inspector (⌘⌥I)")
             }
         }
-    }
-}
-
-/// The window title in the toolbar, as plain text: macOS 26 would put it in a glass capsule.
-struct TitleItem: ToolbarContent {
-    let title: String
-    var body: some ToolbarContent {
-        if #available(macOS 26, *) {
-            ToolbarItem(placement: .principal) { label }.sharedBackgroundVisibility(.hidden)
-        } else {
-            ToolbarItem(placement: .principal) { label }
-        }
-    }
-    private var label: some View {
-        Text(title).font(Theme.sans(13, medium: true)).foregroundStyle(Theme.ink).lineLimit(1)
     }
 }
 
@@ -56,50 +46,41 @@ struct SidebarView: View {
         Group {
             if ws.space == "team" { TeamSidebar() } else { PersonalSidebar() }
         }
-        .safeAreaInset(edge: .top, spacing: 0) {
-            SpaceSwitch().padding(.horizontal, 12).padding(.top, 4).padding(.bottom, 8)
-        }
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            HStack {
-                Button(action: ws.pick) {
-                    Label("Open folder", systemImage: "plus").font(Theme.sans(12.5))
-                }
-                .buttonStyle(.hand).foregroundStyle(Theme.soft)
+            HStack(spacing: 4) {
+                SpaceSwitch()
                 Spacer()
-                Text(ws.version.replacingOccurrences(of: "qh ", with: "v")).font(Theme.mono(11)).foregroundStyle(Theme.faint)
+                Button(action: ws.pick) { Image(systemName: "folder.badge.plus").font(.system(size: 12.5)) }
+                    .buttonStyle(.hand).foregroundStyle(Theme.soft).help("Open folder (⌘O)")
                 SettingsLink { Image(systemName: "gearshape").font(.system(size: 12.5)) }
-                    .buttonStyle(.hand).foregroundStyle(Theme.soft).help("Settings (⌘,)")
+                    .buttonStyle(.hand).foregroundStyle(Theme.soft).help("Settings (⌘,) · \(ws.version)")
             }
             .padding(.horizontal, 14).padding(.vertical, 10)
         }
+        .background(Theme.ground)
     }
 }
 
-/// Personal ⇄ team, like Claude's Chat ⇄ Code switch.
+/// Personal ⇄ team as Zen's workspace dots: the current one is a bigger ink dot.
 struct SpaceSwitch: View {
     @EnvironmentObject var ws: Workspace
     var body: some View {
-        HStack(spacing: 2) {
-            seg("person", "Personal", "personal")
-            seg("person.2", "Team", "team")
+        HStack(spacing: 0) {
+            dot("Personal", "personal")
+            dot("Team", "team")
         }
-        .padding(2)
-        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Theme.ink.opacity(0.06)))
     }
 
-    private func seg(_ icon: String, _ label: String, _ space: String) -> some View {
+    private func dot(_ label: String, _ space: String) -> some View {
         let on = ws.space == space
         return Button { withAnimation(.snappy(duration: 0.2)) { ws.setSpace(space) } } label: {
-            Label(label, systemImage: icon)
-                .font(Theme.sans(12, medium: on))
-                .foregroundStyle(on ? Theme.ink : Theme.soft)
-                .frame(maxWidth: .infinity).frame(height: 24)
-                .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(on ? Theme.paper : .clear)
-                    .shadow(color: .black.opacity(on ? 0.12 : 0), radius: 1, y: 0.5))
-                .contentShape(Rectangle())
+            Circle().fill(on ? Theme.ink : Theme.soft.opacity(0.5))
+                .frame(width: on ? 8 : 6, height: on ? 8 : 6)
+                .frame(width: 26, height: 26).contentShape(Rectangle())
         }
         .buttonStyle(.hand)
         .help("\(label) projects (⌃Space)")
+        .accessibilityLabel("\(label) space")
     }
 }
 
@@ -114,7 +95,7 @@ struct TeamTabs: View {
             seg(unread > 0 ? "Messages \(unread)" : "Messages", true)
         }
         .padding(2)
-        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Theme.ink.opacity(0.06)))
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Theme.ink.opacity(0.07)))
     }
 
     private func seg(_ label: String, _ m: Bool) -> some View {
@@ -132,7 +113,7 @@ struct TeamTabs: View {
     }
 }
 
-/// A sidebar row: 28pt, neutral selection (never orange), 4% hover.
+/// A sidebar row: a Zen tab, the selected one a raised card pill (never orange), 4% hover.
 struct Row<Content: View>: View {
     let selected: Bool
     let action: () -> Void
@@ -149,10 +130,11 @@ struct Row<Content: View>: View {
         content
             .font(Theme.sans(13))
             .padding(.horizontal, 8)
-            .frame(minHeight: 28)
+            .frame(minHeight: 32)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(Theme.ink.opacity(selected ? 0.09 : over ? 0.04 : 0)))
+            .background(RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(selected ? Theme.card : Theme.ink.opacity(over ? 0.04 : 0))
+                .shadow(color: .black.opacity(selected ? 0.07 : 0), radius: 1.5, y: 1))
             .contentShape(Rectangle())
             .hand().onTapGesture(perform: action)
             .onHover { h in withAnimation(.easeOut(duration: 0.12)) { over = h } }
@@ -172,51 +154,76 @@ struct Header: View {
     }
 }
 
+/// Zen's layout: pinned projects as tiles on top (its Essentials), then the open project's
+/// sessions as vertical tabs.
 struct PersonalSidebar: View {
     @EnvironmentObject var ws: Workspace
 
     var body: some View {
         let mine = ws.recent.filter { ws.teamRepos[$0] == nil }
+        let cur = ws.personalProject
         // the header sits above the scroll view: a ScrollView first in the sidebar column drew nothing at all
-        VStack(spacing: 0) {
-            Header(text: "Projects").padding(.horizontal, 8)
-            ScrollView {
-                VStack(alignment: .leading, spacing: 1) {
-                    if mine.isEmpty {
-                        EmptyHint(icon: "folder", text: "Open a folder to start.", hint: "⌘O")
-                    }
-                    ForEach(mine, id: \.self) { p in ProjectBlock(path: p) }
+        VStack(alignment: .leading, spacing: 0) {
+            if mine.isEmpty {
+                EmptyHint(icon: "folder", text: "Open a folder to start.", hint: "⌘O").padding(.horizontal, 8)
+            } else {
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 3), spacing: 6) {
+                    ForEach(mine, id: \.self) { p in ProjectTile(path: p, on: cur?.path == p) }
                 }
-                .padding(.horizontal, 8)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 12).padding(.top, 4)
             }
+            if let cur {
+                Row(selected: false, action: { cur.newTab() }) {
+                    HStack(spacing: 10) {
+                        Image(systemName: "plus").font(.system(size: 12))
+                        Text("New chat")
+                        Spacer()
+                        Text("⌘T").font(Theme.mono(11))
+                    }
+                    .foregroundStyle(Theme.soft)
+                }
+                .padding(.horizontal, 8).padding(.top, 12)
+                Header(text: cur.name).padding(.horizontal, 8)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 2) { SessionRows(project: cur) }
+                        .padding(.horizontal, 8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            Spacer(minLength: 0)
         }
     }
 }
 
-/// A project row with its sessions under it (when it's open), newest first.
-struct ProjectBlock: View {
+/// An Essentials tile: two letters of the project, raised and outlined when it's the one open.
+struct ProjectTile: View {
     @EnvironmentObject var ws: Workspace
     let path: String
+    let on: Bool
+    @State private var over = false
 
     var body: some View {
         let live = ws.projects.first { $0.path == path }
-        VStack(alignment: .leading, spacing: 1) {
-            Row(selected: ws.active == path && live == nil, action: { ws.open(path) }) {
-                HStack(spacing: 8) {
-                    Image(systemName: live == nil ? "folder" : "folder.fill").font(.system(size: 12)).foregroundStyle(Theme.soft)
-                    Text((path as NSString).lastPathComponent).font(Theme.sans(13, medium: true)).foregroundStyle(Theme.ink).lineLimit(1)
-                    Spacer(minLength: 4)
-                    if let live { LiveDot(project: live) }
-                }
-            }
-            .contextMenu {
-                Button("Show in Finder") { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: path) }
-                if let live { Button("Stop qh here") { ws.close(live) } }
-                Button("Remove from list") { ws.forget(path) }
-            }
-            .help(path)
-            if let live { SessionRows(project: live) }
+        let name = (path as NSString).lastPathComponent
+        Button { ws.open(path) } label: {
+            Text(name.prefix(2).lowercased())
+                .font(Theme.sans(13, medium: true))
+                .foregroundStyle(on ? Theme.ink : Theme.soft)
+                .frame(maxWidth: .infinity).frame(height: 44)
+                .background(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(on ? Theme.card : over ? Theme.hover : Theme.tile))
+                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(on ? Theme.ink : .clear, lineWidth: 1.5))
+                .overlay(alignment: .topTrailing) { if let live { LiveDot(project: live).padding(6) } }
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.hand)
+        .onHover { h in withAnimation(.easeOut(duration: 0.12)) { over = h } }
+        .help(Workspace.short(path))
+        .accessibilityLabel(name)
+        .contextMenu {
+            Button("Show in Finder") { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: path) }
+            if let live { Button("Stop qh here") { ws.close(live) } }
+            Button("Remove from list") { ws.forget(path) }
         }
     }
 }
@@ -244,7 +251,6 @@ struct SessionRows: View {
                     Spacer(minLength: 4)
                     Text(Sessions.ago(s.when)).font(Theme.mono(10.5)).foregroundStyle(Theme.faint)
                 }
-                .padding(.leading, 12)
             }
             .help("\(s.messages) messages · \(s.id)")
             .contextMenu { Button("Delete Session…", role: .destructive) { deleting = s } }
@@ -259,7 +265,7 @@ struct SessionRows: View {
             }
         if project.sessions.count > 8 {
             Button(all ? "Show fewer" : "Show all \(project.sessions.count)") { all.toggle() }
-                .buttonStyle(.hand).font(Theme.sans(11.5)).foregroundStyle(Theme.faint).padding(.leading, 28).padding(.vertical, 4)
+                .buttonStyle(.hand).font(Theme.sans(11.5)).foregroundStyle(Theme.faint).padding(.leading, 21).padding(.vertical, 4)
         }
     }
 }
@@ -283,28 +289,11 @@ struct TeamSidebar: View {
         let cur = ws.teamProject.flatMap { p in teams.contains(p) ? p : nil } ?? teams.first
         VStack(spacing: 0) {
             if let cur {
-                Menu {
-                    ForEach(teams, id: \.self) { p in
-                        Button(ws.teamRepos[p] ?? p) { ws.open(p) }
-                    }
-                } label: {
-                    HStack(spacing: 8) {
-                        RoundedRectangle(cornerRadius: 5, style: .continuous).fill(Theme.accent)
-                            .frame(width: 22, height: 22)
-                            .overlay(Text(String((cur as NSString).lastPathComponent.prefix(1)).uppercased())
-                                .font(Theme.sans(11, medium: true)).foregroundStyle(.white))
-                        VStack(alignment: .leading, spacing: 0) {
-                            Text((cur as NSString).lastPathComponent).font(Theme.sans(13, medium: true)).foregroundStyle(Theme.ink)
-                            Text(ws.teamRepos[cur] ?? "").font(Theme.mono(10.5)).foregroundStyle(Theme.faint)
-                        }
-                        Spacer()
-                        Image(systemName: "chevron.up.chevron.down").font(.system(size: 10)).foregroundStyle(Theme.faint)
-                    }
-                    .padding(.horizontal, 8).padding(.vertical, 6)
-                    .contentShape(Rectangle())
+                // team projects as Essentials tiles, like the personal space
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 3), spacing: 6) {
+                    ForEach(teams, id: \.self) { p in ProjectTile(path: p, on: p == cur).help(ws.teamRepos[p] ?? p) }
                 }
-                .menuStyle(.button).buttonStyle(.hand).menuIndicator(.hidden)
-                .padding(.horizontal, 8)
+                .padding(.horizontal, 12).padding(.top, 4).padding(.bottom, 6)
                 if let p = ws.projects.first(where: { $0.path == cur }) {
                     TeamNav(project: p)
                 } else {
@@ -489,7 +478,7 @@ struct Empty: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Mark(size: 150)
+            Mark(size: 96)
             Text(ws.space == "team"
                  ? "Your team's agents ask each other, claim files, and see who's changing what, over qh-link."
                  : "Open a project folder and qh starts there: sessions, the sandbox, every command.")
@@ -502,10 +491,24 @@ struct Empty: View {
             }
             .buttonStyle(.hand)
             Text("⌘O").font(Theme.mono(11)).foregroundStyle(Theme.faint).padding(.top, 10)
+            let recent = ws.recent.filter { (ws.teamRepos[$0] != nil) == (ws.space == "team") }.prefix(5)
+            if !recent.isEmpty {
+                Header(text: "Recent").padding(.top, 28)
+                ForEach(Array(recent), id: \.self) { p in
+                    Row(selected: false, action: { ws.open(p) }) {
+                        HStack(spacing: 12) {
+                            Text((p as NSString).lastPathComponent).font(Theme.sans(14, medium: true)).foregroundStyle(Theme.ink)
+                            Text(Workspace.short(p)).font(Theme.mono(12)).foregroundStyle(Theme.soft).lineLimit(1)
+                            Spacer()
+                        }
+                        .frame(height: 40)
+                    }
+                }
+            }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-        .padding(.horizontal, 72)
-        .background(Theme.paper)
+        .frame(maxWidth: 460, alignment: .leading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Theme.card)
     }
 }
 
@@ -532,7 +535,7 @@ struct Missing: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         .padding(.horizontal, 72)
-        .background(Theme.paper)
+        .background(Theme.card)
     }
 }
 

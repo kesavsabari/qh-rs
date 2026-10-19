@@ -1,0 +1,21 @@
+[package]
+name = "qh-app"
+version = "0.1.0"
+edition = "2021"
+description = "qh for Linux: a GTK4 + libadwaita client of qh serve"
+license = "MIT"
+
+[[bin]]
+name = "qh-app"
+path = "src/main.rs"
+
+[dependencies]
+adw = { version = "0.9.2", package = "libadwaita", features = ["v1_7"] }
+async-channel = "2.5.0"
+gtk = { version = "0.11.5", package = "gtk4", features = ["v4_18"] }
+serde_json = "1.0.154"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true

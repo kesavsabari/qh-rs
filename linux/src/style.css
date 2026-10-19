@@ -1,0 +1,72 @@
+/* The Zen layout (apple/qh/Theme.swift): a warm ground, the work floating on it as a card. */
+window.qh, window.qh.background { background: @ground; color: @ink; font-family: "Geist", sans-serif; font-size: 13px; }
+window.peek, window.peek.background { background: transparent; }
+.mono { font-family: "Geist Mono", monospace; }
+.medium { font-weight: 500; }
+.soft { color: @soft; }
+.faint { color: @faint; }
+.ink { color: @ink; }
+.accent { color: @accent; }
+.err { color: #d0473d; }
+
+button.plain { background: none; box-shadow: none; border: none; min-height: 0; min-width: 0; padding: 0; color: @soft; }
+button.plain:hover { color: @ink; }
+menubutton.plain > button { background: none; box-shadow: none; border: none; color: @soft; min-height: 28px; min-width: 30px; padding: 0; }
+
+/* sidebar */
+.sidebar { background: @ground; }
+.tile { background: @tile; border-radius: 10px; min-height: 44px; padding: 0 6px; color: @soft; font-size: 12px; box-shadow: none; border: none; }
+.tile:hover { background: @hover; }
+.tile.on { background: @card; color: @ink; font-weight: 500; box-shadow: 0 1px 3px alpha(black, 0.08); }
+.row { border-radius: 9px; min-height: 32px; padding: 0 8px; background: none; box-shadow: none; border: none; color: @ink; font-weight: 400; }
+.row:hover { background: alpha(@ink, 0.04); }
+.row.on { background: @card; box-shadow: 0 1px 1.5px alpha(black, 0.07); }
+.row label { font-size: 13px; }
+.header { font-size: 10.5px; font-weight: 500; letter-spacing: 0.4px; color: @faint; margin: 14px 8px 4px 8px; }
+.dot { min-width: 6px; min-height: 6px; border-radius: 99px; background: alpha(@soft, 0.5); }
+.dot.on { min-width: 8px; min-height: 8px; background: @ink; }
+
+/* the card */
+.card { background: @card; border-radius: 12px; border: 0.5px solid @line; margin: 8px 8px 8px 0; }
+.tabbar { min-height: 44px; padding: 0 12px; }
+.tab { border-radius: 9px 9px 0 0; padding: 0 12px; min-height: 34px; color: @soft; background: none; box-shadow: none; border: none; font-size: 12.5px; }
+.tab:hover { color: @ink; }
+.tab.on { color: @ink; background: @tile; font-weight: 500; }
+.seg-group { background: alpha(@ink, 0.07); border-radius: 8px; padding: 2px; }
+.seg { min-height: 22px; padding: 0 9px; border-radius: 6px; font-size: 12px; color: @soft; background: none; box-shadow: none; border: none; }
+.seg.on { background: @card; color: @ink; font-weight: 500; box-shadow: 0 0.5px 1px alpha(black, 0.12); }
+popover contents { background: @card; color: @ink; }
+
+/* thread */
+.thread { background: @card; }
+.user { background: @tile; border-radius: 12px; padding: 9px 13px; font-size: 14.5px; color: @ink; }
+.reply { font-size: 14.5px; color: @ink; }
+.toolline { font-family: "Geist Mono", monospace; font-size: 12px; color: @soft; }
+.greeting { font-size: 19px; color: @ink; }
+.starter { background: @tile; border-radius: 10px; min-height: 44px; padding: 0 14px; color: @soft; font-size: 13.5px; box-shadow: none; border: none; }
+.starter:hover { background: @hover; }
+.starter label { font-weight: 400; }
+
+/* composer */
+.composer { background: @card; border-radius: 14px; border: 1px solid @line; padding: 14px 14px 8px 14px; box-shadow: 0 4px 9px alpha(black, 0.06); }
+.composer textview, .composer textview text { background: transparent; color: @ink; font-size: 15px; }
+.placeholder { color: @faint; font-size: 15px; }
+.meta { font-size: 11.5px; color: @faint; }
+.send { min-width: 30px; min-height: 30px; padding: 0; border-radius: 9px; background: @ink; color: @card; box-shadow: none; border: none; }
+.send:disabled { background: @faint; color: @card; }
+
+/* window controls: quiet, only near the corner */
+.wctl { min-width: 22px; min-height: 22px; padding: 0; border-radius: 99px; background: alpha(@ink, 0.06); color: @soft; box-shadow: none; border: none; }
+.wctl:hover { background: alpha(@ink, 0.12); color: @ink; }
+
+/* setup */
+.title { font-size: 24px; font-weight: 500; color: @ink; }
+.source { border: 1px solid @rule; border-radius: 6px; padding: 10px 12px; }
+.small { font-size: 12px; }
+.field { background: @side; border-radius: 6px; padding: 6px 8px; border: none; box-shadow: none; color: @ink; }
+.model { border-radius: 5px; padding: 6px 10px; background: none; box-shadow: none; border: none; color: @ink; font-family: "Geist Mono", monospace; font-size: 12.5px; }
+.model:hover, .model.on { background: @hover; }
+
+/* peek */
+.peekcard { background: @card; border-radius: 14px; border: 1px solid @line; padding: 14px 16px; margin: 8px; box-shadow: 0 6px 18px alpha(black, 0.14); }
+.peekcard entry { background: transparent; border: none; box-shadow: none; outline: none; font-size: 16px; color: @ink; }

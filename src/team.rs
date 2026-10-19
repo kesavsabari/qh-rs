@@ -227,6 +227,12 @@ struct State {
     finished: std::sync::Arc<AtomicBool>,
 }
 
+/// Bumped whenever team state a client shows may have changed (board read, live line, chat,
+/// error), so `qh serve` can push the team room instead of being polled.
+static GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub fn bump() { GEN.fetch_add(1, Relaxed); }
+pub fn generation() -> u64 { GEN.load(Relaxed) }
+
 static STATES: Mutex<Option<HashMap<String, State>>> = Mutex::new(None);
 static CURRENT: Mutex<String> = Mutex::new(String::new());
 
@@ -862,7 +868,7 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks) -> Result<String, Strin
                         etag = tag;
                         if changed || !fetched {
                             match fetch_board(&root, &repo2, &tok) {
-                                Ok(list) => { fetched = true; absorb(&repo2, &root, &list, &mut shas, &secret, &tok, &hooks); (hooks.refresh)() }
+                                Ok(list) => { fetched = true; absorb(&repo2, &root, &list, &mut shas, &secret, &tok, &hooks); bump(); (hooks.refresh)() }
                                 Err(e) => set_error(&repo2, e),
                             }
                         }
@@ -905,6 +911,7 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks) -> Result<String, Strin
                 match live_rx.recv_timeout(left.min(Duration::from_millis(100))) {
                     Ok((from, bytes)) => {
                         take_live(&repo2, &root, &from, &bytes, &hooks);
+                        bump();
                         (hooks.refresh)();
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => if line.is_some() && pulse(&repo2) != live.pulse { break },
@@ -933,6 +940,7 @@ fn data_changed(repo: &str, a: &[(String, String)], b: &[(String, String)]) -> b
 
 fn set_error(repo: &str, e: String) {
     with(repo, |s| s.error = e);
+    bump();
 }
 
 /// Take in freshly fetched folders: our key if someone wrapped it for us (or left it under our
@@ -1204,6 +1212,7 @@ fn push_msg(s: &mut State, mut m: Msg) -> bool {
     s.msgs.insert(at, m);
     let n = s.msgs.len();
     if n > 1000 { s.msgs.drain(..n - 1000); }
+    bump();
     true
 }
 

@@ -18,6 +18,7 @@ fn connect(p: &Path) -> std::io::Result<UnixStream> { UnixStream::connect(p) }
 #[cfg(windows)]
 use winsock::{connect, UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -53,6 +54,8 @@ struct State {
     remote: Mutex<crate::ui::Remote>,
     confirms: Mutex<HashMap<u64, (String, Sender<Answer>)>>,
     next: AtomicU64,
+    /// the channel last asked for; None until some client asks for the team room (then pushed)
+    team_chan: Mutex<Option<String>>,
 }
 
 impl State {
@@ -185,7 +188,30 @@ fn team_state(chan: Option<&str>) -> Value {
     crate::team::channel_read(chan);
     json!({"type": "team", "running": true, "me": crate::team::me(), "repo": crate::team::repo(),
            "status": crate::team::status_line(), "people": people, "channels": channels, "waiting": waiting,
-           "activity": activity, "chan": chan, "messages": msgs, "agents": agents})
+           "activity": activity, "chan": chan, "messages": msgs, "agents": agents, "team_push": true})
+}
+
+/// Debounce for pushed team updates: send when the generation moved and the last push is at
+/// least `gap` old, so a burst of changes goes out as one update.
+fn push_due(seen: u64, now_gen: u64, since_last: Duration, gap: Duration) -> bool {
+    now_gen != seen && since_last >= gap
+}
+
+/// Push the team room to every client when team state changes (after a client first asked).
+fn team_pusher(st: Arc<State>) {
+    const GAP: Duration = Duration::from_millis(250);
+    let mut seen = crate::team::generation();
+    let mut last = Instant::now() - GAP;
+    loop {
+        std::thread::sleep(GAP);
+        let g = crate::team::generation();
+        if !push_due(seen, g, last.elapsed(), GAP) { continue }
+        seen = g;
+        let Some(chan) = lock(&st.team_chan).clone() else { continue };
+        if lock(&st.clients).is_empty() { continue }
+        st.broadcast(&team_state(Some(&chan)));
+        last = Instant::now();
+    }
 }
 
 /// The project's files for the app's tree and @ picker, relative and sorted: git's view (tracked plus
@@ -297,11 +323,16 @@ fn command(hub: &Arc<Hub>, st: &Arc<State>, v: &Value) -> Option<String> {
             st.broadcast(&h);
             st.broadcast(&json!({"type": "active", "tab": name}));
         }
-        "team" => st.broadcast(&team_state(v["chan"].as_str())),
+        "team" => {
+            let chan = v["chan"].as_str().unwrap_or("#team").to_string();
+            st.broadcast(&team_state(Some(&chan)));
+            *lock(&st.team_chan) = Some(chan);
+        }
         "team_send" => {
             let (chan, text) = (v["chan"].as_str().unwrap_or("#team"), v["text"].as_str().unwrap_or(""));
             if let Err(e) = crate::team::channel_send(chan, text) { return Some(e) }
             st.broadcast(&team_state(Some(chan)));
+            *lock(&st.team_chan) = Some(chan.to_string());
         }
         "team_transcript" => {
             let (login, session) = (v["login"].as_str().unwrap_or(""), v["session"].as_str().unwrap_or(""));
@@ -494,7 +525,8 @@ pub fn run(hub: Arc<Hub>, rx: Receiver<crate::ui::Ui>) -> i32 {
     // the app reads this line to know where to connect
     println!("{}", json!({"type": "listening", "socket": sock, "token_file": tok_path, "protocol": PROTOCOL, "pid": std::process::id()}));
     let _ = std::io::stdout().flush();
-    let st = Arc::new(State { clients: Mutex::new(vec![]), remote: Mutex::new(crate::ui::Remote::new(hub.clone())), confirms: Mutex::new(HashMap::new()), next: AtomicU64::new(1) });
+    let st = Arc::new(State { clients: Mutex::new(vec![]), remote: Mutex::new(crate::ui::Remote::new(hub.clone())), confirms: Mutex::new(HashMap::new()), next: AtomicU64::new(1), team_chan: Mutex::new(None) });
+    { let s = st.clone(); std::thread::spawn(move || team_pusher(s)); }
     { let (h, s) = (hub.clone(), st.clone()); std::thread::spawn(move || pump(h, s, rx)); }
     match lock(&st.remote).start_team() {
         Some(Ok(s)) => eprintln!("team: {s}"),
@@ -581,6 +613,17 @@ mod winsock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn team_push_debounces() {
+        let gap = Duration::from_millis(250);
+        assert!(!push_due(3, 3, gap * 4, gap), "nothing changed");
+        assert!(!push_due(3, 9, Duration::from_millis(100), gap), "burst waits for the gap");
+        assert!(push_due(3, 9, gap, gap));
+        let g = crate::team::generation();
+        crate::team::bump();
+        assert!(crate::team::generation() > g);
+    }
 
     #[test]
     fn project_files_follow_gitignore() {

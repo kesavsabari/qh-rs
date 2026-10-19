@@ -1,0 +1,15 @@
+[package]
+name = "qh-desktop"
+version = "0.1.0"
+edition = "2021"
+description = "Linux desktop parts for qh: SNI tray, ask notifications, command palette"
+license = "MIT"
+publish = false
+
+[dependencies]
+gtk = { package = "gtk4", version = "0.11", features = ["v4_14"] }
+pango = { version = "0.22", features = ["v1_56"] }
+ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"] }
+
+[dev-dependencies]
+png = "0.17"

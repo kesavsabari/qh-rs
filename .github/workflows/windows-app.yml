@@ -1,0 +1,25 @@
+name: windows-app
+on:
+  push:
+    paths: ["windows/**", "apple/qh/Fonts/**", ".github/workflows/windows-app.yml"]
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with: { dotnet-version: "8.0.x" }
+      - run: dotnet build windows/qh.csproj -c Release -p:Platform=x64
+      # the app starts, draws its window and keeps running for a few seconds (no qh here: it shows the install hint)
+      - shell: pwsh
+        run: |
+          $exe = Get-ChildItem windows/bin -Recurse -Filter qh-app.exe | Select-Object -First 1
+          $p = Start-Process $exe.FullName -PassThru
+          Start-Sleep 8
+          if ($p.HasExited) { throw "qh-app exited early with $($p.ExitCode)" }
+          Stop-Process $p
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qh-app-win-x64
+          path: windows/bin/x64/Release/**/win-x64/

@@ -44,6 +44,13 @@ sealed class Project
     public List<Ask> Asks = [];
     public List<(string Cmd, string About)> Commands = [];
     public List<string> Files = [];
+    // W3: review, checkpoints, code
+    public List<(string Path, string Before, string After)> Changes = [];
+    public List<(int Turn, string Prompt, List<string> Files)> Checkpoints = [];
+    public string Layout = "chat";          // chat | split | code
+    public string? Page;                    // null = thread, "review", "history"
+    public (string Path, int? Line, string Text)? Code;
+    public string Draft = "";               // a rewind puts the prompt back here
     // setup screen
     public bool ShowSetup;
     public List<Source> Sources = [];
@@ -88,6 +95,8 @@ sealed class Project
                 if ((bool?)e["needs_setup"] == true) { ShowSetup = true; LoadSetup(); }
                 Send("commands");
                 Send("files");
+                Send("changes");
+                Send("checkpoints");
                 break;
             case "tabs":
                 Mode = (string?)e["mode"] ?? Mode;
@@ -124,6 +133,7 @@ sealed class Project
             }
             case "diff":
                 Add(TabNamed(tabName), new Item { K = Item.Kind.Diff, Text = (string?)e["path"] ?? "", Added = (int?)e["added"] ?? 0, Removed = (int?)e["removed"] ?? 0 });
+                Send("changes");
                 return;
             case "notice":
             case "compact":
@@ -137,6 +147,7 @@ sealed class Project
                 break;
             case "turn_done":
                 TabNamed(tabName).Tokens = (int?)e["tokens"] ?? 0;
+                Send("checkpoints");
                 break;
             case "confirm":
                 Asks.Add(new Ask((long?)e["id"] ?? -1, tabName ?? "", (string?)e["tool"] ?? "", Detail(e["args"]),
@@ -144,6 +155,20 @@ sealed class Project
                 break;
             case "confirm_closed":
                 Asks.RemoveAll(a => a.Id == ((long?)e["id"] ?? -1));
+                break;
+            case "changes":
+                Changes = e["files"]?.AsArray().Select(f => ((string?)f!["path"] ?? "", (string?)f["before"] ?? "", (string?)f["after"] ?? "")).ToList() ?? [];
+                break;
+            case "checkpoints":
+                Checkpoints = e["items"]?.AsArray().Select(c => ((int?)c!["turn"] ?? 0, (string?)c["prompt"] ?? "",
+                    c["files"]?.AsArray().Select(f => (string?)f ?? "").ToList() ?? [])).ToList() ?? [];
+                break;
+            case "history":
+                Fill(e);
+                break;
+            case "rewound":
+                Draft = (string?)e["prompt"] ?? "";
+                Add(TabNamed(tabName), new Item { K = Item.Kind.Notice, Text = $"rewound to before message {(int?)e["turn"] + 1}" });
                 break;
             case "commands":
                 Commands = e["commands"]?.AsArray().Where(c => c?["sub"] == null)
@@ -259,6 +284,26 @@ sealed class Project
         Changed?.Invoke();
     }
     public void NewTab() => Send("new_tab");
+    public void Accept(string path) => Send("accept", new JsonObject { ["path"] = path });
+    public void Reject(string path) => Send("reject", new JsonObject { ["path"] = path });
+    public void Rewind(int turn, bool chat) => Send("rewind", new JsonObject { ["turn"] = turn, ["chat"] = chat });
+    public void LoadChanges() => Send("changes");
+    public void LoadCheckpoints() => Send("checkpoints");
+
+    /// A path from the thread or the tree: read it here (the app sits on the same disk) and show it.
+    public bool OpenFile(string rel, int? line = null)
+    {
+        var colon = rel.LastIndexOf(':');
+        if (line == null && colon > 1 && int.TryParse(rel[(colon + 1)..], out var n)) { line = n; rel = rel[..colon]; }
+        var full = System.IO.Path.GetFullPath(System.IO.Path.Combine(Path, rel));
+        if (!full.StartsWith(Path, StringComparison.OrdinalIgnoreCase) || !File.Exists(full)) return false;
+        string text;
+        try { text = new FileInfo(full).Length > 2_000_000 ? "(file too big to show)" : File.ReadAllText(full); } catch (Exception e) { text = e.Message; }
+        Code = (rel.Replace('\\', '/'), line, text);
+        if (Layout == "chat") Layout = "split";
+        Changed?.Invoke();
+        return true;
+    }
     public void Stop() => Send("stop");
     public void LoadSetup() { Send("setup_state"); Send("setup_models"); }
     public void ConnectKey(string provider, string key) { SetupBusy = true; SetupMessage = "checking the key…"; Send("setup_key", new JsonObject { ["provider"] = provider, ["key"] = key }); Changed?.Invoke(); }

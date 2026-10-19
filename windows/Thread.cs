@@ -13,6 +13,7 @@ sealed class ThreadView
     readonly Dictionary<Item, Border> drawn = [];
     readonly HashSet<Item> open = [];
     Tab? tab;
+    List<Item>? shown;
     Item? pending;
     readonly DispatcherTimer timer = new() { Interval = TimeSpan.FromMilliseconds(60) };
 
@@ -24,8 +25,9 @@ sealed class ThreadView
 
     public void Show(Tab t)
     {
-        if (tab == t && drawn.Count == t.Items.Count) return;
+        if (tab == t && shown == t.Items && drawn.Count == t.Items.Count) return;
         tab = t;
+        shown = t.Items;
         col.Children.Clear();
         drawn.Clear();
         foreach (var i in t.Items) Append(i);

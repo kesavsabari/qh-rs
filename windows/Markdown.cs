@@ -10,6 +10,10 @@ namespace Qh;
 /// `code`, **bold** and *italic*. Lean on purpose: a reply re-renders on every streamed chunk.
 static class Markdown
 {
+    /// set by the window: is this `code` a project file, and open it
+    public static Func<string, bool>? IsFile;
+    public static Action<string>? Open;
+
     public static StackPanel Render(string md)
     {
         var col = new StackPanel { Spacing = 10 };
@@ -95,7 +99,16 @@ static class Markdown
             if (s[i] == '`' && s.IndexOf('`', i + 1) is var e && e > i)
             {
                 Plain();
-                into.Add(new Run { Text = s[(i + 1)..e], FontFamily = Theme.Mono, FontSize = 13, Foreground = Theme.Accent });
+                var code = s[(i + 1)..e];
+                if (IsFile?.Invoke(code) == true)
+                {
+                    // a path: click to open it beside the chat
+                    var link = new Hyperlink { FontFamily = Theme.Mono, FontSize = 13, Foreground = Theme.Accent, UnderlineStyle = UnderlineStyle.None };
+                    link.Inlines.Add(new Run { Text = code });
+                    link.Click += (_, _) => Open?.Invoke(code);
+                    into.Add(link);
+                }
+                else into.Add(new Run { Text = code, FontFamily = Theme.Mono, FontSize = 13, Foreground = Theme.Accent });
                 i = e + 1;
             }
             else if (s.AsSpan(i).StartsWith("**") && s.IndexOf("**", i + 2) is var b && b > i)

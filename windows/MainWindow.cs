@@ -29,6 +29,7 @@ sealed class MainWindow : Window
     readonly Border suggestBox = new();
     readonly StackPanel tabRight = new() { Orientation = Orientation.Horizontal, Spacing = 14, HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 16, 0) };
     List<(string Insert, string Label, string About)> sugg = [];
+    string? reviewPick;
     int suggSel;
     readonly TextBox input = new();
     readonly TextBlock meta = new();
@@ -143,6 +144,13 @@ sealed class MainWindow : Window
         card.Children.Add(composer);
 
         Key(VirtualKey.T, () => ws.Current?.NewTab());
+        Key(VirtualKey.Number1, () => { if (ws.Current is { } p) SetLayout(p, "chat"); });
+        Key(VirtualKey.Number2, () => { if (ws.Current is { } p) SetLayout(p, "split"); });
+        Key(VirtualKey.Number3, () => { if (ws.Current is { } p) SetLayout(p, "code"); });
+        Key(VirtualKey.D, () => { if (ws.Current is { } p) Page(p, "review"); });
+        // paths in replies open in the code view
+        Markdown.IsFile = s => ws.Current?.Files.Contains(s.Split(':')[0].Replace('\\', '/')) == true;
+        Markdown.Open = s => ws.Current?.OpenFile(s);
         Key(VirtualKey.O, Pick);
         // the first waiting permission: Ctrl+Enter allows once, Ctrl+Backspace denies
         Key(VirtualKey.Enter, () => { if (FirstAsk() is { } a) ws.Current!.Answer(a, "yes"); });
@@ -275,6 +283,10 @@ sealed class MainWindow : Window
         tabBar.Children.Clear();
         tabRight.Children.Clear();
         if (ws.Current is not { } p) return;
+        if (p.Changes.Count > 0)
+            tabRight.Children.Add(Plain(Label($"{p.Changes.Count} changed", 12.5, Theme.Accent), () => Page(p, "review"), "Review changes (Ctrl+D)"));
+        tabRight.Children.Add(Plain(Label("history", 12.5, p.Page == "history" ? Theme.Ink : Theme.Soft), () => Page(p, "history"), "Checkpoints"));
+        tabRight.Children.Add(LayoutSwitch(p));
         var models = Plain(Label("models", 12.5, p.ShowSetup ? Theme.Ink : Theme.Soft), () => { p.ShowSetup = !p.ShowSetup; if (p.ShowSetup) p.LoadSetup(); Render(); }, "Connect models");
         tabRight.Children.Add(models);
         foreach (var t in p.Tabs)
@@ -293,10 +305,61 @@ sealed class MainWindow : Window
         tabBar.Children.Add(plus);
     }
 
+    void Page(Project p, string page)
+    {
+        p.Page = p.Page == page ? null : page;
+        if (p.Page == "review") p.LoadChanges();
+        if (p.Page == "history") p.LoadCheckpoints();
+        Render();
+    }
+
+    /// Chat | Split | Code, as a quiet segmented control (Ctrl+1–3).
+    FrameworkElement LayoutSwitch(Project p)
+    {
+        var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 2, Padding = new Thickness(2) };
+        foreach (var (label, tag) in new[] { ("Chat", "chat"), ("Split", "split"), ("Code", "code") })
+        {
+            var on = p.Layout == tag && p.Page == null;
+            var b = new Border { CornerRadius = new CornerRadius(6), Padding = new Thickness(10, 3, 10, 3), Background = on ? Theme.Card : null, Child = Label(label, 12, on ? Theme.Ink : Theme.Soft) };
+            b.Tapped += (_, _) => SetLayout(p, tag);
+            row.Children.Add(b);
+        }
+        return new Border { Background = Theme.Tile, CornerRadius = new CornerRadius(8), Child = row };
+    }
+
+    void SetLayout(Project p, string tag) { p.Layout = tag; p.Page = null; p.ShowSetup = false; Render(); }
+
+    /// the thread's one view can only sit in one place: lift it out before reusing it
+    void Detach()
+    {
+        thread.Content = null;
+        if (threadView.View.Parent is Panel pp) pp.Children.Remove(threadView.View);
+    }
+
+    static Grid Columns(UIElement left, UIElement right, double leftWidth)
+    {
+        var g = new Grid();
+        g.ColumnDefinitions.Add(new ColumnDefinition { Width = leftWidth > 0 ? new GridLength(leftWidth) : new GridLength(1, GridUnitType.Star) });
+        g.ColumnDefinitions.Add(new ColumnDefinition());
+        g.Children.Add(left);
+        var line = new Border { BorderBrush = Theme.Line, BorderThickness = new Thickness(1, 0, 0, 0), Child = right };
+        Grid.SetColumn(line, 1);
+        g.Children.Add(line);
+        return g;
+    }
+
     void RenderThread()
     {
         var p = ws.Current;
+        Detach();
         if (p is { ShowSetup: true, State: "ready" }) { thread.Content = Cards.Setup(p); return; }
+        if (p is { State: "ready" })
+        {
+            if (p.Draft.Length > 0) { input.Text = p.Draft; input.SelectionStart = input.Text.Length; p.Draft = ""; }
+            if (p.Page == "review") { thread.Content = CodeViews.Review(p, reviewPick, path => { reviewPick = path; Render(); }); return; }
+            if (p.Page == "history") { thread.Content = CodeViews.History(p); return; }
+            if (p.Layout == "code") { thread.Content = Columns(CodeViews.Tree(p), CodeViews.Code(p), 260); return; }
+        }
         string? hint = ws.Qh == null ? "qh isn't installed. Install it with install.ps1, then reopen."
             : p == null ? "Open a folder to start."
             : p.State.StartsWith("closed") ? p.State[8..]
@@ -312,7 +375,8 @@ sealed class MainWindow : Window
             return;
         }
         threadView.Show(p!.Current!);
-        thread.Content = threadView.View;
+        // Split shows the code beside the chat once a file is open; until then, just the chat
+        thread.Content = p.Layout == "split" && p.Code != null ? Columns(threadView.View, CodeViews.Code(p), 0) : threadView.View;
     }
 
     // MARK: composer suggestions: / commands and @ files, like the Mac's popup
@@ -398,6 +462,7 @@ sealed class MainWindow : Window
             else if (sugg.Count > 0 && (e.Key == VirtualKey.Tab || (e.Key == VirtualKey.Enter && !shift)))
             { e.Handled = true; Accept(); }
             else if (e.Key == VirtualKey.Enter && !shift) { e.Handled = true; Send(); }
+            else if (e.Key == VirtualKey.Escape && ws.Current is { Page: not null } pg) { e.Handled = true; pg.Page = null; Render(); }
             else if (e.Key == VirtualKey.Escape) { e.Handled = true; ws.Current?.Stop(); }
         };
 

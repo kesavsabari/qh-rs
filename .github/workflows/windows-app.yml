@@ -109,6 +109,7 @@ jobs:
           [System.Windows.Forms.SendKeys]::SendWait("^1")
           Start-Sleep 1
           Shot "12-empty-sessions"
+          Get-ChildItem $sd -Filter *.jsonl | ForEach-Object { $t = (Get-Content $_.FullName -TotalCount 2) -join " | "; "SESS " + $_.Name + " :: " + $t.Substring(0, [Math]::Min(200, $t.Length)) }
           [System.Windows.Forms.SendKeys]::SendWait("^k")
           Start-Sleep 1
           [System.Windows.Forms.SendKeys]::SendWait("activity log")

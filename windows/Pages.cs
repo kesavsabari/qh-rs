@@ -11,24 +11,9 @@ namespace Qh;
 /// The ⋯ menu's pages: project memory (NOTES.md) and the activity log. Like apple/qh/CoreUI.swift.
 static class Pages
 {
-    static readonly TextBox notes = new()
-    {
-        AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, FontSize = 12.5, MinHeight = 260, MaxHeight = 520,
-        PlaceholderText = "Nothing remembered yet. What qh should know about this project, one note per line.",
-    };
     static int shownVersion = -1;
     static Project? shownFor;
-    static Action? save;
-
-    static Pages()
-    {
-        ScrollViewer.SetVerticalScrollBarVisibility(notes, ScrollBarVisibility.Auto);
-        notes.KeyDown += (_, e) =>
-        {
-            if (e.Key == VirtualKey.S && InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Control).HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down))
-            { e.Handled = true; save?.Invoke(); }
-        };
-    }
+    static string draft = "";
 
     static StackPanel Column(string title, string about, Action close)
     {
@@ -58,12 +43,21 @@ static class Pages
 
     public static FrameworkElement Memory(Project p, Action close)
     {
-        // the box keeps what's being typed across redraws; a fresh "memory" from serve replaces it
-        if (shownVersion != p.MemoryVersion || shownFor != p) { notes.Text = p.MemoryText; shownVersion = p.MemoryVersion; shownFor = p; }
-        if (notes.Parent is Border old) old.Child = null;
-        notes.FontFamily = Theme.Mono;
-        notes.Foreground = Theme.Ink;
+        // what's being typed survives redraws; a fresh "memory" from serve replaces it
+        if (shownVersion != p.MemoryVersion || shownFor != p) { draft = p.MemoryText; shownVersion = p.MemoryVersion; shownFor = p; }
+        var notes = new TextBox
+        {
+            AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, FontSize = 12.5, MinHeight = 260, MaxHeight = 520, Text = draft,
+            FontFamily = Theme.Mono, PlaceholderText = "Nothing remembered yet. What qh should know about this project, one note per line.",
+        };
+        notes.TextChanged += (_, _) => draft = notes.Text;
+        notes.KeyDown += (_, e) =>
+        {
+            if (e.Key == VirtualKey.S && InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Control).HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down))
+            { e.Handled = true; save?.Invoke(); }
+        };
         var col = Column("Project memory", "What qh remembers about this project (NOTES.md). It reads this at the start of every chat.", close);
+        Action? save = null;
         var status = new TextBlock { FontFamily = Theme.Sans, FontSize = 12, Foreground = Theme.Faint, VerticalAlignment = VerticalAlignment.Center };
         save = () => { p.SaveMemory(notes.Text); status.Text = "saved"; };
         col.Children.Add(new TextBlock { Text = p.MemoryPath, FontFamily = Theme.Mono, FontSize = 11.5, Foreground = Theme.Faint, TextTrimming = TextTrimming.CharacterEllipsis });

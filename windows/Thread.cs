@@ -23,6 +23,9 @@ sealed class ThreadView
         timer.Tick += (_, _) => { timer.Stop(); if (pending != null) { Redraw(pending); pending = null; } };
     }
 
+    /// forget what's drawn (the theme changed): the next Show draws again
+    public void Reset() { tab = null; shown = null; }
+
     public void Show(Tab t)
     {
         if (tab == t && shown == t.Items && drawn.Count == t.Items.Count) return;
@@ -37,17 +40,37 @@ sealed class ThreadView
     public void Changed(Tab t, Item i, bool added)
     {
         if (t != tab) return;
-        if (added) { Append(i); Bottom(); return; }
+        if (added) { Enter(Append(i)); Bottom(); return; }
         // streamed text: coalesce chunks into one redraw
         if (i.K == Item.Kind.Reply) { pending = i; if (!timer.IsEnabled) timer.Start(); }
         else Redraw(i);
     }
 
-    void Append(Item i)
+    Border Append(Item i)
     {
         var holder = new Border { Child = Draw(i) };
         drawn[i] = holder;
         col.Children.Add(holder);
+        return holder;
+    }
+
+    /// a new item fades and slides up into place: two animations, 180 ms, nothing on a redraw
+    static void Enter(Border b)
+    {
+        var move = new TranslateTransform { Y = 8 };
+        b.RenderTransform = move;
+        b.Opacity = 0;
+        var ease = new Microsoft.UI.Xaml.Media.Animation.CubicEase { EasingMode = Microsoft.UI.Xaml.Media.Animation.EasingMode.EaseOut };
+        var dur = new Duration(TimeSpan.FromMilliseconds(180));
+        var fade = new Microsoft.UI.Xaml.Media.Animation.DoubleAnimation { From = 0, To = 1, Duration = dur, EasingFunction = ease };
+        var slide = new Microsoft.UI.Xaml.Media.Animation.DoubleAnimation { From = 8, To = 0, Duration = dur, EasingFunction = ease };
+        Microsoft.UI.Xaml.Media.Animation.Storyboard.SetTarget(fade, b);
+        Microsoft.UI.Xaml.Media.Animation.Storyboard.SetTargetProperty(fade, "Opacity");
+        Microsoft.UI.Xaml.Media.Animation.Storyboard.SetTarget(slide, move);
+        Microsoft.UI.Xaml.Media.Animation.Storyboard.SetTargetProperty(slide, "Y");
+        var sb = new Microsoft.UI.Xaml.Media.Animation.Storyboard { Children = { fade, slide } };
+        sb.Completed += (_, _) => { b.Opacity = 1; b.RenderTransform = null; };
+        sb.Begin();
     }
 
     void Redraw(Item i)

@@ -5,10 +5,11 @@ using Windows.UI;
 namespace Qh;
 
 /// The qh design, same values as apple/qh/Theme.swift: paper and ink, one signal orange, Geist.
-/// Light and dark follow Windows.
+/// Light and dark follow Windows unless Settings picks one (Force).
 static class Theme
 {
-    public static bool Dark => Application.Current.RequestedTheme == ApplicationTheme.Dark;
+    public static bool? Force;
+    public static bool Dark => Force ?? Application.Current.RequestedTheme == ApplicationTheme.Dark;
 
     static SolidColorBrush Dyn(uint light, uint dark) => new(Hex(Dark ? dark : light));
     public static Color Hex(uint h) => Color.FromArgb(0xFF, (byte)(h >> 16), (byte)(h >> 8), (byte)h);

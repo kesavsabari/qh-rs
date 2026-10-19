@@ -294,13 +294,17 @@ sealed class Project
         serve.Send(m);
     }
 
-    public void Prompt(string text)
+    /// images: base64 of the file bytes, what qh's own /image and Ctrl+V attach (serve's "images")
+    public void Prompt(string text, IReadOnlyList<string>? images = null)
     {
-        if (Current is not { } t || text.Trim().Length == 0) return;
+        var n = images?.Count ?? 0;
+        if (Current is not { } t || (text.Trim().Length == 0 && n == 0)) return;
         text = text.Trim();
         if (text.StartsWith('/')) Add(t, new Item { K = Item.Kind.Notice, Text = "› " + text });
-        else { Add(t, new Item { K = Item.Kind.User, Text = text }); t.Status = "working"; }
-        Send("prompt", new JsonObject { ["text"] = text });
+        else { Add(t, new Item { K = Item.Kind.User, Text = text.Length > 0 ? text + (n > 0 ? $"\n+ {n} image{(n > 1 ? "s" : "")}" : "") : $"+ {n} image{(n > 1 ? "s" : "")}" }); t.Status = "working"; }
+        var msg = new JsonObject { ["text"] = text };
+        if (n > 0) msg["images"] = new JsonArray(images!.Select(i => (JsonNode?)JsonValue.Create(i)).ToArray());
+        Send("prompt", msg);
         Changed?.Invoke();
     }
     public void Answer(Ask a, string choice)
@@ -334,6 +338,8 @@ sealed class Project
         return true;
     }
     public void Stop() => Send("stop");
+    public static readonly string[] Modes = ["ask", "auto-edit", "auto", "plan"];
+    public void SetMode(string mode) => Send("mode", new JsonObject { ["mode"] = mode });
     public void LoadSetup() { Send("setup_state"); Send("setup_models"); }
     public void ConnectKey(string provider, string key) { SetupBusy = true; SetupMessage = "checking the key…"; Send("setup_key", new JsonObject { ["provider"] = provider, ["key"] = key }); Changed?.Invoke(); }
     public void SignInChatGpt() { SetupBusy = true; SetupMessage = "opening the sign-in page…"; Send("setup_chatgpt"); Changed?.Invoke(); }
@@ -361,16 +367,29 @@ sealed class Workspace
     public Workspace(DispatcherQueue ui)
     {
         this.ui = ui;
-        try { Recent = JsonSerializer.Deserialize<Settings>(File.ReadAllText(SettingsFile))?.Projects ?? []; } catch { }
+        try
+        {
+            var s = JsonSerializer.Deserialize<Settings>(File.ReadAllText(SettingsFile));
+            Recent = s?.Projects ?? [];
+            ThemePref = s?.Theme ?? "system";
+            DefaultLayout = s?.Layout ?? "chat";
+            Reopen = s?.Reopen ?? true;
+        }
+        catch { }
         Recent = Recent.Where(Directory.Exists).ToList();
-        if (Recent.FirstOrDefault() is { } last) Open(last);
+        if (Reopen && Recent.FirstOrDefault() is { } last) Open(last);
     }
 
-    record Settings(List<string> Projects);
+    // app settings (the gear): appearance, the layout new projects open in, reopen the last project
+    public string ThemePref = "system";     // system | light | dark
+    public string DefaultLayout = "chat";   // chat | split
+    public bool Reopen = true;
 
-    void Save()
+    record Settings(List<string> Projects, string? Theme = null, string? Layout = null, bool? Reopen = null);
+
+    public void Save()
     {
-        try { Directory.CreateDirectory(Dir); File.WriteAllText(SettingsFile, JsonSerializer.Serialize(new Settings(Recent))); } catch { }
+        try { Directory.CreateDirectory(Dir); File.WriteAllText(SettingsFile, JsonSerializer.Serialize(new Settings(Recent, ThemePref, DefaultLayout, Reopen))); } catch { }
     }
 
     public void Open(string path)
@@ -381,7 +400,7 @@ sealed class Workspace
         Current = Projects.FirstOrDefault(p => p.Path == path);
         if (Current == null && Qh != null)
         {
-            Current = new Project(path, Qh, ui);
+            Current = new Project(path, Qh, ui) { Layout = DefaultLayout };
             Current.Changed += () => Changed?.Invoke();
             Current.ItemChanged += (t, i, a) => ItemChanged?.Invoke(t, i, a);
             Current.AskArrived += (p, a) => AskArrived?.Invoke(p, a);

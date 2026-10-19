@@ -82,6 +82,25 @@ jobs:
           [System.Windows.Forms.SendKeys]::SendWait("{ESC}^+t")
           Start-Sleep 2
           Shot "8-team"
+          # back to personal, chat: the empty tab's starters; then settings, then dark from the palette
+          [System.Windows.Forms.SendKeys]::SendWait("^+t")
+          Start-Sleep 1
+          [System.Windows.Forms.SendKeys]::SendWait("^1")
+          Start-Sleep 1
+          Shot "11-empty"
+          [System.Windows.Forms.SendKeys]::SendWait("^,")
+          Start-Sleep 1
+          Shot "12-settings"
+          [System.Windows.Forms.SendKeys]::SendWait("^k")
+          Start-Sleep 1
+          [System.Windows.Forms.SendKeys]::SendWait("theme: dark")
+          Start-Sleep 1
+          [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
+          Start-Sleep 2
+          Shot "13-dark"
+          [System.Windows.Forms.SendKeys]::SendWait("{ESC}")
+          Start-Sleep 1
+          Shot "14-dark-chat"
           # lean check: what a low-end PC pays to keep it open
           $p.Refresh()
           $mb = [math]::Round($p.WorkingSet64 / 1MB)

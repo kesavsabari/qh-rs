@@ -15,7 +15,7 @@ namespace Qh;
 /// The window, the same Zen layout as apple/qh/ContentView.swift: a sidebar on the warm ground,
 /// the work floating on it as a card. No visible title bar: like Zen browser the caption buttons
 /// stay hidden until the pointer reaches the top-right corner; Snap Layouts still work there.
-sealed class MainWindow : Window
+sealed partial class MainWindow : Window
 {
     readonly Workspace ws;
     readonly Grid root = new();
@@ -65,6 +65,7 @@ sealed class MainWindow : Window
         // CI screenshots: fill the screen so the corner hover lands on the window
         if (Environment.GetEnvironmentVariable("QH_APP_MAXIMIZE") == "1" && AppWindow.Presenter is OverlappedPresenter op) op.Maximize();
         Chrome();
+        ThemeFlags(ws.ThemePref);
         Build();
         Render();
     }
@@ -162,17 +163,15 @@ sealed class MainWindow : Window
         side.RowDefinitions.Add(new RowDefinition());
         side.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         side.Children.Add(new ScrollViewer { Content = sidebar });
-        var bottom = SidebarBottom();
+        var bottom = bottomHolder;
+        bottom.Child = SidebarBottom();
         Grid.SetRow(bottom, 1);
         side.Children.Add(bottom);
         Grid.SetRow(side, 1);
         root.Children.Add(side);
 
-        var frame = new Border
-        {
-            Background = Theme.Card, BorderBrush = Theme.Line, BorderThickness = new Thickness(0.5),
-            CornerRadius = new CornerRadius(12), Margin = new Thickness(0, 0, 8, 8), Child = card,
-        };
+        frame.Background = Theme.Card; frame.BorderBrush = Theme.Line; frame.BorderThickness = new Thickness(0.5);
+        frame.CornerRadius = new CornerRadius(12); frame.Margin = new Thickness(0, 0, 8, 8); frame.Child = card;
         Grid.SetRow(frame, 1);
         Grid.SetColumn(frame, 1);
         root.Children.Add(frame);
@@ -203,6 +202,7 @@ sealed class MainWindow : Window
         Markdown.IsFile = s => ws.Current?.Files.Contains(s.Split(':')[0].Replace('\\', '/')) == true;
         Markdown.Open = s => ws.Current?.OpenFile(s);
         Key(VirtualKey.O, Pick);
+        Key((VirtualKey)188, ToggleSettings); // Ctrl+,
         // the first waiting permission: Ctrl+Enter allows once, Ctrl+Backspace denies
         Key(VirtualKey.Enter, () => { if (FirstAsk() is { } a) ws.Current!.Answer(a, "yes"); });
         Key(VirtualKey.Back, () => { if (FirstAsk() is { } a) ws.Current!.Answer(a, "no"); });
@@ -226,7 +226,7 @@ sealed class MainWindow : Window
         row.Children.Add(dots);
         var right = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, HorizontalAlignment = HorizontalAlignment.Right };
         right.Children.Add(Plain(Icon(""), Pick, "Open folder (Ctrl+O)"));
-        right.Children.Add(Plain(Icon(""), () => { }, "Settings"));
+        right.Children.Add(Plain(Icon(""), ToggleSettings, "Settings (Ctrl+,)"));
         row.Children.Add(right);
         return row;
     }
@@ -303,6 +303,7 @@ sealed class MainWindow : Window
                 HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(32, 56, 32, 0),
             };
             meta.Text = "";
+            metaButtons.Children.Clear();
             return;
         }
         sidebar.Children.Add(Label(p.TeamStatus.Length > 0 ? p.TeamStatus : p.Name, 12, Theme.Soft, new Thickness(16, 8, 16, 8)));
@@ -356,6 +357,7 @@ sealed class MainWindow : Window
         sv.Loaded += (_, _) => sv.ChangeView(null, sv.ScrollableHeight, null, true);
         thread.Content = sv;
         meta.Text = $"to {p.Chan}";
+        metaButtons.Children.Clear();
     }
 
     // MARK: Ctrl+K palette (apple/qh/Palette.swift)
@@ -377,7 +379,7 @@ sealed class MainWindow : Window
             else if (e.Key == VirtualKey.Enter) { e.Handled = true; RunPalette(paletteSel); }
             else if (e.Key == VirtualKey.Escape) { e.Handled = true; TogglePalette(); }
         };
-        palette.Children.Add(new Border
+        palette.Children.Add(paletteCard = new Border
         {
             Background = Theme.Card, BorderBrush = Theme.Line, BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(12),
             Width = 560, VerticalAlignment = VerticalAlignment.Top, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 90, 0, 0),
@@ -413,6 +415,8 @@ sealed class MainWindow : Window
             Act("Review changes", "Ctrl+D", () => Page(p, "review"));
             Act("Checkpoints", "", () => Page(p, "history"));
             Act("Connect models", "", () => { p.ShowSetup = true; p.LoadSetup(); Render(); });
+            Act("Settings", "Ctrl+,", ToggleSettings);
+            foreach (var th in new[] { "system", "light", "dark" }) { var v = th; Act($"Theme: {v}", "appearance", () => { ws.ThemePref = v; ws.Save(); Retheme(v); }); }
             foreach (var t in p.Tabs) { var n = t.Name; Act($"Tab: {t.Title}", "", () => { p.CurrentTab = n; p.Page = null; Render(); }); }
             foreach (var (cmd, about) in p.Commands) { var c = cmd; Act(cmd, about, () => { input.Text = c + " "; input.SelectionStart = input.Text.Length; }); }
             foreach (var f in p.Files.Take(4000)) { var path = f; Act(f, "file", () => p.OpenFile(path)); }
@@ -461,9 +465,10 @@ sealed class MainWindow : Window
         var bits = t == null ? [] : new List<string> { Theme.ShortModel(t.Model, t.Provider), ws.Current!.Mode };
         if (t is { Tokens: >= 1000 }) bits.Add($"{t.Tokens / 1000}k tokens");
         if (t?.Cost is > 0) bits.Add($"${t.Cost:0.000}");
-        meta.Text = string.Join("   ", bits.Where(s => s.Length > 0));
+        meta.Text = string.Join("   ", bits.Skip(2).Where(s => s.Length > 0));
+        RenderMetaButtons(t);
         var busy = t?.Busy == true;
-        send.Background = busy ? Theme.Accent : input.Text.Length > 0 ? Theme.Ink : Theme.Faint;
+        send.Background = busy ? Theme.Accent : input.Text.Length > 0 || attached.Count > 0 ? Theme.Ink : Theme.Faint;
         ((FontIcon)send.Child).Glyph = busy ? "\uE71A" : "\uE74A";
     }
 
@@ -547,10 +552,8 @@ sealed class MainWindow : Window
         if (ws.Current is not { } p) return;
         if (p.Changes.Count > 0)
             tabRight.Children.Add(Plain(Label($"{p.Changes.Count} changed", 12.5, Theme.Accent), () => Page(p, "review"), "Review changes (Ctrl+D)"));
-        tabRight.Children.Add(Plain(Label("history", 12.5, p.Page == "history" ? Theme.Ink : Theme.Soft), () => Page(p, "history"), "Checkpoints"));
         tabRight.Children.Add(LayoutSwitch(p));
-        var models = Plain(Label("models", 12.5, p.ShowSetup ? Theme.Ink : Theme.Soft), () => { p.ShowSetup = !p.ShowSetup; if (p.ShowSetup) p.LoadSetup(); Render(); }, "Connect models");
-        tabRight.Children.Add(models);
+        tabRight.Children.Add(MoreButton(p));
         foreach (var t in p.Tabs)
         {
             bool on = t == p.Current;
@@ -614,6 +617,7 @@ sealed class MainWindow : Window
     {
         var p = ws.Current;
         Detach();
+        if (showSettings) { thread.Content = SettingsPage.Build(ws, v => Retheme(v), OpenModels, ToggleSettings, Render); return; }
         if (p is { ShowSetup: true, State: "ready" }) { thread.Content = Cards.Setup(p); return; }
         if (p is { State: "ready" })
         {
@@ -626,7 +630,12 @@ sealed class MainWindow : Window
             : p == null ? "Open a folder to start."
             : p.State.StartsWith("closed") ? p.State[8..]
             : p.State == "starting" ? $"starting qh in {p.Name}…"
-            : p.Current is not { } t || t.Items.Count == 0 ? "Ask qh anything about this project." : null;
+            : p.Current is not { } t ? "Ask qh anything about this project." : null;
+        if (hint == null && p!.Current!.Items.Count == 0)
+        {
+            thread.Content = EmptyChat.Build(p.Name, s => { input.Text = s; input.SelectionStart = s.Length; input.Focus(FocusState.Programmatic); });
+            return;
+        }
         if (hint != null)
         {
             thread.Content = new TextBlock
@@ -725,6 +734,7 @@ sealed class MainWindow : Window
             { e.Handled = true; Accept(); }
             else if (e.Key == VirtualKey.Enter && !shift) { e.Handled = true; Send(); }
             else if (e.Key == VirtualKey.Escape && sugg.Count > 0) { e.Handled = true; sugg = []; DrawSuggestions(); }
+            else if (e.Key == VirtualKey.Escape && showSettings) { e.Handled = true; ToggleSettings(); }
             else if (e.Key == VirtualKey.Escape && ws.Current is { Page: not null } pg) { e.Handled = true; pg.Page = null; Render(); }
             else if (e.Key == VirtualKey.Escape) { e.Handled = true; ws.Current?.Stop(); }
         };
@@ -743,8 +753,12 @@ sealed class MainWindow : Window
 
         var bar = new Grid { Margin = new Thickness(8, 2, 8, 8) };
         var left = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 14 };
-        left.Children.Add(Plain(Icon("", 12), () => { }, "Attach an image"));
+        attachIcon = Icon("", 12);
+        left.Children.Add(Plain(attachIcon, PickImages, "Attach an image (or paste one)"));
+        left.Children.Add(metaButtons);
         left.Children.Add(meta);
+        left.Spacing = 6;
+        input.Paste += PasteImage;
         bar.Children.Add(left);
         send.HorizontalAlignment = HorizontalAlignment.Right;
         bar.Children.Add(send);
@@ -754,8 +768,8 @@ sealed class MainWindow : Window
         suggestBox.BorderBrush = Theme.Line;
         suggestBox.BorderThickness = new Thickness(0, 0, 0, 1);
         suggestBox.Padding = new Thickness(4);
-        var box = new StackPanel { Children = { suggestBox, input, bar } };
-        return new Border
+        var box = new StackPanel { Children = { suggestBox, chips, input, bar } };
+        return composerCard = new Border
         {
             Background = Theme.Card, BorderBrush = Theme.Line, BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(12),
             Margin = new Thickness(0, 0, 0, 16), MaxWidth = 760, HorizontalAlignment = HorizontalAlignment.Stretch, Padding = new Thickness(4, 4, 4, 0),
@@ -765,10 +779,12 @@ sealed class MainWindow : Window
 
     void Send()
     {
-        if (ws.Current is not { } p || input.Text.Trim().Length == 0) return;
-        if (ws.Space == "team") { if (p.TeamRunning) p.TeamSend(input.Text.Trim()); input.Text = ""; return; }
-        p.Prompt(input.Text);
+        if (ws.Current is not { } p || (input.Text.Trim().Length == 0 && attached.Count == 0)) return;
+        if (ws.Space == "team") { if (p.TeamRunning && input.Text.Trim().Length > 0) p.TeamSend(input.Text.Trim()); input.Text = ""; return; }
+        p.Prompt(input.Text, attached.Select(a => a.Data).ToList());
         input.Text = "";
+        attached.Clear();
+        DrawChips();
     }
 
     async void Pick()

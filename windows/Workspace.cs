@@ -361,16 +361,20 @@ sealed class Workspace
     public Workspace(DispatcherQueue ui)
     {
         this.ui = ui;
-        try { Recent = JsonSerializer.Deserialize<Settings>(File.ReadAllText(SettingsFile))?.Projects ?? []; } catch { }
+        try { var st = JsonSerializer.Deserialize<Settings>(File.ReadAllText(SettingsFile)); Recent = st?.Projects ?? []; compact = st?.Compact; } catch { }
         Recent = Recent.Where(Directory.Exists).ToList();
         if (Recent.FirstOrDefault() is { } last) Open(last);
     }
 
-    record Settings(List<string> Projects);
+    /// Compact = the user's explicit choice; null = follow the window width
+    record Settings(List<string> Projects, bool? Compact = null);
+
+    bool? compact;
+    public bool? Compact { get => compact; set { compact = value; Save(); } }
 
     void Save()
     {
-        try { Directory.CreateDirectory(Dir); File.WriteAllText(SettingsFile, JsonSerializer.Serialize(new Settings(Recent))); } catch { }
+        try { Directory.CreateDirectory(Dir); File.WriteAllText(SettingsFile, JsonSerializer.Serialize(new Settings(Recent, compact))); } catch { }
     }
 
     public void Open(string path)

@@ -10,15 +10,15 @@ enum Theme {
     static let side = dyn(0xF0EFEA, 0x262624)
     static let ink = dyn(0x0E0E0D, 0xECEBE6)
     static let soft = dyn(0x6B6B66, 0x9C9B94)
-    static let faint = dyn(0x9A9A94, 0x6F6E68)
-    static let rule = dyn(0xDCDCD5, 0x262624)
-    static let hover = dyn(0xE6E6E0, 0x1C1C1A)
+    static let faint = dyn(0x9A9A94, 0x85847D)
+    static let rule = dyn(0xDCDCD5, 0x34342F)
+    static let hover = dyn(0xE6E6E0, 0x2E2E2B)
     static let accent = dyn(0xFF4D1C, 0xFF5A2A)
     // chrome sits on a warm ground, the content floats on it as a card
     static let ground = dyn(0xECEBE6, 0x141413)
     static let card = dyn(0xFBFBF9, 0x1D1D1B)
     static let tile = dyn(0xF0EFEA, 0x262624)
-    static let line = dyn(0xE3E2DC, 0x2A2A28)
+    static let line = dyn(0xE3E2DC, 0x31312E)
 
     static func sans(_ size: CGFloat, medium: Bool = false) -> Font { .custom(medium ? "Geist-Medium" : "Geist-Regular", size: size) }
     static func mono(_ size: CGFloat, medium: Bool = false) -> Font { .custom(medium ? "GeistMono-Medium" : "GeistMono-Regular", size: size) }

@@ -126,7 +126,7 @@ struct ToolRun: View {
         let end = items.compactMap(\.end).max()
         let failed = items.contains { if case .tool(_, _, false, _, _) = $0.kind { return true }; return false }
         VStack(alignment: .leading, spacing: 4) {
-            Button { withAnimation(.snappy(duration: 0.2)) { open.toggle() } } label: {
+            Button { withAnimation(.smooth(duration: 0.25)) { open.toggle() } } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "chevron.right").font(.system(size: 9, weight: .semibold))
                         .rotationEffect(.degrees(open ? 90 : 0)).foregroundStyle(Theme.faint)

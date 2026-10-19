@@ -5,6 +5,7 @@ import SwiftUI
 /// A project: its tabs on top, the active tab's thread, permissions waiting, and the composer.
 struct ProjectView: View {
     @ObservedObject var project: Project
+    @Environment(\.accessibilityReduceMotion) var reduceMotion
 
     var body: some View {
         VStack(spacing: 0) {
@@ -39,7 +40,7 @@ extension ProjectView {
     @ViewBuilder var chat: some View {
         VStack(spacing: 0) {
             if let tab = project.current {
-                ThreadView(tab: tab, repliesOnly: project.repliesOnly)
+                ThreadView(tab: tab, project: project, repliesOnly: project.repliesOnly)
                     .environment(\.openURL, OpenURLAction { url in
                         guard url.scheme == "qh-file" else { return .systemAction }
                         // relative paths make opaque URLs (qh-file:a.py) whose url.path is empty
@@ -48,7 +49,10 @@ extension ProjectView {
                         project.openFile(c?.path ?? url.path, line: line.flatMap { Int($0) })
                         return .handled
                     })
-                ForEach(project.asks.filter { $0.tab == tab.name }) { a in AskCard(ask: a, project: project) }
+                ForEach(project.asks.filter { $0.tab == tab.name }) { a in
+                    AskCard(ask: a, project: project)
+                        .transition(reduceMotion ? .opacity : .move(edge: .bottom).combined(with: .opacity))
+                }
                 Composer(project: project, tab: tab)
             } else {
                 VStack(spacing: 10) {
@@ -59,6 +63,7 @@ extension ProjectView {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+        .animation(reduceMotion ? nil : .smooth(duration: 0.25), value: project.asks.count)
     }
 }
 
@@ -76,25 +81,27 @@ struct ChatTabBar: View {
                 .buttonStyle(.hand).help("New tab (⌘T)")
                 // the empty part of the bar moves the window, there's no title bar to grab
                 DragArea().frame(maxWidth: .infinity, maxHeight: .infinity)
-                LayoutSwitch(layout: $project.layout).padding(.bottom, 5).padding(.trailing, 12)
                 if !project.changes.isEmpty {
                     Button { project.loadChanges(); project.showReview = true } label: {
                         Text("\(project.changes.count) changed").font(Theme.sans(12.5)).foregroundStyle(Theme.accent)
                     }
-                    .buttonStyle(.hand).padding(.bottom, 9).padding(.trailing, 10).help("Review changes (⌘D)")
+                    .buttonStyle(.hand).padding(.bottom, 9).padding(.trailing, 12).help("Review changes (⌘D)")
                 }
-                Button { withAnimation(.smooth(duration: 0.25)) { ws.toggleInspector() } } label: {
-                    Image(systemName: "sidebar.right").font(.system(size: 12.5)).foregroundStyle(ws.inspector ? Theme.ink : Theme.soft)
+                LayoutSwitch(layout: $project.layout).padding(.bottom, 5).padding(.trailing, 6)
+                // everything else lives in one quiet menu; the shortcuts stay in the app menu
+                Menu {
+                    if !project.changes.isEmpty {
+                        Button("Review changes  ⌘D") { project.loadChanges(); project.showReview = true }
+                    }
+                    Button((ws.inspector ? "Hide" : "Show") + " checkpoints  ⌥⌘I") { withAnimation(.smooth(duration: 0.25)) { ws.toggleInspector() } }
+                    Button("Background tasks  ⇧⌘B") { project.showTasks = true }
+                    Button((project.showSetup ? "Hide" : "Connect") + " models  ⇧⌘M") { project.showSetup.toggle() }
+                } label: {
+                    Image(systemName: "ellipsis").font(.system(size: 13)).foregroundStyle(Theme.soft)
                 }
-                .buttonStyle(.hand).padding(.bottom, 9).padding(.trailing, 10).help("Inspector (⌘⌥I)")
-                Button { project.showTasks = true } label: {
-                    Text("tasks").font(Theme.sans(12.5)).foregroundStyle(Theme.soft)
-                }
-                .buttonStyle(.hand).padding(.bottom, 9).padding(.trailing, 10).help("Background tasks (⌘⇧B)")
-                Button { project.showSetup.toggle() } label: {
-                    Text("models").font(Theme.sans(12.5)).foregroundStyle(project.showSetup ? Theme.ink : Theme.soft)
-                }
-                .buttonStyle(.hand).padding(.bottom, 9).padding(.trailing, 10).help("Connect models (⌘,)")
+                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                .frame(width: 30, height: 28).padding(.bottom, 5)
+                .help("More")
             }
             .padding(.horizontal, 12)
             .frame(height: 44, alignment: .bottom)
@@ -183,6 +190,25 @@ struct StatusDot: View {
     }
 }
 
+/// A composer meta item that reads as a picker: soft fill and a small chevron on hover.
+struct PickerHover: ViewModifier {
+    @State private var over = false
+    func body(content: Content) -> some View {
+        HStack(spacing: 3) {
+            content
+            Image(systemName: "chevron.down").font(.system(size: 8, weight: .semibold)).foregroundStyle(Theme.faint)
+                .opacity(over ? 1 : 0)
+        }
+        .padding(.leading, 7).padding(.trailing, 5).frame(height: 22)
+        .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(Theme.ink.opacity(over ? 0.06 : 0)))
+        .onHover { h in withAnimation(.easeOut(duration: 0.12)) { over = h } }
+    }
+}
+
+extension View {
+    func pickerHover() -> some View { modifier(PickerHover()) }
+}
+
 /// Thinking and its effort, as /think sets it: off, on (the model's default), low, medium, high.
 struct EffortPicker: View {
     @ObservedObject var project: Project
@@ -225,7 +251,9 @@ struct ModePicker: View {
 
 struct ThreadView: View {
     @ObservedObject var tab: ChatTab
+    @ObservedObject var project: Project
     var repliesOnly = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// Replies only (⌘R): your messages and the agent's answers; tool calls, diffs and notes fold away.
     private var shown: [Item] {
@@ -248,12 +276,14 @@ struct ThreadView: View {
                         case .run(let run): ToolRun(items: run, live: tab.busy && i == blocks.count - 1)
                         }
                     }
+                    .transition(reduceMotion ? .identity : .opacity.combined(with: .offset(y: 6)))
                     if tab.status == "working" { ThinkingRow(tab: tab) }
                     Color.clear.frame(height: 1).id("end")
                 }
                 .frame(maxWidth: 700, alignment: .leading)
                 .padding(.horizontal, 24).padding(.vertical, 20)
                 .frame(maxWidth: .infinity)
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: shown.count)
             }
             .defaultScrollAnchor(.bottom)
             .atBottom($pinned)
@@ -263,13 +293,68 @@ struct ThreadView: View {
         }
         .overlay(alignment: .top) {
             // outside the scroll view: it's anchored to the bottom, and this belongs at the top
-            if tab.items.isEmpty {
-                Text("Ask qh anything about this project.").font(Theme.sans(15)).foregroundStyle(Theme.faint)
-                    .frame(maxWidth: 720, alignment: .leading).padding(.horizontal, 24).padding(.top, 60).frame(maxWidth: .infinity)
-                    .allowsHitTesting(false)
+            if tab.items.isEmpty && tab.status != "working" {
+                EmptyThread(project: project).transition(.opacity)
             }
         }
         .id(ObjectIdentifier(tab))   // a fresh scroll view per tab, never one left at another session's offset
+    }
+}
+
+/// A new tab: a greeting, starter prompts that fill the composer, recent sessions, the shortcuts.
+struct EmptyThread: View {
+    @ObservedObject var project: Project
+    private let starters = ["Explain this project", "Find bugs in recent changes", "Write tests for ", "What changed since yesterday?"]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            Text("What should we work on in \(project.name)?").font(Theme.sans(19)).foregroundStyle(Theme.ink)
+            LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
+                ForEach(starters, id: \.self) { s in
+                    Tile { project.draft = s } label: {
+                        Text(s.hasSuffix(" ") ? s + "…" : s).font(Theme.sans(13.5)).foregroundStyle(Theme.soft)
+                    }
+                }
+            }
+            if !project.sessions.isEmpty {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("RECENT").font(Theme.sans(10.5, medium: true)).kerning(0.4).foregroundStyle(Theme.faint).padding(.bottom, 4)
+                    ForEach(project.sessions.prefix(3)) { s in
+                        Tile(plain: true) { project.resume(s) } label: {
+                            HStack {
+                                Text(s.title.isEmpty ? "untitled" : s.title).font(Theme.sans(13.5)).foregroundStyle(Theme.ink).lineLimit(1)
+                                Spacer(minLength: 12)
+                                Text(s.when, style: .relative).font(Theme.sans(12)).foregroundStyle(Theme.faint).lineLimit(1)
+                            }
+                        }
+                    }
+                }
+            }
+            Text("⌘K palette  ·  / commands  ·  @ files").font(Theme.mono(11.5)).foregroundStyle(Theme.faint)
+        }
+        .frame(maxWidth: 560, alignment: .leading)
+        .padding(.horizontal, 24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.bottom, 40)
+    }
+
+    /// A soft tile, or a plain row that only fills on hover.
+    struct Tile<L: View>: View {
+        var plain = false
+        let action: () -> Void
+        @ViewBuilder let label: () -> L
+        @State private var over = false
+        var body: some View {
+            Button(action: action) {
+                label().frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, plain ? 8 : 14).frame(height: plain ? 30 : 44)
+                    .background(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(plain ? Theme.ink.opacity(over ? 0.05 : 0) : over ? Theme.hover : Theme.tile))
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.hand)
+            .onHover { h in withAnimation(.easeOut(duration: 0.12)) { over = h } }
+        }
     }
 }
 
@@ -334,10 +419,11 @@ struct ToolCard: View {
     let output: String
     @State private var open = false
     @EnvironmentObject var ws: Workspace
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Button { open.toggle() } label: {
+            Button { withAnimation(reduceMotion ? nil : .smooth(duration: 0.25)) { open.toggle() } } label: {
                 HStack(spacing: 8) {
                     Text(ok == nil ? "◐" : ok! ? "✓" : "✕").foregroundStyle(ok == nil ? Theme.accent : ok! ? Theme.faint : Color(nsColor: .systemRed))
                     Text(name).foregroundStyle(Theme.soft)
@@ -360,6 +446,7 @@ struct ToolCard: View {
                     }
                     .frame(maxHeight: 280)
                     .padding(8).background(RoundedRectangle(cornerRadius: 5).fill(Theme.side))
+                    .transition(.opacity)
                 }
             }
         }
@@ -699,13 +786,13 @@ struct Composer: View {
                     return .handled
                 }
                 .onChange(of: text) { _, _ in sel = 0 }
-                HStack(spacing: 14) {
+                HStack(spacing: 6) {
                     Button { attachPanel() } label: { Image(systemName: "plus").font(.system(size: 13)).foregroundStyle(Theme.soft).frame(width: 24, height: 24) }
                         .buttonStyle(.hand).help("Attach an image (or paste / drop one)").accessibilityLabel("Attach")
                     Button { project.prompt("/model") } label: { Text(Theme.shortModel(tab.model, provider: tab.provider)).font(Theme.sans(11.5)).foregroundStyle(Theme.faint) }
-                        .buttonStyle(.hand).help("Switch model (/model)")
-                    EffortPicker(project: project, tab: tab)
-                    ModePicker(project: project, small: true)
+                        .buttonStyle(.hand).help("Switch model (/model)").pickerHover()
+                    EffortPicker(project: project, tab: tab).pickerHover()
+                    ModePicker(project: project, small: true).pickerHover()
                     if tab.tokens >= 1000 { Text("\(tab.tokens / 1000)k tokens").font(Theme.sans(11.5)).foregroundStyle(Theme.faint) }
                     if let c = tab.cost, c > 0 { Text(String(format: "$%.3f", c)).font(Theme.sans(11.5)).foregroundStyle(Theme.faint) }
                     Spacer()

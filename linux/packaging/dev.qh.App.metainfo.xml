@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>dev.qh.App</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>qh</name>
+  <summary>Ask the agent that owns the code</summary>
+  <description>
+    <p>Desktop app for qh: open a project folder, talk to its agent, and peek at running work.</p>
+  </description>
+  <launchable type="desktop-id">dev.qh.App.desktop</launchable>
+  <url type="homepage">https://github.com/kesavsabari/qh-rs</url>
+  <developer id="dev.qh"><name>Kesav Sabari</name></developer>
+  <provides><binary>qh-app</binary></provides>
+  <content_rating type="oars-1.1"/>
+</component>

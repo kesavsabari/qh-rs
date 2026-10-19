@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=qh
+Comment=Ask the agent that owns the code
+Exec=qh-app %F
+Icon=dev.qh.App
+Terminal=false
+Categories=Development;
+StartupWMClass=dev.qh.App
+StartupNotify=true
+Actions=Peek;
+
+[Desktop Action Peek]
+Name=Peek
+Exec=qh-app --peek

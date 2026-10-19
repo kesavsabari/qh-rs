@@ -1,0 +1,39 @@
+name: linux-app
+on:
+  push:
+    paths: ["linux/**", "linux-parts/**", ".github/workflows/linux-app.yml"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # Ubuntu's runner image is too old for gtk4 v4_18 / libadwaita v1_7; Arch ships current GNOME
+    container: archlinux:latest
+    steps:
+      - name: deps
+        run: |
+          pacman -Syu --noconfirm --needed base-devel git rust gtk4 libadwaita weston mesa ttf-dejavu inter-font
+      - uses: actions/checkout@v4
+      - name: build qh-app
+        run: cd linux && cargo build --release --locked
+      - name: build qh
+        run: cargo build --release
+      - name: tarball
+        run: linux/packaging/make-tarball.sh linux/target/release/qh-app .
+      - name: snapshot under headless weston
+        run: |
+          export XDG_RUNTIME_DIR=/tmp/xdg; mkdir -p -m 700 $XDG_RUNTIME_DIR
+          weston --backend=headless --renderer=pixman --socket=wl-ci --width=1280 --height=800 &
+          for i in $(seq 50); do [ -S $XDG_RUNTIME_DIR/wl-ci ] && break; sleep 0.2; done
+          mkdir -p /tmp/demo && cd /tmp/demo && git init -q && printf 'fn main() {}\n' > main.rs && echo '# demo' > README.md
+          git config --global user.email ci@qh && git config --global user.name ci && git add -A && git commit -qm init
+          cd "$GITHUB_WORKSPACE"
+          export HOME=/tmp/home; mkdir -p $HOME
+          WAYLAND_DISPLAY=wl-ci GDK_BACKEND=wayland QH_BIN=$PWD/target/release/qh QH_APP_SNAPSHOT=/tmp/app.png \
+            timeout 25 linux/target/release/qh-app /tmp/demo || true
+          test -s /tmp/app.png
+          cp /tmp/app.png app.png
+      - uses: actions/upload-artifact@v4
+        with: { name: linux-app-snapshot, path: app.png, retention-days: 7 }
+      - uses: actions/upload-artifact@v4
+        with: { name: qh-app-linux-x86_64.tar.gz, path: qh-app-linux-x86_64.tar.gz, retention-days: 7 }

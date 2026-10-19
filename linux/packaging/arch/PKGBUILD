@@ -1,0 +1,34 @@
+# Maintainer: Kesav Sabari <kesavsabari2005 at gmail dot com>
+pkgname=qh-app-git
+pkgver=r0
+pkgrel=1
+pkgdesc="qh desktop app (GTK4/libadwaita)"
+arch=('x86_64' 'aarch64')
+url="https://github.com/kesavsabari/qh-rs"
+license=('MIT')
+depends=('gtk4' 'libadwaita')
+makedepends=('cargo' 'git')
+provides=('qh-app')
+conflicts=('qh-app')
+source=("qh-rs::git+https://github.com/kesavsabari/qh-rs.git")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd qh-rs
+  git describe --long --tags 2>/dev/null | sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g' ||
+    printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+build() {
+  cd qh-rs/linux
+  export CARGO_TARGET_DIR=target
+  cargo build --release --locked
+}
+
+package() {
+  cd qh-rs/linux
+  install -Dm755 target/release/qh-app "$pkgdir/usr/bin/qh-app"
+  install -Dm644 packaging/dev.qh.App.desktop "$pkgdir/usr/share/applications/dev.qh.App.desktop"
+  install -Dm644 packaging/dev.qh.App.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/dev.qh.App.svg"
+  install -Dm644 packaging/dev.qh.App.metainfo.xml "$pkgdir/usr/share/metainfo/dev.qh.App.metainfo.xml"
+}

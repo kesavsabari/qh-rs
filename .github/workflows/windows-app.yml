@@ -93,9 +93,9 @@ jobs:
           [System.Windows.Forms.SendKeys]::SendWait("^% ")
           Start-Sleep 2
           Shot "11-peek"
-          # two saved sessions, stamped with the system line qh wrote for C:\demo; they show when the window is active again
+          # two saved sessions, tagged with the project root qh uses (\\?\C:\demo); they show when the window is active again
           $sd = "$env:LOCALAPPDATA\qh\sessions"
-          $sys = Get-Content (Get-ChildItem $sd -Filter *.jsonl | Sort-Object LastWriteTime | Select-Object -Last 1).FullName -TotalCount 1
+          $sys = '{"role":"system","content":"You are a terse coding agent working in \\\\?\\C:\\demo."}'
           Set-Content $sd\20261018-101500.jsonl ($sys + "`n" + '{"role":"user","content":"Add a usage section to the README"}' + "`n" + '{"role":"assistant","content":"Done."}')
           Set-Content $sd\20261017-160000.jsonl ($sys + "`n" + '{"role":"user","content":"Why does the build fail on Windows?"}' + "`n" + '{"role":"assistant","content":"A path separator."}')
           # the hotkey again hides the peek; click the main window's composer to take focus back
@@ -109,7 +109,6 @@ jobs:
           [System.Windows.Forms.SendKeys]::SendWait("^1")
           Start-Sleep 1
           Shot "12-empty-sessions"
-          Get-ChildItem $sd -Filter *.jsonl | ForEach-Object { $t = (Get-Content $_.FullName -TotalCount 2) -join " | "; "SESS " + $_.Name + " :: " + $t.Substring(0, [Math]::Min(200, $t.Length)) }
           [System.Windows.Forms.SendKeys]::SendWait("^k")
           Start-Sleep 1
           [System.Windows.Forms.SendKeys]::SendWait("activity log")

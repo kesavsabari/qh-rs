@@ -272,11 +272,12 @@ sealed class MainWindow : Window
         tray?.Update(ws.Projects.Sum(p => p.Tabs.Count(t => t.Busy)), ws.Projects.Sum(p => p.Asks.Count));
         // toasts for asks that were answered (here or elsewhere) go away
         foreach (var (path, id) in toasted.ToList())
-            if (ws.Projects.FirstOrDefault(p => p.Path == path) is not { } p || p.Asks.All(a => a.Id != id))
-            {
-                if (p != null) Notify.Clear(p, id);
-                toasted.Remove((path, id));
-            }
+        {
+            var p = ws.Projects.FirstOrDefault(x => x.Path == path);
+            if (p != null && p.Asks.Any(a => a.Id == id)) continue;
+            if (p != null) Notify.Clear(p, id);
+            toasted.Remove((path, id));
+        }
     }
 
     // MARK: team space: the project's room, its people and their agents (apple/qh/TeamView.swift)

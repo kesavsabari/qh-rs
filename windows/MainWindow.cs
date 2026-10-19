@@ -207,7 +207,13 @@ sealed class MainWindow : Window
         Markdown.IsFile = s => ws.Current?.Files.Contains(s.Split(':')[0].Replace('\\', '/')) == true;
         Markdown.Open = s => ws.Current?.OpenFile(s);
         Key(VirtualKey.O, Pick);
-        Key((VirtualKey)220, ToggleCompact);   // Ctrl+\ (VK_OEM_5)
+        // Ctrl+\ (VK_OEM_5): an accelerator never sees that key, so catch it on the way down
+        root.PreviewKeyDown += (_, e) =>
+        {
+            if ((int)e.Key != 220 || !InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Control).HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down)) return;
+            e.Handled = true;
+            ToggleCompact();
+        };
         // the first waiting permission: Ctrl+Enter allows once, Ctrl+Backspace denies
         Key(VirtualKey.Enter, () => { if (FirstAsk() is { } a) ws.Current!.Answer(a, "yes"); });
         Key(VirtualKey.Back, () => { if (FirstAsk() is { } a) ws.Current!.Answer(a, "no"); });

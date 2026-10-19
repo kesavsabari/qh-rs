@@ -29,6 +29,12 @@ static class Theme
     public static FontFamily SansMedium => new(Font("Geist-Medium.ttf", "Geist Medium"));
     public static FontFamily Mono => new(Font("GeistMono-Regular.ttf", "Geist Mono"));
 
-    /// "openrouter:anthropic/claude-opus-5.5" → "claude-opus-5.5": the provider is noise in the composer
-    public static string ShortModel(string m) => m.Split('/', ':').LastOrDefault(s => s.Length > 0) ?? m;
+    /// "openrouter:anthropic/claude-opus-5.5" → "claude-opus-5.5", "ollama:qwen3.5:9b" → "qwen3.5:9b":
+    /// the provider is noise in the composer, the model's own tag isn't
+    public static string ShortModel(string m)
+    {
+        var i = m.IndexOf(':');
+        var rest = i >= 0 ? m[(i + 1)..] : m;
+        return rest[(rest.LastIndexOf('/') + 1)..] is { Length: > 0 } s ? s : m;
+    }
 }

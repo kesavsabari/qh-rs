@@ -22,9 +22,12 @@ enum Theme {
 
     static func sans(_ size: CGFloat, medium: Bool = false) -> Font { .custom(medium ? "Geist-Medium" : "Geist-Regular", size: size) }
     static func mono(_ size: CGFloat, medium: Bool = false) -> Font { .custom(medium ? "GeistMono-Medium" : "GeistMono-Regular", size: size) }
-    /// "openrouter:anthropic/claude-opus-5.5" → "claude-opus-5.5": the provider is noise in the composer
+    /// "openrouter:anthropic/claude-opus-5.5" → "claude-opus-5.5", "ollama:qwen3.5:9b" → "qwen3.5:9b":
+    /// the provider is noise in the composer, the model's own tag isn't
     static func shortModel(_ m: String) -> String {
-        String(m.split(whereSeparator: { $0 == "/" || $0 == ":" }).last ?? Substring(m))
+        let rest = m.firstIndex(of: ":").map { String(m[m.index(after: $0)...]) } ?? m
+        let s = rest.split(separator: "/").last.map(String.init) ?? rest
+        return s.isEmpty ? m : s
     }
     static func monoNS(_ size: CGFloat) -> NSFont { NSFont(name: "GeistMono-Regular", size: size) ?? .monospacedSystemFont(ofSize: size, weight: .regular) }
 

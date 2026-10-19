@@ -70,7 +70,8 @@ sealed class MainWindow : Window
         if (show == captionsShown) return;
         captionsShown = show;
         var tb = AppWindow.TitleBar;
-        Color clear = Colors.Transparent, fg = show ? Theme.Soft.Color : clear;
+        // the ground colour, not transparent: Windows still draws the glyphs at alpha 0
+        Color clear = Theme.Ground.Color, fg = show ? Theme.Soft.Color : clear;
         tb.ButtonBackgroundColor = clear;
         tb.ButtonInactiveBackgroundColor = clear;
         tb.ButtonForegroundColor = fg;

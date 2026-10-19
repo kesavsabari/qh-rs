@@ -125,16 +125,19 @@ sealed class MainWindow : Window
     {
         if (show == captionsShown) return;
         captionsShown = show;
+        // hidden = no caption buttons at all (any colour left a notch over the card's rounded corner);
+        // the border stays, so resizing and Snap still work
+        if (AppWindow.Presenter is OverlappedPresenter op) op.SetBorderAndTitleBar(true, show);
         var tb = AppWindow.TitleBar;
-        // the card's colour (the buttons sit over its corner), not transparent: Windows still draws glyphs at alpha 0
-        Color clear = Theme.Card.Color, fg = show ? Theme.Soft.Color : clear;
+        Color clear = Colors.Transparent;
         tb.ButtonBackgroundColor = clear;
         tb.ButtonInactiveBackgroundColor = clear;
-        tb.ButtonForegroundColor = fg;
-        tb.ButtonInactiveForegroundColor = fg;
-        tb.ButtonHoverBackgroundColor = show ? Theme.Hover.Color : clear;
-        tb.ButtonHoverForegroundColor = show ? Theme.Ink.Color : clear;
-        tb.ButtonPressedBackgroundColor = show ? Theme.Line.Color : clear;
+        tb.ButtonForegroundColor = Theme.Soft.Color;
+        tb.ButtonInactiveForegroundColor = Theme.Faint.Color;
+        tb.ButtonHoverBackgroundColor = Theme.Hover.Color;
+        tb.ButtonHoverForegroundColor = Theme.Ink.Color;
+        tb.ButtonPressedBackgroundColor = Theme.Line.Color;
+        DragRegions();
     }
 
     [StructLayout(LayoutKind.Sequential)] struct POINT { public int X, Y; }

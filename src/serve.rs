@@ -2,13 +2,21 @@
 //! VS Code and the TUI). JSON lines both ways. A client's first line is
 //! `{"type":"hello","token":"…"}`; it then gets a snapshot and every hub event, tagged with its tab.
 //! Up: prompt, answer (to a confirm), stop, mode, model, new_tab, close_tab, files.
+//! On Windows the same socket is an AF_UNIX one (Windows 10 1803+), so clients there speak the
+//! identical protocol (.NET: UnixDomainSocketEndPoint).
 
 use crate::hub::{lock, Answer, Event, Hub};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
+#[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+#[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
+#[cfg(unix)]
+fn connect(p: &Path) -> std::io::Result<UnixStream> { UnixStream::connect(p) }
+#[cfg(windows)]
+use winsock::{connect, UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::sync::mpsc::{Receiver, Sender};
@@ -24,7 +32,11 @@ pub fn paths(project: &Path) -> (PathBuf, PathBuf) {
     let mut sock = dir.join(format!("{id}.sock"));
     // socket paths stop at ~104 bytes (macOS) / 108 (Linux): a long state dir moves just the socket
     if sock.as_os_str().len() > 100 {
-        sock = std::env::temp_dir().join(format!("qh-{}", unsafe { libc::getuid() })).join(format!("{id}.sock"));
+        #[cfg(unix)]
+        let who = unsafe { libc::getuid() }.to_string();
+        #[cfg(windows)]
+        let who = std::env::var("USERNAME").unwrap_or_default();
+        sock = std::env::temp_dir().join(format!("qh-{who}")).join(format!("{id}.sock"));
     }
     (sock, dir.join(format!("{id}.token")))
 }
@@ -442,23 +454,30 @@ pub fn run(hub: Arc<Hub>, rx: Receiver<crate::ui::Ui>) -> i32 {
     let (sock, tok_path) = paths(&project);
     for d in [sock.parent(), tok_path.parent()].into_iter().flatten() {
         let _ = std::fs::create_dir_all(d);
-        let _ = std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700));
-        // the socket may sit in shared /tmp: a folder someone else made there could be watched
-        use std::os::unix::fs::MetadataExt;
-        if std::fs::metadata(d).map(|m| m.uid() != unsafe { libc::getuid() } || m.mode() & 0o077 != 0).unwrap_or(true) {
-            eprintln!("qh serve: {} isn't a private folder of yours; refusing", d.display());
-            return 1;
+        // Windows: both live under %LOCALAPPDATA% (or the user's %TEMP%), private to the user by default
+        #[cfg(unix)]
+        {
+            let _ = std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700));
+            // the socket may sit in shared /tmp: a folder someone else made there could be watched
+            use std::os::unix::fs::MetadataExt;
+            if std::fs::metadata(d).map(|m| m.uid() != unsafe { libc::getuid() } || m.mode() & 0o077 != 0).unwrap_or(true) {
+                eprintln!("qh serve: {} isn't a private folder of yours; refusing", d.display());
+                return 1;
+            }
         }
     }
-    if UnixStream::connect(&sock).is_ok() {
+    if connect(&sock).is_ok() {
         // a client attaches to that one instead: same line shape as "listening"
         println!("{}", json!({"type": "running", "socket": sock, "token_file": tok_path, "protocol": PROTOCOL}));
         return 0;
     }
     let _ = std::fs::remove_file(&sock); // stale, nobody answered
     let tok = token();
-    let wrote = std::fs::OpenOptions::new().write(true).create(true).truncate(true)
-        .mode(0o600).open(&tok_path).and_then(|mut f| f.write_all(tok.as_bytes()));
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    opts.mode(0o600);
+    let wrote = opts.open(&tok_path).and_then(|mut f| f.write_all(tok.as_bytes()));
     if let Err(e) = wrote {
         eprintln!("qh serve: can't write {}: {e}", tok_path.display());
         return 1;
@@ -467,6 +486,7 @@ pub fn run(hub: Arc<Hub>, rx: Receiver<crate::ui::Ui>) -> i32 {
         Ok(l) => l,
         Err(e) => { eprintln!("qh serve: {}: {e}", sock.display()); return 1 }
     };
+    #[cfg(unix)]
     let _ = std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600));
     // the app reads this line to know where to connect
     println!("{}", json!({"type": "listening", "socket": sock, "token_file": tok_path, "protocol": PROTOCOL, "pid": std::process::id()}));
@@ -484,6 +504,75 @@ pub fn run(hub: Arc<Hub>, rx: Receiver<crate::ui::Ui>) -> i32 {
         std::thread::spawn(move || client(h, st, s, want));
     }
     0
+}
+
+/// AF_UNIX stream sockets on Windows, shaped like std's Unix ones. A connected socket is wrapped
+/// in a TcpStream: std's send/recv/try_clone work on any stream socket, whatever its family.
+#[cfg(windows)]
+mod winsock {
+    use std::io;
+    use std::net::TcpStream;
+    use std::os::windows::io::{FromRawSocket, RawSocket};
+    use std::path::Path;
+    use windows_sys::Win32::Networking::WinSock as ws;
+
+    pub type UnixStream = TcpStream;
+
+    pub struct UnixListener(ws::SOCKET);
+
+    // a sockaddr_un: family, then a NUL-terminated path of at most 108 bytes
+    #[repr(C)]
+    struct SockaddrUn { family: u16, path: [u8; 108] }
+
+    fn addr(p: &Path) -> io::Result<SockaddrUn> {
+        let b = p.to_str().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "socket path isn't UTF-8"))?.as_bytes();
+        if b.len() >= 108 { return Err(io::Error::new(io::ErrorKind::InvalidInput, "socket path too long")) }
+        let mut a = SockaddrUn { family: ws::AF_UNIX, path: [0; 108] };
+        a.path[..b.len()].copy_from_slice(b);
+        Ok(a)
+    }
+
+    fn socket() -> io::Result<ws::SOCKET> {
+        // std starts Winsock on its first use; this does the same for our raw calls
+        let _ = std::net::UdpSocket::bind("127.0.0.1:0");
+        let s = unsafe { ws::socket(ws::AF_UNIX as i32, ws::SOCK_STREAM, 0) };
+        if s == ws::INVALID_SOCKET { Err(last()) } else { Ok(s) }
+    }
+
+    fn last() -> io::Error { io::Error::from_raw_os_error(unsafe { ws::WSAGetLastError() }) }
+
+    impl UnixListener {
+        pub fn bind(p: &Path) -> io::Result<Self> {
+            let (s, a) = (socket()?, addr(p)?);
+            let len = std::mem::size_of::<SockaddrUn>() as i32;
+            if unsafe { ws::bind(s, &a as *const _ as *const ws::SOCKADDR, len) } != 0 || unsafe { ws::listen(s, 16) } != 0 {
+                let e = last();
+                unsafe { ws::closesocket(s) };
+                return Err(e);
+            }
+            Ok(UnixListener(s))
+        }
+        pub fn incoming(&self) -> impl Iterator<Item = io::Result<UnixStream>> + '_ {
+            std::iter::from_fn(move || {
+                let c = unsafe { ws::accept(self.0, std::ptr::null_mut(), std::ptr::null_mut()) };
+                Some(if c == ws::INVALID_SOCKET { Err(last()) } else { Ok(unsafe { TcpStream::from_raw_socket(c as RawSocket) }) })
+            })
+        }
+    }
+
+    impl Drop for UnixListener {
+        fn drop(&mut self) { unsafe { ws::closesocket(self.0) }; }
+    }
+
+    pub fn connect(p: &Path) -> io::Result<UnixStream> {
+        let (s, a) = (socket()?, addr(p)?);
+        if unsafe { ws::connect(s, &a as *const _ as *const ws::SOCKADDR, std::mem::size_of::<SockaddrUn>() as i32) } != 0 {
+            let e = last();
+            unsafe { ws::closesocket(s) };
+            return Err(e);
+        }
+        Ok(unsafe { TcpStream::from_raw_socket(s as RawSocket) })
+    }
 }
 
 #[cfg(test)]
@@ -507,5 +596,32 @@ mod tests {
             assert_eq!(project_files(&d), [".gitignore", "README.md", "src/a.rs"]);
         }
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The socket every client uses, both ways at once from two threads (the hub broadcasts while
+    /// a client's reader is blocked): on Windows this is the AF_UNIX shim in `winsock`.
+    #[test]
+    fn socket_round_trip_full_duplex() {
+        let p = std::env::temp_dir().join(format!("qh-sock-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        let l = UnixListener::bind(&p).unwrap();
+        let p2 = p.clone();
+        let t = std::thread::spawn(move || {
+            let c = connect(&p2).unwrap();
+            let mut w = c.try_clone().unwrap();
+            writeln!(w, "hello").unwrap();
+            BufReader::new(c).lines().next().unwrap().unwrap()
+        });
+        let s = l.incoming().next().unwrap().unwrap();
+        let mut w = s.try_clone().unwrap();
+        // a reader parked on the socket must not block a write on its clone
+        let r = std::thread::spawn(move || BufReader::new(s).lines().next().unwrap().unwrap());
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        writeln!(w, "events").unwrap();
+        assert_eq!(r.join().unwrap(), "hello");
+        assert_eq!(t.join().unwrap(), "events");
+        assert!(connect(&p.with_extension("none")).is_err());
+        drop(l);
+        let _ = std::fs::remove_file(&p);
     }
 }

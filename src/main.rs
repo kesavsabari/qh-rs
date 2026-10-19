@@ -28,7 +28,6 @@ mod sandbox;
 mod sandbox_linux;
 mod sandbox_macos;
 mod sandbox_windows;
-#[cfg(unix)]
 mod serve;
 mod session;
 mod setup;
@@ -304,10 +303,7 @@ fn main() {
         std::process::exit(code);
     }
     if args.serve {
-        #[cfg(unix)]
         let code = serve::run(hub, rx);
-        #[cfg(not(unix))]
-        let code = { eprintln!("qh serve: not on Windows yet"); 2 };
         bg::kill_all();
         browser::shutdown();
         lsp::shutdown();

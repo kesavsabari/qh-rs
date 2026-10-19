@@ -462,6 +462,7 @@ sealed class MainWindow : Window
             else if (sugg.Count > 0 && (e.Key == VirtualKey.Tab || (e.Key == VirtualKey.Enter && !shift)))
             { e.Handled = true; Accept(); }
             else if (e.Key == VirtualKey.Enter && !shift) { e.Handled = true; Send(); }
+            else if (e.Key == VirtualKey.Escape && sugg.Count > 0) { e.Handled = true; sugg = []; DrawSuggestions(); }
             else if (e.Key == VirtualKey.Escape && ws.Current is { Page: not null } pg) { e.Handled = true; pg.Page = null; Render(); }
             else if (e.Key == VirtualKey.Escape) { e.Handled = true; ws.Current?.Stop(); }
         };

@@ -139,7 +139,7 @@ sealed class MainWindow : Window
         root.KeyboardAccelerators.Add(acc);
     }
 
-    UIElement SidebarBottom()
+    FrameworkElement SidebarBottom()
     {
         var row = new Grid { Padding = new Thickness(14, 10, 14, 10) };
         // personal ⇄ team as Zen's workspace dots; team comes with W4
@@ -204,7 +204,7 @@ sealed class MainWindow : Window
         }
     }
 
-    UIElement Tile(string path)
+    FrameworkElement Tile(string path)
     {
         bool on = ws.Current?.Path == path;
         var b = new Border
@@ -284,7 +284,7 @@ sealed class MainWindow : Window
         thread.Content = sv;
     }
 
-    UIElement Composer()
+    FrameworkElement Composer()
     {
         input.PlaceholderText = "Ask anything · / commands · @ files";
         input.AcceptsReturn = true;

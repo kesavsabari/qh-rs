@@ -21,7 +21,7 @@ sealed class App : Application
     static void Main()
     {
         WinRT.ComWrappersSupport.InitializeComWrappers();
-        Start(_ =>
+        Start(p =>
         {
             var ctx = new Microsoft.UI.Dispatching.DispatcherQueueSynchronizationContext(Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread());
             SynchronizationContext.SetSynchronizationContext(ctx);

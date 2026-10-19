@@ -22,6 +22,10 @@ enum Theme {
 
     static func sans(_ size: CGFloat, medium: Bool = false) -> Font { .custom(medium ? "Geist-Medium" : "Geist-Regular", size: size) }
     static func mono(_ size: CGFloat, medium: Bool = false) -> Font { .custom(medium ? "GeistMono-Medium" : "GeistMono-Regular", size: size) }
+    /// "openrouter:anthropic/claude-opus-5.5" → "claude-opus-5.5": the provider is noise in the composer
+    static func shortModel(_ m: String) -> String {
+        String(m.split(whereSeparator: { $0 == "/" || $0 == ":" }).last ?? Substring(m))
+    }
     static func monoNS(_ size: CGFloat) -> NSFont { NSFont(name: "GeistMono-Regular", size: size) ?? .monospacedSystemFont(ofSize: size, weight: .regular) }
 
     static var isDark: Bool { NSApplication.shared.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua }

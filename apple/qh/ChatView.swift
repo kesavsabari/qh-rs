@@ -16,7 +16,7 @@ struct ProjectView: View {
                 SetupView(project: project)
             } else if project.layout == "code" {
                 CodeBrowser(project: project)
-            } else if project.layout == "split" {
+            } else if project.layout == "split" && project.code != nil {
                 HSplitView {
                     chat.frame(minWidth: 380)
                     CodePane(project: project).frame(minWidth: 360)
@@ -70,25 +70,23 @@ struct ChatTabBar: View {
             HStack(alignment: .bottom, spacing: 2) {
                 ForEach(project.tabs) { t in ChatTabButton(tab: t, project: project) }
                 Button { project.newTab() } label: {
-                    Text("+").font(Theme.mono(14)).foregroundStyle(Theme.faint).frame(width: 30, height: 34).contentShape(Rectangle())
+                    Text("+").font(Theme.sans(15)).foregroundStyle(Theme.faint).frame(width: 30, height: 34).contentShape(Rectangle())
                 }
                 .buttonStyle(.hand).help("New tab (⌘T)")
-                Text(project.name).font(Theme.mono(12)).foregroundStyle(Theme.faint).lineLimit(1)
-                    .padding(.leading, 8).padding(.bottom, 9)
                 Spacer()
                 LayoutSwitch(layout: $project.layout).padding(.bottom, 5).padding(.trailing, 12)
                 if !project.changes.isEmpty {
                     Button { project.loadChanges(); project.showReview = true } label: {
-                        Text("\(project.changes.count) changed").font(Theme.mono(12)).foregroundStyle(Theme.accent)
+                        Text("\(project.changes.count) changed").font(Theme.sans(12.5)).foregroundStyle(Theme.accent)
                     }
                     .buttonStyle(.hand).padding(.bottom, 9).padding(.trailing, 10).help("Review changes (⌘D)")
                 }
                 Button { project.showTasks = true } label: {
-                    Text("tasks").font(Theme.mono(12)).foregroundStyle(Theme.soft)
+                    Text("tasks").font(Theme.sans(12.5)).foregroundStyle(Theme.soft)
                 }
                 .buttonStyle(.hand).padding(.bottom, 9).padding(.trailing, 10).help("Background tasks (⌘⇧B)")
                 Button { project.showSetup.toggle() } label: {
-                    Text("models").font(Theme.mono(12)).foregroundStyle(project.showSetup ? Theme.ink : Theme.soft)
+                    Text("models").font(Theme.sans(12.5)).foregroundStyle(project.showSetup ? Theme.ink : Theme.soft)
                 }
                 .buttonStyle(.hand).padding(.bottom, 9).padding(.trailing, 10).help("Connect models (⌘,)")
             }
@@ -133,7 +131,7 @@ struct ChatTabButton: View {
         let on = tab.name == project.current?.name
         HStack(spacing: 8) {
             StatusDot(status: tab.status, asking: project.asks.contains { $0.tab == tab.name })
-            Text(tab.purpose.isEmpty ? tab.name : tab.purpose).font(Theme.mono(12)).foregroundStyle(on ? Theme.ink : Theme.soft).lineLimit(1)
+            Text(tab.purpose.isEmpty ? tab.name : tab.purpose).font(Theme.sans(12.5)).foregroundStyle(on ? Theme.ink : Theme.soft).lineLimit(1)
             if project.tabs.count > 1 {
                 Button { project.closeTab(tab.name) } label: {
                     Text("×").font(Theme.mono(13)).foregroundStyle(Theme.faint).frame(width: 18, height: 18).contentShape(Rectangle())
@@ -180,7 +178,7 @@ struct EffortPicker: View {
                 Button { project.prompt("/think \(l)") } label: { Text(l + (l == cur ? "  ✓" : "")) }
             }
         } label: {
-            Text(cur == "off" ? "no thinking" : cur == "on" ? "thinking" : "\(cur) effort").font(Theme.mono(11)).foregroundStyle(Theme.faint)
+            Text(cur == "off" ? "no thinking" : cur == "on" ? "thinking" : "\(cur) effort").font(Theme.sans(11.5)).foregroundStyle(Theme.faint)
         }
         .menuStyle(.borderlessButton).menuIndicator(.hidden)
         .fixedSize()
@@ -199,7 +197,7 @@ struct ModePicker: View {
                 Button { project.setMode(m) } label: { Text(m + (m == project.mode ? "  ✓" : "")) }
             }
         } label: {
-            Text(project.mode.isEmpty ? "mode" : project.mode).font(Theme.mono(small ? 11 : 12)).foregroundStyle(small ? Theme.faint : Theme.soft)
+            Text(project.mode.isEmpty ? "mode" : project.mode).font(Theme.sans(small ? 11.5 : 12.5)).foregroundStyle(small ? Theme.faint : Theme.soft)
         }
         .menuStyle(.borderlessButton).menuIndicator(small ? .hidden : .visible)
         .fixedSize()
@@ -686,15 +684,15 @@ struct Composer: View {
                 HStack(spacing: 14) {
                     Button { attachPanel() } label: { Image(systemName: "plus").font(.system(size: 13)).foregroundStyle(Theme.soft).frame(width: 24, height: 24) }
                         .buttonStyle(.hand).help("Attach an image (or paste / drop one)").accessibilityLabel("Attach")
-                    Button { project.prompt("/model") } label: { Text(tab.model).font(Theme.mono(11)).foregroundStyle(Theme.faint) }
+                    Button { project.prompt("/model") } label: { Text(Theme.shortModel(tab.model)).font(Theme.sans(11.5)).foregroundStyle(Theme.faint) }
                         .buttonStyle(.hand).help("Switch model (/model)")
                     EffortPicker(project: project, tab: tab)
                     ModePicker(project: project, small: true)
-                    if tab.tokens >= 1000 { Text("\(tab.tokens / 1000)k tokens").font(Theme.mono(11)).foregroundStyle(Theme.faint) }
-                    if let c = tab.cost, c > 0 { Text(String(format: "$%.3f", c)).font(Theme.mono(11)).foregroundStyle(Theme.faint) }
+                    if tab.tokens >= 1000 { Text("\(tab.tokens / 1000)k tokens").font(Theme.sans(11.5)).foregroundStyle(Theme.faint) }
+                    if let c = tab.cost, c > 0 { Text(String(format: "$%.3f", c)).font(Theme.sans(11.5)).foregroundStyle(Theme.faint) }
                     Spacer()
                     if tab.busy {
-                        Button("stop") { project.stop() }.buttonStyle(.hand).font(Theme.mono(12)).foregroundStyle(Theme.accent)
+                        Button("stop") { project.stop() }.buttonStyle(.hand).font(Theme.sans(12.5)).foregroundStyle(Theme.accent)
                     }
                     let empty = text.isEmpty && images.isEmpty
                     Button { send() } label: {

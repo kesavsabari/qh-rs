@@ -11,6 +11,8 @@ struct ContentView: View {
         NavigationSplitView(columnVisibility: $columns) {
             SidebarView()
                 .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 340)
+                // the system sidebar button drew as an empty circle; ⌃⌘S and View ▸ Hide Sidebar still work
+                .toolbar(removing: .sidebarToggle)
         } detail: {
             // Zen: no chrome around the work, just the chat floating as a card on the ground
             DetailView()
@@ -195,7 +197,7 @@ struct PersonalSidebar: View {
     }
 }
 
-/// An Essentials tile: two letters of the project, raised and outlined when it's the one open.
+/// An Essentials tile: the project's name, raised on the card colour when it's the one open.
 struct ProjectTile: View {
     @EnvironmentObject var ws: Workspace
     let path: String
@@ -206,13 +208,14 @@ struct ProjectTile: View {
         let live = ws.projects.first { $0.path == path }
         let name = (path as NSString).lastPathComponent
         Button { ws.open(path) } label: {
-            Text(name.prefix(2).lowercased())
-                .font(Theme.sans(13, medium: true))
+            Text(name)
+                .font(Theme.sans(12, medium: on))
+                .lineLimit(1).truncationMode(.tail).padding(.horizontal, 6)
                 .foregroundStyle(on ? Theme.ink : Theme.soft)
                 .frame(maxWidth: .infinity).frame(height: 44)
                 .background(RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .fill(on ? Theme.card : over ? Theme.hover : Theme.tile))
-                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(on ? Theme.ink : .clear, lineWidth: 1.5))
+                .shadow(color: .black.opacity(on ? 0.08 : 0), radius: 3, y: 1)
                 .overlay(alignment: .topTrailing) { if let live { LiveDot(project: live).padding(6) } }
                 .contentShape(Rectangle())
         }

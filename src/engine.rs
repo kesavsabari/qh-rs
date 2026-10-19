@@ -190,8 +190,7 @@ Run the project's build or test command now, fix what fails, then reply."}));
                     continue;
                 }
             }
-            let t = lock(&m.turn);
-            hub.emit(&m.name, Event::Done { tokens: t.tokens });
+            lock(&m.turn).done = true; // Done is sent by the hub once the tab is free
             return Ok((content(&msg).to_string(), edited));
         }
         // normalise up front so the UI shows the arguments the tool will actually get

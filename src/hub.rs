@@ -72,6 +72,9 @@ pub struct Turn {
     pub plan_pct: Option<f64>, // ChatGPT plan window used, when the backend says
     pub browsing: bool, // the model has opened a page: send the rest of the browser tools
     pub tokens: u64,
+    /// the turn ended normally: Done goes out once the tab is free (a prompt sent on turn_done
+    /// then runs instead of queueing, and a rewind isn't "busy")
+    pub done: bool,
     pub chars_at: usize,
     pub streamed: usize,
     pub ratio: f64,
@@ -616,6 +619,8 @@ session tests). Messages from other sessions start with [from <name>]. qh saves 
             // a teammate's answer queued during this turn's last model call would otherwise wait
             // for the user's next message: take it now (under ctl, so none slips in between)
             let late = { let mut c = lock(&m.ctl); c.running = false; crate::team::answers_for(&m.name) };
+            let done = { let mut t = lock(&m.turn); std::mem::take(&mut t.done).then_some(t.tokens) };
+            if let Some(tokens) = done { hub.emit(&m.name, Event::Done { tokens }) }
             for a in late {
                 hub.emit(&m.name, Event::Notice("teammate's answer arrived".into()));
                 hub.send(&m.name, &a, "user", 0, None);
@@ -1077,7 +1082,7 @@ impl Fifo {
 fn new_turn(path: &Path) -> Turn {
     let dir = path.parent().unwrap_or(Path::new(".")).join("checkpoints")
         .join(path.file_stem().unwrap_or_default());
-    Turn { usage: Default::default(), plan_pct: None, browsing: false, tokens: 0, chars_at: 0, streamed: 0, ratio: 3.5, tps: 0.0, changed: BTreeSet::new(), ckpt: Checkpoints::new(dir) }
+    Turn { usage: Default::default(), plan_pct: None, browsing: false, tokens: 0, done: false, chars_at: 0, streamed: 0, ratio: 3.5, tps: 0.0, changed: BTreeSet::new(), ckpt: Checkpoints::new(dir) }
 }
 
 fn squash(s: &str, n: usize) -> String {

@@ -10,7 +10,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with: { dotnet-version: "8.0.x" }
-      - run: dotnet build windows/qh.csproj -c Release -p:Platform=x64
+      - run: dotnet publish windows/qh.csproj -c Release -p:Platform=x64 -r win-x64 --self-contained -o publish
       # qh itself, so the app has a real `qh serve` to attach to
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --release
@@ -33,7 +33,7 @@ jobs:
             $bmp.Save("shots/$name.png")
           }
           New-Item -ItemType Directory -Force shots | Out-Null
-          $exe = Get-ChildItem windows/bin -Recurse -Filter qh-app.exe | Select-Object -First 1
+          $exe = Get-Item publish/qh-app.exe
           $env:QH_APP_MAXIMIZE = "1"
           $p = Start-Process $exe.FullName -PassThru
           Start-Sleep 12
@@ -66,6 +66,12 @@ jobs:
           [System.Windows.Forms.SendKeys]::SendWait("{ESC}^+t")
           Start-Sleep 2
           Shot "8-team"
+          # lean check: what a low-end PC pays to keep it open
+          $p.Refresh()
+          $mb = [math]::Round($p.WorkingSet64 / 1MB)
+          $cpu = [math]::Round($p.TotalProcessorTime.TotalSeconds, 1)
+          $size = [math]::Round((Get-ChildItem publish -Recurse | Measure-Object Length -Sum).Sum / 1MB)
+          "memory ${mb} MB, cpu ${cpu} s since launch, install ${size} MB" | Tee-Object -FilePath shots/lean.txt
           $crash = Join-Path $env:TEMP qh-app-crash.txt
           if (Test-Path $crash) { Get-Content $crash }
           if ($p.HasExited) { throw "qh-app exited early with $($p.ExitCode)" }
@@ -73,7 +79,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: screenshots, path: shots/ }
+      - shell: pwsh
+        run: Compress-Archive -Path publish/* -DestinationPath qh-app-windows-x64.zip
       - uses: actions/upload-artifact@v4
         with:
-          name: qh-app-win-x64
-          path: windows/bin/x64/Release/**/win-x64/
+          name: qh-app-windows-x64
+          path: qh-app-windows-x64.zip

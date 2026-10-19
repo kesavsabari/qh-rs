@@ -48,3 +48,21 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: ${{ matrix.asset }}
+
+  # the Windows app beside the binaries (install-app.ps1 fetches it)
+  windows-app:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with: { dotnet-version: "8.0.x" }
+      - run: dotnet publish windows/qh.csproj -c Release -p:Platform=x64 -r win-x64 --self-contained -o publish
+      - shell: pwsh
+        run: Compress-Archive -Path publish/* -DestinationPath qh-app-windows-x64.zip
+      - uses: actions/upload-artifact@v4
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        with: { name: qh-app-windows-x64.zip, path: qh-app-windows-x64.zip, retention-days: 7 }
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: qh-app-windows-x64.zip

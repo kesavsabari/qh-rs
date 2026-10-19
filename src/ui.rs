@@ -837,7 +837,7 @@ impl App {
             Event::Done { .. } => self.view(&name).streaming = false,
             Event::Confirm { tool, args, reply, cwd, warn, guard } => {
                 let rules = self.hub.get(&name).map(|m| lock(&m.set).allow.clone()).unwrap_or_default();
-                let rule = if guard && tool != "network" { String::new() } else { suggest_rule(&tool, &args, &rules) };
+                let rule = if tool == "budget" { "budget".to_string() } else if guard && tool != "network" { String::new() } else { suggest_rule(&tool, &args, &rules) };
                 self.confirms.push_back(Confirm { session: name, tool, args, rule, reply, cwd, warn });
             }
             Event::Added => {

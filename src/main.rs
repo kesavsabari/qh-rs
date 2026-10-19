@@ -1,4 +1,6 @@
+mod activity;
 mod backend;
+mod budget;
 mod bg;
 mod browser;
 mod chatgpt;

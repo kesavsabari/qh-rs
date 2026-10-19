@@ -65,6 +65,7 @@ struct QhApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ n: Notification) {
         QhApp.apply(UserDefaults.standard.string(forKey: "appearance") ?? "system")
+        TrafficLights.start()
         // for checking the UI from another machine without screen-recording rights: when the
         // `debugSnapshot` default is on, a distributed "io.qh.snapshot" notification makes the app
         // draw its own window into /tmp/qh-window.png (only its own pixels, nothing else on screen)
@@ -122,4 +123,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // closing the last window quits, and quitting ends every qh the app started
     func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool { true }
+}
+
+/// Like Zen browser (and the Windows app): the traffic lights stay hidden until the pointer comes
+/// near the top-left corner, then fade in. A cheap 10 Hz check of the mouse, no tracking areas to
+/// keep in sync with window resizes.
+@MainActor
+enum TrafficLights {
+    private static var shown: [ObjectIdentifier: Bool] = [:]
+
+    static func start() {
+        Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
+            MainActor.assumeIsolated {
+                let m = NSEvent.mouseLocation
+                for w in NSApp.windows where w.isVisible && w.styleMask.contains(.titled) && w.sheetParent == nil {
+                    let f = w.frame
+                    let near = m.x >= f.minX && m.x <= f.minX + 110 && m.y <= f.maxY && m.y >= f.maxY - 48
+                    // full screen: macOS shows them with the menu bar anyway
+                    set(w, near || w.styleMask.contains(.fullScreen))
+                }
+            }
+        }
+    }
+
+    private static func set(_ w: NSWindow, _ show: Bool) {
+        let id = ObjectIdentifier(w)
+        guard shown[id] != show else { return }
+        shown[id] = show
+        let buttons = [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton].compactMap { w.standardWindowButton($0) }
+        NSAnimationContext.runAnimationGroup { c in
+            c.duration = show ? 0.12 : 0.25
+            for b in buttons { b.animator().alphaValue = show ? 1 : 0 }
+        }
+    }
 }

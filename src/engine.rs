@@ -21,11 +21,14 @@ pub fn run(hub: &Arc<Hub>, m: &Arc<Member>, user: String) -> String {
         msg["images"] = imgs.into();
     }
     m.push(msg);
-    let fin = turn(hub, m, &user).unwrap_or_else(|e| {
+    let (fin, edited) = turn(hub, m, &user).unwrap_or_else(|e| {
         let e = if matches!(e, Error::Cancelled) { "interrupted".to_string() } else { format!("error: {e}") };
         hub.emit(&m.name, Event::Notice(e.clone()));
-        e
+        (e, false)
     });
+    if edited {
+        verify(hub, m);
+    }
     let mut msgs = lock(&m.msgs);
     repair(&mut msgs);
     m.touched(&msgs);
@@ -66,7 +69,59 @@ fn buildable(cwd: &std::path::Path) -> bool {
     ["Cargo.toml", "pyproject.toml", "package.json", "go.mod", "Makefile", "setup.py"].iter().any(|f| cwd.join(f).exists())
 }
 
-fn turn(hub: &Arc<Hub>, m: &Arc<Member>, user: &str) -> Result<String, Error> {
+/// The project's check command: config `verify` (\"off\" = none, \"test\" = auto with tests), else
+/// from the project's markers.
+pub fn verify_cmd(cfg: &str, cwd: &std::path::Path) -> Option<String> {
+    let cfg = cfg.trim();
+    if cfg == "off" {
+        return None;
+    }
+    if !cfg.is_empty() && cfg != "test" {
+        return Some(cfg.to_string());
+    }
+    let test = cfg == "test";
+    if cwd.join("Cargo.toml").exists() {
+        return Some(if test { "cargo check -q && cargo test -q" } else { "cargo check -q" }.into());
+    }
+    if let Ok(p) = std::fs::read_to_string(cwd.join("package.json")) {
+        let v: Value = serde_json::from_str(&p).unwrap_or_default();
+        let has = |k: &str| v["scripts"][k].is_string();
+        let order: &[&str] = if test { &["test", "typecheck", "build"] } else { &["typecheck", "build", "test"] };
+        if let Some(k) = order.iter().find(|k| has(k)) {
+            return Some(format!("npm run -s {k}"));
+        }
+    }
+    if cwd.join("pyproject.toml").exists() || cwd.join("pytest.ini").exists() || cwd.join("setup.py").exists() {
+        return Some("python -m pytest -q -x".into());
+    }
+    if cwd.join("go.mod").exists() {
+        return Some("go build ./...".into());
+    }
+    None
+}
+
+/// Runs the project's check through the bash sandbox and reports it to clients.
+fn verify(hub: &Arc<Hub>, m: &Arc<Member>) {
+    let cwd = m.cwd();
+    let Some(cmd) = verify_cmd(&hub.cfg.verify, &cwd) else { return };
+    let start = std::time::Instant::now();
+    let script = format!("{cmd} 2>&1");
+    let (ok, out) = match crate::sandbox::run(&hub.sandbox_ctx(m), &hub.cfg, &script, false, 120, &cwd) {
+        Ok((o, killed, _)) => {
+            let mut s = String::from_utf8_lossy(&o.stdout).to_string();
+            s.push_str(&String::from_utf8_lossy(&o.stderr));
+            if killed { s.push_str("\n(killed after 120 s)") }
+            (o.status.success() && !killed, s)
+        }
+        Err(e) => (false, format!("error: {e}")),
+    };
+    let lines: Vec<&str> = out.lines().collect();
+    let tail = lines[lines.len().saturating_sub(40)..].join("\n");
+    hub.emit(&m.name, Event::Verify { cmd, ok, secs: start.elapsed().as_secs_f64(), tail });
+}
+
+fn turn(hub: &Arc<Hub>, m: &Arc<Member>, user: &str) -> Result<(String, bool), Error> {
+    let mut edited = false;
     let mut errors = 0;
     let (want, mut wrote, mut nudged) = (wanted_file(user), false, false);
     // code edited since the last build/test run, and whether we already asked for one
@@ -132,7 +187,7 @@ Run the project's build or test command now, fix what fails, then reply."}));
             }
             let t = lock(&m.turn);
             hub.emit(&m.name, Event::Done { tokens: t.tokens });
-            return Ok(content(&msg).to_string());
+            return Ok((content(&msg).to_string(), edited));
         }
         // normalise up front so the UI shows the arguments the tool will actually get
         let schemas = lock(&m.set).tools.clone();
@@ -184,6 +239,7 @@ Run the project's build or test command now, fix what fails, then reply."}));
                     lock(&m.turn).changed.insert(p.to_string());
                     hub.note_write(&m.name, p, &m.cwd());
                     unchecked |= !p.ends_with(".md") && !p.ends_with(".txt");
+                    edited = true;
                 }
             }
             if name == "bash" && checks(args["cmd"].as_str().unwrap_or("")) {
@@ -206,7 +262,7 @@ Run the project's build or test command now, fix what fails, then reply."}));
                 let note = format!("stopped: the same {name} call gave the same result {n} times. Tell me how to proceed.");
                 hub.emit(&m.name, Event::Notice(note.clone()));
                 m.push(json!({"role": "assistant", "content": note}));
-                return Ok(note);
+                return Ok((note, false));
             }
         }
         // the third identical call and result: say so once, before the next try
@@ -224,7 +280,7 @@ if you're blocked, say what you need.")}));
             let note = format!("stopped: {errors} tool errors in a row. Tell me what you need.");
             hub.emit(&m.name, Event::Notice(note.clone()));
             m.push(json!({"role": "assistant", "content": note}));
-            return Ok(note);
+            return Ok((note, false));
         }
     }
 }
@@ -915,6 +971,27 @@ mod rule_tests {
         assert!(!ok(&["cargo*"], "cd x && cargo check; rm -rf ~"));
         assert!(!ok(&["cargo*"], "cargo check > out.txt"));
         assert!(!ok(&["cargo*"], "cargo build & rm x"));
+    }
+
+    #[test]
+    fn verify_detection() {
+        let d = std::env::temp_dir().join(format!("qh-verify-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        assert_eq!(verify_cmd("", &d), None);
+        assert_eq!(verify_cmd("make lint", &d).as_deref(), Some("make lint"));
+        std::fs::write(d.join("go.mod"), "module x").unwrap();
+        assert_eq!(verify_cmd("", &d).as_deref(), Some("go build ./..."));
+        std::fs::write(d.join("pyproject.toml"), "").unwrap();
+        assert_eq!(verify_cmd("", &d).as_deref(), Some("python -m pytest -q -x"));
+        std::fs::write(d.join("package.json"), r#"{"scripts":{"build":"tsc","test":"jest"}}"#).unwrap();
+        assert_eq!(verify_cmd("", &d).as_deref(), Some("npm run -s build"));
+        assert_eq!(verify_cmd("test", &d).as_deref(), Some("npm run -s test"));
+        std::fs::write(d.join("Cargo.toml"), "").unwrap();
+        assert_eq!(verify_cmd("", &d).as_deref(), Some("cargo check -q"));
+        assert_eq!(verify_cmd("test", &d).as_deref(), Some("cargo check -q && cargo test -q"));
+        assert_eq!(verify_cmd("off", &d), None);
+        let _ = std::fs::remove_dir_all(&d);
         assert!(!ok(&["cargo*"], "cargo $(rm x)"));
         assert!(!ok(&[], "cd x && cargo check"));
     }

@@ -42,6 +42,8 @@ pub enum Event {
     ToolResult { #[allow(dead_code)] name: String, result: String },
     Compact { stage: &'static str, before: usize, after: usize },
     Notice(String),
+    /// the project's check, run after a turn that edited files
+    Verify { cmd: String, ok: bool, secs: f64, tail: String },
     Done { tokens: u64 },
     /// `guard`: the call crosses a safety line (sandbox::guard); it asks in every mode and offers no "always"
     /// (network asks excepted: those may add a `net:` rule)

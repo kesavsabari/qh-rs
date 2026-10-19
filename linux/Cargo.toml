@@ -14,6 +14,9 @@ adw = { version = "0.9.2", package = "libadwaita", features = ["v1_7"] }
 async-channel = "2.5.0"
 gtk = { version = "0.11.5", package = "gtk4", features = ["v4_18"] }
 serde_json = "1.0.154"
+qh-thread = { path = "../linux-parts/thread" }
+qh-code = { path = "../linux-parts/code" }
+qh-desktop = { path = "../linux-parts/desktop" }
 
 [profile.release]
 opt-level = 3

@@ -1,8 +1,13 @@
-//! qh for Linux, L1: a GTK4 + libadwaita client of `qh serve`, mirroring the Mac and Windows apps
+//! qh for Linux: a GTK4 + libadwaita client of `qh serve`, mirroring the Mac and Windows apps
 //! (apple/qh, windows/): the Zen layout, a sidebar on a warm ground and the chat floating on it as a card.
 
 mod client;
+mod composer;
+mod hooks;
 mod model;
+mod pages;
+mod theme;
+mod threads;
 mod ui;
 
 use adw::prelude::*;
@@ -12,39 +17,13 @@ use std::rc::Rc;
 
 pub const APP_ID: &str = "dev.qh.App";
 
-/// Geist ships inside the binary: written once to the cache dir, then given to fontconfig as app
-/// fonts before GTK makes its font map.
-fn register_fonts() {
-    #[link(name = "fontconfig")]
-    extern "C" {
-        fn FcConfigAppFontAddFile(config: *mut std::ffi::c_void, file: *const std::ffi::c_char) -> i32;
-    }
-    const FONTS: [(&str, &[u8]); 4] = [
-        ("Geist-Regular.ttf", include_bytes!("../../apple/qh/Fonts/Geist-Regular.ttf")),
-        ("Geist-Medium.ttf", include_bytes!("../../apple/qh/Fonts/Geist-Medium.ttf")),
-        ("GeistMono-Regular.ttf", include_bytes!("../../apple/qh/Fonts/GeistMono-Regular.ttf")),
-        ("GeistMono-Medium.ttf", include_bytes!("../../apple/qh/Fonts/GeistMono-Medium.ttf")),
-    ];
-    let dir = glib::user_cache_dir().join("qh-app").join("fonts");
-    let _ = std::fs::create_dir_all(&dir);
-    for (name, bytes) in FONTS {
-        let p = dir.join(name);
-        if std::fs::metadata(&p).map(|m| m.len() as usize).ok() != Some(bytes.len()) {
-            let _ = std::fs::write(&p, bytes);
-        }
-        if let Ok(c) = std::ffi::CString::new(p.to_string_lossy().as_bytes()) {
-            unsafe { FcConfigAppFontAddFile(std::ptr::null_mut(), c.as_ptr()) };
-        }
-    }
-}
-
 fn main() -> glib::ExitCode {
     let args: Vec<String> = std::env::args().collect();
     let peek = args.iter().any(|a| a == "--peek");
     let folder = args.iter().skip(1).find(|a| !a.starts_with("--"))
         .map(|a| std::fs::canonicalize(a).map(|p| p.to_string_lossy().to_string()).unwrap_or(a.clone()));
 
-    let app = adw::Application::builder().application_id(APP_ID).flags(gio::ApplicationFlags::empty()).build();
+    let app = adw::Application::builder().application_id(APP_ID).flags(if std::env::var_os("QH_APP_SNAPSHOT").is_some() { gio::ApplicationFlags::NON_UNIQUE } else { gio::ApplicationFlags::empty() }).build();
     let (tx, rx) = async_channel::unbounded();
     let state = Rc::new(RefCell::new(model::App::new(tx)));
     let start = Rc::new(RefCell::new((peek, folder.clone())));
@@ -52,7 +31,7 @@ fn main() -> glib::ExitCode {
     {
         let state = state.clone();
         app.connect_startup(move |app| {
-            register_fonts();
+            theme::register_fonts();
             ui::install(app, &state, rx.clone());
         });
     }
@@ -78,3 +57,4 @@ fn main() -> glib::ExitCode {
     }
     app.run_with_args(&args[..1])
 }
+

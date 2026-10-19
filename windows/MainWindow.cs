@@ -27,9 +27,18 @@ sealed class MainWindow : Window
     readonly StackPanel asks = new() { Padding = new Thickness(16, 0, 16, 0) };
     readonly StackPanel suggestions = new() { Spacing = 1 };
     readonly Border suggestBox = new();
-    readonly StackPanel tabRight = new() { Orientation = Orientation.Horizontal, Spacing = 14, HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 16, 0) };
+    readonly StackPanel tabRight = new() { Orientation = Orientation.Horizontal, Spacing = 14, HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 150, 0) };
     List<(string Insert, string Label, string About)> sugg = [];
     string? reviewPick;
+    readonly StackPanel dots = new() { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+    readonly Grid palette = new() { Visibility = Visibility.Collapsed };
+    readonly TextBox paletteInput = new();
+    readonly StackPanel paletteList = new() { Spacing = 1 };
+    List<(string Title, string Hint, Action Run)> paletteItems = [];
+    int paletteSel;
+    Tray? tray;
+    bool active = true;
+    readonly HashSet<(string, long)> toasted = [];
     int suggSel;
     readonly TextBox input = new();
     readonly TextBlock meta = new();
@@ -42,7 +51,16 @@ sealed class MainWindow : Window
         ws = new Workspace(DispatcherQueue);
         ws.Changed += Render;
         ws.ItemChanged += (t, i, added) => { threadView.Changed(t, i, added); if (added) RenderMeta(); };
-        Closed += (_, _) => ws.Shutdown();
+        Closed += (_, _) => { tray?.Dispose(); Notify.Stop(); ws.Shutdown(); };
+        Activated += (_, e) => active = e.WindowActivationState != WindowActivationState.Deactivated;
+        Notify.Start(ws, DispatcherQueue, Front);
+        ws.AskArrived += (p, a) => { if (!active) { Notify.Ask(p, a); toasted.Add((p.Path, a.Id)); } };
+        tray = new Tray(WinRT.Interop.WindowNative.GetWindowHandle(this), Front, Close);
+        // the team room has no push yet: ask every 3 s while it's on screen
+        var poll = DispatcherQueue.CreateTimer();
+        poll.Interval = TimeSpan.FromSeconds(3);
+        poll.Tick += (_, _) => { if (ws.Space == "team" && active) ws.Current?.LoadTeam(); };
+        poll.Start();
         AppWindow.Resize(new Windows.Graphics.SizeInt32(1280, 820));
         // CI screenshots: fill the screen so the corner hover lands on the window
         if (Environment.GetEnvironmentVariable("QH_APP_MAXIMIZE") == "1" && AppWindow.Presenter is OverlappedPresenter op) op.Maximize();
@@ -51,12 +69,41 @@ sealed class MainWindow : Window
         Render();
     }
 
+    /// Caption (drag) = the top edge plus the card's tab-bar row; the tabs and the links on the right
+    /// stay clickable (passthrough). The caption buttons sit over the corner, hidden until hovered.
+    void DragRegions()
+    {
+        if (root.XamlRoot is not { } xr) return;
+        var scale = xr.RasterizationScale;
+        Windows.Graphics.RectInt32 R(FrameworkElement e, double padX = 0)
+        {
+            var t = e.TransformToVisual(root).TransformPoint(new Windows.Foundation.Point(0, 0));
+            return new((int)((t.X - padX) * scale), (int)(t.Y * scale), (int)((e.ActualWidth + 2 * padX) * scale), (int)(e.ActualHeight * scale));
+        }
+        var w = (int)(root.ActualWidth * scale);
+        var src = InputNonClientPointerSource.GetForWindowId(AppWindow.Id);
+        var cardTop = card.TransformToVisual(root).TransformPoint(new Windows.Foundation.Point(0, 0));
+        src.SetRegionRects(NonClientRegionKind.Caption,
+        [
+            new(0, 0, w, (int)(8 * scale)),
+            new((int)(cardTop.X * scale), (int)(cardTop.Y * scale), (int)(card.ActualWidth * scale), (int)(44 * scale)),
+        ]);
+        src.SetRegionRects(NonClientRegionKind.Passthrough, [R(tabBar, 2), R(tabRight, 2)]);
+    }
+
+    void Front()
+    {
+        AppWindow.Show();
+        if (AppWindow.Presenter is OverlappedPresenter { State: OverlappedPresenterState.Minimized } op) op.Restore();
+        Activate();
+    }
+
     // MARK: window chrome
 
     void Chrome()
     {
         ExtendsContentIntoTitleBar = true;
-        AppWindow.TitleBar.PreferredHeightOption = TitleBarHeightOption.Tall;
+        AppWindow.TitleBar.PreferredHeightOption = TitleBarHeightOption.Standard;
         SetCaptions(false);
         // poll the pointer: over the caption buttons the app gets no pointer events (that's non-client)
         var t = DispatcherQueue.CreateTimer();
@@ -98,16 +145,15 @@ sealed class MainWindow : Window
     void Build()
     {
         root.Background = Theme.Ground;
-        root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(44) });
+        // no title-bar strip: just a thin edge of ground, the card and sidebar go right up to it
+        root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(8) });
         root.RowDefinitions.Add(new RowDefinition());
         root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(260) });
         root.ColumnDefinitions.Add(new ColumnDefinition());
-
-        // the whole top strip of ground drags the window
-        var drag = new Border { Background = Theme.Ground };
-        Grid.SetColumnSpan(drag, 2);
-        root.Children.Add(drag);
-        SetTitleBar(drag);
+        // the window drags from that edge and the empty part of the tab bar (see DragRegions)
+        root.SizeChanged += (_, _) => DragRegions();
+        tabBar.SizeChanged += (_, _) => DragRegions();
+        tabRight.SizeChanged += (_, _) => DragRegions();
 
         var side = new Grid();
         side.RowDefinitions.Add(new RowDefinition());
@@ -143,6 +189,8 @@ sealed class MainWindow : Window
         Grid.SetRow(composer, 3);
         card.Children.Add(composer);
 
+        Key(VirtualKey.K, TogglePalette);
+        Key(VirtualKey.T, () => SetSpace(ws.Space == "team" ? "personal" : "team"), VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift);
         Key(VirtualKey.T, () => ws.Current?.NewTab());
         Key(VirtualKey.Number1, () => { if (ws.Current is { } p) SetLayout(p, "chat"); });
         Key(VirtualKey.Number2, () => { if (ws.Current is { } p) SetLayout(p, "split"); });
@@ -155,14 +203,15 @@ sealed class MainWindow : Window
         // the first waiting permission: Ctrl+Enter allows once, Ctrl+Backspace denies
         Key(VirtualKey.Enter, () => { if (FirstAsk() is { } a) ws.Current!.Answer(a, "yes"); });
         Key(VirtualKey.Back, () => { if (FirstAsk() is { } a) ws.Current!.Answer(a, "no"); });
+        BuildPalette();
         Content = root;
     }
 
     Ask? FirstAsk() => ws.Current is { } p && p.Current is { } t ? p.Asks.FirstOrDefault(a => a.Tab == t.Name) : null;
 
-    void Key(VirtualKey k, Action a)
+    void Key(VirtualKey k, Action a, VirtualKeyModifiers mods = VirtualKeyModifiers.Control)
     {
-        var acc = new KeyboardAccelerator { Key = k, Modifiers = VirtualKeyModifiers.Control };
+        var acc = new KeyboardAccelerator { Key = k, Modifiers = mods };
         acc.Invoked += (_, e) => { e.Handled = true; a(); };
         root.KeyboardAccelerators.Add(acc);
     }
@@ -170,10 +219,7 @@ sealed class MainWindow : Window
     FrameworkElement SidebarBottom()
     {
         var row = new Grid { Padding = new Thickness(14, 10, 14, 10) };
-        // personal ⇄ team as Zen's workspace dots; team comes with W4
-        var dots = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 12, VerticalAlignment = VerticalAlignment.Center };
-        dots.Children.Add(new Microsoft.UI.Xaml.Shapes.Ellipse { Width = 8, Height = 8, Fill = Theme.Ink });
-        dots.Children.Add(new Microsoft.UI.Xaml.Shapes.Ellipse { Width = 6, Height = 6, Fill = Theme.Faint });
+        // personal ⇄ team as Zen's workspace dots: the current one is a bigger ink dot
         row.Children.Add(dots);
         var right = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, HorizontalAlignment = HorizontalAlignment.Right };
         right.Children.Add(Plain(Icon(""), Pick, "Open folder (Ctrl+O)"));
@@ -186,6 +232,10 @@ sealed class MainWindow : Window
 
     void Render()
     {
+        RenderDots();
+        RenderTray();
+        if (ws.Space == "team") { RenderTeam(); return; }
+        tabRight.Visibility = Visibility.Visible;
         RenderSidebar();
         RenderTabs();
         RenderThread();
@@ -193,8 +243,216 @@ sealed class MainWindow : Window
         RenderMeta();
     }
 
+    void RenderDots()
+    {
+        dots.Children.Clear();
+        foreach (var (label, space) in new[] { ("Personal", "personal"), ("Team", "team") })
+        {
+            var on = ws.Space == space;
+            var b = new Border
+            {
+                Width = 26, Height = 26, Background = new SolidColorBrush(Colors.Transparent),
+                Child = new Microsoft.UI.Xaml.Shapes.Ellipse { Width = on ? 8 : 6, Height = on ? 8 : 6, Fill = on ? Theme.Ink : Theme.Faint },
+            };
+            ToolTipService.SetToolTip(b, label + " (Ctrl+Shift+T)");
+            b.Tapped += (_, _) => SetSpace(space);
+            dots.Children.Add(b);
+        }
+    }
+
+    void SetSpace(string space)
+    {
+        ws.Space = space;
+        if (space == "team") ws.Current?.LoadTeam();
+        Render();
+    }
+
+    void RenderTray()
+    {
+        tray?.Update(ws.Projects.Sum(p => p.Tabs.Count(t => t.Busy)), ws.Projects.Sum(p => p.Asks.Count));
+        // toasts for asks that were answered (here or elsewhere) go away
+        foreach (var (path, id) in toasted.ToList())
+            if (ws.Projects.FirstOrDefault(p => p.Path == path) is not { } p || p.Asks.All(a => a.Id != id))
+            {
+                if (p != null) Notify.Clear(p, id);
+                toasted.Remove((path, id));
+            }
+    }
+
+    // MARK: team space: the project's room, its people and their agents (apple/qh/TeamView.swift)
+
+    void RenderTeam()
+    {
+        sidebar.Children.Clear();
+        tabBar.Children.Clear();
+        tabRight.Visibility = Visibility.Collapsed;
+        asks.Children.Clear();
+        Detach();
+        var p = ws.Current;
+        if (p == null || !p.TeamRunning)
+        {
+            sidebar.Children.Add(Label("TEAM", 11, Theme.Faint, new Thickness(16, 8, 16, 4)));
+            thread.Content = new TextBlock
+            {
+                Text = p == null ? "Open a folder to start." : "No team in this project yet. Start one from a terminal with qh's /team, then come back here.",
+                FontFamily = Theme.Sans, FontSize = 14, Foreground = Theme.Faint, TextWrapping = TextWrapping.Wrap,
+                HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(32, 56, 32, 0),
+            };
+            meta.Text = "";
+            return;
+        }
+        sidebar.Children.Add(Label(p.TeamStatus.Length > 0 ? p.TeamStatus : p.Name, 12, Theme.Soft, new Thickness(16, 8, 16, 8)));
+        sidebar.Children.Add(Label("CHANNELS", 11, Theme.Faint, new Thickness(16, 8, 16, 4)));
+        foreach (var (id, label, unread, pinged) in p.Channels)
+        {
+            var g = new Grid();
+            g.Children.Add(Label(label, 13, id == p.Chan ? Theme.Ink : Theme.Soft));
+            if (unread > 0) g.Children.Add(new TextBlock { Text = unread.ToString(), FontFamily = Theme.Sans, FontSize = 11, Foreground = pinged ? Theme.Accent : Theme.Faint, HorizontalAlignment = HorizontalAlignment.Right });
+            var cid = id;
+            sidebar.Children.Add(Row(g, id == p.Chan, () => p.LoadTeam(cid), new Thickness(8, 0, 8, 0)));
+        }
+        sidebar.Children.Add(Label("PEOPLE", 11, Theme.Faint, new Thickness(16, 14, 16, 4)));
+        foreach (var (login, online, status) in p.People)
+        {
+            var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+            row.Children.Add(new Microsoft.UI.Xaml.Shapes.Ellipse { Width = 6, Height = 6, Fill = online ? Theme.Accent : Theme.Faint, VerticalAlignment = VerticalAlignment.Center });
+            row.Children.Add(Label(login + (login == p.TeamMe ? " (you)" : ""), 13, Theme.Ink));
+            if (status.Length > 0) row.Children.Add(Label(status, 12, Theme.Faint));
+            sidebar.Children.Add(new Border { Padding = new Thickness(16, 5, 16, 5), Child = row });
+        }
+        if (p.Agents.Count > 0)
+        {
+            sidebar.Children.Add(Label("AGENTS", 11, Theme.Faint, new Thickness(16, 14, 16, 4)));
+            foreach (var (login, name, status, now, waiting) in p.Agents)
+            {
+                var col = new StackPanel { Spacing = 1 };
+                col.Children.Add(Label($"{login} · {name}", 12.5, Theme.Ink));
+                col.Children.Add(Label(waiting ? "waiting for its owner" : now.Length > 0 ? now : status, 11.5, waiting ? Theme.Accent : Theme.Faint));
+                sidebar.Children.Add(new Border { Padding = new Thickness(16, 4, 16, 4), Child = col });
+            }
+        }
+
+        tabBar.Children.Add(new Border { Padding = new Thickness(10, 5, 10, 5), Margin = new Thickness(0, 0, 0, 6), CornerRadius = new CornerRadius(7), Background = Theme.Tile, Child = Label(p.Chan, 12.5, Theme.Ink) });
+        var list = new StackPanel { Spacing = 12, MaxWidth = 760, Padding = new Thickness(32, 24, 32, 24) };
+        foreach (var (from, text, q) in p.Waiting)
+            list.Children.Add(new Border
+            {
+                Background = Theme.Tile, CornerRadius = new CornerRadius(10), Padding = new Thickness(14, 10, 14, 10),
+                Child = new TextBlock { Text = $"{from}{(q ? " asks" : "")}: {text}", FontFamily = Theme.Sans, FontSize = 13, Foreground = Theme.Ink, TextWrapping = TextWrapping.Wrap },
+            });
+        foreach (var (who, when, text) in p.TeamMessages)
+        {
+            var m = new StackPanel { Spacing = 2 };
+            m.Children.Add(new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { Label(who, 12.5, Theme.Ink), Label(when, 11, Theme.Faint) } });
+            m.Children.Add(new TextBlock { Text = text, FontFamily = Theme.Sans, FontSize = 14, Foreground = Theme.Ink, TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true });
+            list.Children.Add(m);
+        }
+        if (list.Children.Count == 0) list.Children.Add(Label("Nothing here yet. Say hi.", 13, Theme.Faint));
+        var sv = new ScrollViewer { Content = list };
+        sv.Loaded += (_, _) => sv.ChangeView(null, sv.ScrollableHeight, null, true);
+        thread.Content = sv;
+        meta.Text = $"to {p.Chan}";
+    }
+
+    // MARK: Ctrl+K palette (apple/qh/Palette.swift)
+
+    void BuildPalette()
+    {
+        palette.Background = new SolidColorBrush(Color.FromArgb(0x40, 0, 0, 0));
+        Grid.SetRowSpan(palette, 2);
+        Grid.SetColumnSpan(palette, 2);
+        palette.Tapped += (_, e) => { if (e.OriginalSource == palette) TogglePalette(); };
+        paletteInput.PlaceholderText = "Type a command, a tab, a file…";
+        paletteInput.FontFamily = Theme.Sans;
+        paletteInput.FontSize = 14;
+        paletteInput.TextChanged += (_, _) => FillPalette();
+        paletteInput.PreviewKeyDown += (_, e) =>
+        {
+            if (e.Key is VirtualKey.Down or VirtualKey.Up && paletteItems.Count > 0)
+            { e.Handled = true; paletteSel = (paletteSel + (e.Key == VirtualKey.Down ? 1 : paletteItems.Count - 1)) % paletteItems.Count; DrawPalette(); }
+            else if (e.Key == VirtualKey.Enter) { e.Handled = true; RunPalette(paletteSel); }
+            else if (e.Key == VirtualKey.Escape) { e.Handled = true; TogglePalette(); }
+        };
+        palette.Children.Add(new Border
+        {
+            Background = Theme.Card, BorderBrush = Theme.Line, BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(12),
+            Width = 560, VerticalAlignment = VerticalAlignment.Top, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 90, 0, 0),
+            Padding = new Thickness(8), Shadow = new ThemeShadow(), Translation = new System.Numerics.Vector3(0, 0, 32),
+            Child = new StackPanel { Spacing = 6, Children = { paletteInput, new ScrollViewer { MaxHeight = 380, Content = paletteList } } },
+        });
+        root.Children.Add(palette);
+    }
+
+    void TogglePalette()
+    {
+        var show = palette.Visibility == Visibility.Collapsed;
+        palette.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
+        if (!show) { input.Focus(FocusState.Programmatic); return; }
+        paletteInput.Text = "";
+        FillPalette();
+        paletteInput.Focus(FocusState.Programmatic);
+    }
+
+    List<(string, string, Action)> PaletteAll()
+    {
+        var all = new List<(string, string, Action)>();
+        var p = ws.Current;
+        void Act(string t, string k, Action a) => all.Add((t, k, a));
+        Act("New tab", "Ctrl+T", () => p?.NewTab());
+        Act("Open folder…", "Ctrl+O", Pick);
+        Act(ws.Space == "team" ? "Personal space" : "Team space", "Ctrl+Shift+T", () => SetSpace(ws.Space == "team" ? "personal" : "team"));
+        if (p != null)
+        {
+            Act("Chat", "Ctrl+1", () => SetLayout(p, "chat"));
+            Act("Chat and code", "Ctrl+2", () => SetLayout(p, "split"));
+            Act("Code", "Ctrl+3", () => SetLayout(p, "code"));
+            Act("Review changes", "Ctrl+D", () => Page(p, "review"));
+            Act("Checkpoints", "", () => Page(p, "history"));
+            Act("Connect models", "", () => { p.ShowSetup = true; p.LoadSetup(); Render(); });
+            foreach (var t in p.Tabs) { var n = t.Name; Act($"Tab: {t.Title}", "", () => { p.CurrentTab = n; p.Page = null; Render(); }); }
+            foreach (var (cmd, about) in p.Commands) { var c = cmd; Act(cmd, about, () => { input.Text = c + " "; input.SelectionStart = input.Text.Length; }); }
+            foreach (var f in p.Files.Take(4000)) { var path = f; Act(f, "file", () => p.OpenFile(path)); }
+        }
+        foreach (var r in ws.Recent.Where(r => r != p?.Path)) { var path = r; Act($"Project: {Path.GetFileName(r.TrimEnd('\\'))}", r, () => ws.Open(path)); }
+        return all;
+    }
+
+    void FillPalette()
+    {
+        var q = paletteInput.Text.Trim().ToLowerInvariant();
+        paletteItems = PaletteAll().Select(x => (x, score: q.Length == 0 ? (x.Item2 == "file" ? 1000 : 0) : Fuzzy(x.Item1.ToLowerInvariant(), q)))
+            .Where(x => x.score >= 0 && (q.Length > 0 || x.x.Item2 != "file")).OrderBy(x => x.score).Take(40).Select(x => x.x).ToList();
+        paletteSel = 0;
+        DrawPalette();
+    }
+
+    void DrawPalette()
+    {
+        paletteList.Children.Clear();
+        for (int i = 0; i < paletteItems.Count; i++)
+        {
+            var (title, hint, _) = paletteItems[i];
+            var g = new Grid { Padding = new Thickness(10, 6, 10, 6) };
+            g.Children.Add(new TextBlock { Text = title, FontFamily = Theme.Sans, FontSize = 13, Foreground = Theme.Ink, TextTrimming = TextTrimming.CharacterEllipsis, Margin = new Thickness(0, 0, 140, 0) });
+            g.Children.Add(new TextBlock { Text = hint, FontFamily = Theme.Sans, FontSize = 11.5, Foreground = Theme.Faint, HorizontalAlignment = HorizontalAlignment.Right, MaxWidth = 200, TextTrimming = TextTrimming.CharacterEllipsis });
+            var k = i;
+            var b = new Border { Child = g, CornerRadius = new CornerRadius(7), Background = i == paletteSel ? Theme.Tile : new SolidColorBrush(Colors.Transparent) };
+            b.Tapped += (_, _) => RunPalette(k);
+            paletteList.Children.Add(b);
+        }
+    }
+
+    void RunPalette(int i)
+    {
+        if (i >= paletteItems.Count) return;
+        var run = paletteItems[i].Run;
+        TogglePalette();
+        run();
+    }
+
     void RenderMeta()
     {
+        if (ws.Space == "team") return;
         var t = ws.Current?.Current;
         var bits = t == null ? [] : new List<string> { Theme.ShortModel(t.Model, t.Provider), ws.Current!.Mode };
         if (t is { Tokens: >= 1000 }) bits.Add($"{t.Tokens / 1000}k tokens");
@@ -504,6 +762,7 @@ sealed class MainWindow : Window
     void Send()
     {
         if (ws.Current is not { } p || input.Text.Trim().Length == 0) return;
+        if (ws.Space == "team") { if (p.TeamRunning) p.TeamSend(input.Text.Trim()); input.Text = ""; return; }
         p.Prompt(input.Text);
         input.Text = "";
     }

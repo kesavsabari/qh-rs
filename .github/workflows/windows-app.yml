@@ -60,6 +60,12 @@ jobs:
           [System.Windows.Forms.SendKeys]::SendWait("^d")
           Start-Sleep 1
           Shot "6-review"
+          [System.Windows.Forms.SendKeys]::SendWait("{ESC}^k")
+          Start-Sleep 1
+          Shot "7-palette"
+          [System.Windows.Forms.SendKeys]::SendWait("{ESC}^+t")
+          Start-Sleep 2
+          Shot "8-team"
           $crash = Join-Path $env:TEMP qh-app-crash.txt
           if (Test-Path $crash) { Get-Content $crash }
           if ($p.HasExited) { throw "qh-app exited early with $($p.ExitCode)" }

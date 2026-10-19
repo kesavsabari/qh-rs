@@ -51,6 +51,16 @@ sealed class Project
     public string? Page;                    // null = thread, "review", "history"
     public (string Path, int? Line, string Text)? Code;
     public string Draft = "";               // a rewind puts the prompt back here
+    // W4: team
+    public bool TeamRunning;
+    public string TeamMe = "", TeamStatus = "", Chan = "#team";
+    public List<(string Login, bool Online, string Status)> People = [];
+    public List<(string Id, string Label, int Unread, bool Pinged)> Channels = [];
+    public List<(string Who, string When, string Text)> TeamMessages = [];
+    public List<(string Login, string Name, string Status, string Now, bool Waiting)> Agents = [];
+    public List<(string From, string Text, bool Question)> Waiting = [];
+    /// asks that arrived while the window wasn't looking: the toast/tray hooks
+    public event Action<Project, Ask>? AskArrived;
     // setup screen
     public bool ShowSetup;
     public List<Source> Sources = [];
@@ -97,6 +107,7 @@ sealed class Project
                 Send("files");
                 Send("changes");
                 Send("checkpoints");
+                Send("team");
                 break;
             case "tabs":
                 Mode = (string?)e["mode"] ?? Mode;
@@ -150,8 +161,23 @@ sealed class Project
                 Send("checkpoints");
                 break;
             case "confirm":
-                Asks.Add(new Ask((long?)e["id"] ?? -1, tabName ?? "", (string?)e["tool"] ?? "", Detail(e["args"]),
-                    (string?)e["warn"] ?? "", (bool?)e["guard"] ?? false, (string?)e["always"] ?? ""));
+            {
+                var a = new Ask((long?)e["id"] ?? -1, tabName ?? "", (string?)e["tool"] ?? "", Detail(e["args"]),
+                    (string?)e["warn"] ?? "", (bool?)e["guard"] ?? false, (string?)e["always"] ?? "");
+                Asks.Add(a);
+                AskArrived?.Invoke(this, a);
+                break;
+            }
+            case "team":
+                TeamRunning = (bool?)e["running"] ?? false;
+                TeamMe = (string?)e["me"] ?? "";
+                TeamStatus = (string?)e["status"] ?? "";
+                Chan = (string?)e["chan"] ?? Chan;
+                People = e["people"]?.AsArray().Select(x => ((string?)x!["login"] ?? "", (bool?)x["online"] ?? false, (string?)x["status"] ?? "")).ToList() ?? [];
+                Channels = e["channels"]?.AsArray().Select(x => ((string?)x!["id"] ?? "", (string?)x["label"] ?? "", (int?)x["unread"] ?? 0, (bool?)x["pinged"] ?? false)).ToList() ?? [];
+                TeamMessages = e["messages"]?.AsArray().Select(x => ((string?)x!["who"] ?? "", x["when"]?.ToString() ?? "", (string?)x["text"] ?? "")).ToList() ?? [];
+                Agents = e["agents"]?.AsArray().Select(x => ((string?)x!["login"] ?? "", (string?)x["name"] ?? "", (string?)x["status"] ?? "", (string?)x["now"] ?? "", (bool?)x["waiting"] ?? false)).ToList() ?? [];
+                Waiting = e["waiting"]?.AsArray().Select(x => ((string?)x!["from"] ?? "", (string?)x["text"] ?? "", (bool?)x["question"] ?? false)).ToList() ?? [];
                 break;
             case "confirm_closed":
                 Asks.RemoveAll(a => a.Id == ((long?)e["id"] ?? -1));
@@ -288,6 +314,9 @@ sealed class Project
     public void Reject(string path) => Send("reject", new JsonObject { ["path"] = path });
     public void Rewind(int turn, bool chat) => Send("rewind", new JsonObject { ["turn"] = turn, ["chat"] = chat });
     public void LoadChanges() => Send("changes");
+    public void LoadTeam(string? chan = null) => Send("team", chan == null ? null : new JsonObject { ["chan"] = chan });
+    public void TeamSend(string text) => Send("team_send", new JsonObject { ["chan"] = Chan, ["text"] = text });
+    public bool Waits => Asks.Count > 0;
     public void LoadCheckpoints() => Send("checkpoints");
 
     /// A path from the thread or the tree: read it here (the app sits on the same disk) and show it.
@@ -323,6 +352,8 @@ sealed class Workspace
     readonly DispatcherQueue ui;
     public event Action? Changed;
     public event Action<Tab, Item, bool>? ItemChanged;
+    public event Action<Project, Ask>? AskArrived;
+    public string Space = "personal";       // personal | team
 
     static readonly string Dir = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "qh");
     static readonly string SettingsFile = System.IO.Path.Combine(Dir, "app.json");
@@ -353,6 +384,7 @@ sealed class Workspace
             Current = new Project(path, Qh, ui);
             Current.Changed += () => Changed?.Invoke();
             Current.ItemChanged += (t, i, a) => ItemChanged?.Invoke(t, i, a);
+            Current.AskArrived += (p, a) => AskArrived?.Invoke(p, a);
             Projects.Add(Current);
         }
         Changed?.Invoke();

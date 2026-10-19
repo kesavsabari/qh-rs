@@ -43,11 +43,40 @@ struct MenuBarView: View {
     }
 }
 
-/// The menu bar icon: "qh", with a dot when something waits for you.
+/// The menu bar icon: a ring per running agent (up to 3), the first one orange when something
+/// waits for you; a small dot when all is idle. Same drawing as the Windows tray icon.
 struct MenuBarLabel: View {
     @EnvironmentObject var ws: Workspace
     var body: some View {
-        Text(ws.waiting > 0 ? "qh \(ws.waiting)" : ws.working > 0 ? "qh •" : "qh")
+        Image(nsImage: MenuBarIcon.image(running: ws.working, waiting: ws.waiting))
+    }
+}
+
+enum MenuBarIcon {
+    static func image(running: Int, waiting: Int) -> NSImage {
+        let n = min(3, max(running, waiting > 0 ? 1 : 0)), orange = waiting > 0 && n > 0
+        let s: CGFloat = 16, k = s / 32   // laid out on the tray's 32px grid
+        let img = NSImage(size: NSSize(width: s, height: s), flipped: false) { _ in
+            // template: the system tints it; otherwise ink follows the menu bar's appearance
+            let ink = orange ? NSColor.labelColor : NSColor.black
+            if n == 0 {
+                ink.setFill()
+                NSBezierPath(ovalIn: NSRect(x: (16 - 4.5) * k, y: (16 - 4.5) * k, width: 9 * k, height: 9 * k)).fill()
+                return true
+            }
+            let r: CGFloat = n == 1 ? 9 : n == 2 ? 6.5 : 4.6, gap = 2 * r + 2.5, x0 = 16 - CGFloat(n - 1) * gap / 2
+            for i in 0..<n {
+                let cx = x0 + CGFloat(i) * gap
+                let ring = NSBezierPath(ovalIn: NSRect(x: (cx - r) * k, y: (16 - r) * k, width: 2 * r * k, height: 2 * r * k))
+                ring.lineWidth = 2.6 * k
+                (i == 0 && orange ? NSColor(srgbRed: 1, green: 0x4D / 255.0, blue: 0x1C / 255.0, alpha: 1) : ink).setStroke()
+                ring.stroke()
+            }
+            return true
+        }
+        // a template adapts to light and dark menu bars; orange can't be a template
+        img.isTemplate = !orange
+        return img
     }
 }
 

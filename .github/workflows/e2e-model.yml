@@ -32,9 +32,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - shell: pwsh
         run: |
-          Invoke-WebRequest https://ollama.com/download/OllamaSetup.exe -OutFile OllamaSetup.exe
-          Start-Process .\OllamaSetup.exe -ArgumentList "/VERYSILENT","/NORESTART","/SUPPRESSMSGBOXES" -Wait
-          $o = Get-ChildItem "$env:LOCALAPPDATA\Programs\Ollama\ollama.exe" | Select-Object -First 1
+          # the installer starts the tray app and never returns: the plain zip instead
+          Invoke-WebRequest https://github.com/ollama/ollama/releases/latest/download/ollama-windows-amd64.zip -OutFile ollama.zip
+          Expand-Archive ollama.zip C:\ollama
+          $o = Get-Item C:\ollama\ollama.exe
           Start-Process $o.FullName -ArgumentList "serve" -WindowStyle Hidden
           for ($i = 0; $i -lt 60; $i++) { try { Invoke-RestMethod http://localhost:11434/api/tags | Out-Null; break } catch { Start-Sleep 1 } }
           & $o.FullName pull $env:MODEL

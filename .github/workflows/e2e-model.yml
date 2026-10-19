@@ -50,7 +50,7 @@ jobs:
           git -C C:\demo init -q; git -C C:\demo add .; git -C C:\demo -c user.name=e2e -c user.email=e@e commit -qm init
           Set-Content "$env:LOCALAPPDATA\qh\app.json" '{"Projects":["C:\\demo"]}'
           New-Item -ItemType Directory -Force C:\qhstate | Out-Null
-          Set-Content -NoNewline C:\qhstate\default_model $env:MODEL
+          [IO.File]::WriteAllText("C:\qhstate\default_model", $env:MODEL)
       - shell: pwsh
         run: |
           Add-Type -AssemblyName System.Windows.Forms, System.Drawing

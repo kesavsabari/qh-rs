@@ -41,6 +41,8 @@ sealed partial class MainWindow
         if (send.Child is FontIcon si) si.Foreground = Theme.Card;
         if (attachIcon != null) attachIcon.Foreground = Theme.Soft;
         meta.Foreground = Theme.Faint;
+        bottomHolder.Child = null;
+        if (dots.Parent is Panel dp) dp.Children.Remove(dots);
         bottomHolder.Child = SidebarBottom();
         var c = captionsShown; captionsShown = !c; SetCaptions(c);
         threadView.Reset();

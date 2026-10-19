@@ -88,7 +88,11 @@ jobs:
           [System.Windows.Forms.SendKeys]::SendWait("^1")
           Start-Sleep 1
           Shot "11-empty"
-          [System.Windows.Forms.SendKeys]::SendWait("^,")
+          [System.Windows.Forms.SendKeys]::SendWait("^k")
+          Start-Sleep 1
+          [System.Windows.Forms.SendKeys]::SendWait("settings")
+          Start-Sleep 1
+          [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
           Start-Sleep 1
           Shot "12-settings"
           [System.Windows.Forms.SendKeys]::SendWait("^k")

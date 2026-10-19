@@ -108,7 +108,7 @@ fn symbols(f: &Path) -> Vec<String> {
 
 /// The project's standing instructions: the first of QH.md, AGENTS.md, CLAUDE.md found from
 /// the working folder up to the project root, else the user's global ~/.config/qh/QH.md.
-fn instructions(cwd: &Path) -> Option<(String, String)> {
+pub fn instructions(cwd: &Path) -> Option<(String, String)> {
     const NAMES: [&str; 3] = ["QH.md", "AGENTS.md", "CLAUDE.md"];
     for dir in cwd.ancestors() {
         for n in NAMES {

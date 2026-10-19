@@ -1,7 +1,8 @@
 //! `qh serve`: one core per project behind a user-only Unix socket, for the Mac app (and later
 //! VS Code and the TUI). JSON lines both ways. A client's first line is
 //! `{"type":"hello","token":"…"}`; it then gets a snapshot and every hub event, tagged with its tab.
-//! Up: prompt, answer (to a confirm), stop, mode, model, new_tab, close_tab, files,
+//! Up: prompt, answer (to a confirm), stop, mode, model, new_tab, close_tab, files, plan,
+//! plan_approve, memory, memory_save, fix_verify, activity,
 //! inline_edit / inline_apply / inline_discard (Cmd+I: inline_delta then inline_result down).
 //! On Windows the same socket is an AF_UNIX one (Windows 10 1803+), so clients there speak the
 //! identical protocol (.NET: UnixDomainSocketEndPoint).
@@ -61,6 +62,8 @@ struct State {
     inline: Mutex<HashMap<u64, crate::inline::Pending>>,
     /// each tab's last failed check (cmd, output tail), for `fix_verify`
     failed: Mutex<HashMap<String, (String, String)>>,
+    /// the mode to return to when a plan is approved
+    prev_mode: Mutex<String>,
 }
 
 impl State {
@@ -152,7 +155,10 @@ fn pump(hub: Arc<Hub>, st: Arc<State>, rx: Receiver<crate::ui::Ui>) {
                 let tabs: Vec<Value> = hub.names().iter().map(|n| tab_json(&hub, n, false)).collect();
                 st.broadcast(&json!({"type": "tabs", "mode": hub.mode_name(), "tabs": tabs}));
             }
-            Event::Done { tokens } => st.broadcast(&json!({"type": "turn_done", "tab": tab, "tokens": tokens})),
+            Event::Done { tokens } => {
+                st.broadcast(&json!({"type": "turn_done", "tab": tab, "tokens": tokens}));
+                if hub.mode_name() == "plan" { st.broadcast(&json!({"type": "plan_ready", "tab": tab})) }
+            }
             Event::Log(l) => st.broadcast(&json!({"type": "log", "tab": tab, "message": l})),
             ev => {
                 if let Event::Verify { cmd, ok, tail, .. } = &ev {
@@ -165,9 +171,42 @@ fn pump(hub: Arc<Hub>, st: Arc<State>, rx: Receiver<crate::ui::Ui>) {
                     v["tab"] = json!(tab);
                     st.broadcast(&v);
                 }
+                if matches!(&ev, Event::ToolResult { name, .. } if name == "todo") { st.broadcast(&plan_json(&tab)) }
             }
         }
     }
+}
+
+fn plan_json(tab: &str) -> Value {
+    let items: Vec<Value> = crate::engine::plan_items(tab).into_iter().map(|(t, s)| json!({"text": t, "status": s})).collect();
+    json!({"type": "plan", "tab": tab, "items": items})
+}
+
+/// The text sent when a plan is approved, with the user's edits if any.
+fn approve_text(edits: &str) -> String {
+    let e = edits.trim();
+    if e.is_empty() { "Go ahead with the plan.".into() } else { format!("Go ahead with the plan, with these changes:\n{e}") }
+}
+
+/// NOTES.md (what `remember` writes) and the read-only instruction file qh loads, for a project.
+fn memory_json(root: &Path) -> Value {
+    let path = root.join("NOTES.md");
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let instr: Vec<Value> = crate::prompt::instructions(root).into_iter()
+        .map(|(p, t)| json!({"path": p, "text": t, "readonly": true})).collect();
+    json!({"type": "memory", "path": path, "text": text, "instructions": instr})
+}
+
+/// Overwrite the project's NOTES.md atomically (temp file + rename, both inside the root).
+fn save_memory(root: &Path, text: &str) -> Result<PathBuf, String> {
+    let path = root.join("NOTES.md");
+    if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err("NOTES.md is a symlink; refusing to write".into());
+    }
+    let tmp = root.join(format!(".NOTES.md.{}.tmp", std::process::id()));
+    std::fs::write(&tmp, text).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &path).map_err(|e| { let _ = std::fs::remove_file(&tmp); e.to_string() })?;
+    Ok(path)
 }
 
 /// The team room: who's here, channels, what's waiting for you, recent activity, and one
@@ -453,7 +492,30 @@ fn command(hub: &Arc<Hub>, st: &Arc<State>, v: &Value) -> Option<String> {
             drop(t);
             hub.changed();
         }
-        "mode" => if !hub.set_mode(v["mode"].as_str().unwrap_or("")) { return Some("unknown mode".into()) } else { hub.changed() },
+        "mode" => {
+            let (was, to) = (hub.mode_name(), v["mode"].as_str().unwrap_or(""));
+            if !hub.set_mode(to) { return Some("unknown mode".into()) }
+            if to == "plan" && was != "plan" { *lock(&st.prev_mode) = was.into() }
+            hub.changed()
+        }
+        "plan" => st.broadcast(&plan_json(tab)),
+        "plan_approve" => {
+            if hub.get(tab).is_none() { return Some(format!("no tab {tab}")) }
+            if hub.mode_name() == "plan" { hub.set_mode(&lock(&st.prev_mode).clone()); }
+            let out = lock(&st.remote).input(tab, &approve_text(v["edits"].as_str().unwrap_or("")), vec![]);
+            for e in out { st.broadcast(&e) }
+            hub.changed();
+        }
+        "memory" => {
+            let Some(m) = hub.get(tab) else { return Some(format!("no tab {tab}")) };
+            st.broadcast(&memory_json(&m.root));
+        }
+        "memory_save" => {
+            let Some(m) = hub.get(tab) else { return Some(format!("no tab {tab}")) };
+            let Some(text) = v["text"].as_str() else { return Some("memory_save needs text".into()) };
+            if let Err(e) = save_memory(&m.root, text) { return Some(e) }
+            st.broadcast(&memory_json(&m.root));
+        }
         "model" => {
             let Some(m) = hub.get(tab) else { return Some(format!("no tab {tab}")) };
             let mut s = lock(&m.set);
@@ -591,7 +653,8 @@ pub fn run(hub: Arc<Hub>, rx: Receiver<crate::ui::Ui>) -> i32 {
     println!("{}", json!({"type": "listening", "socket": sock, "token_file": tok_path, "protocol": PROTOCOL, "pid": std::process::id()}));
     let _ = std::io::stdout().flush();
     let st = Arc::new(State { clients: Mutex::new(vec![]), remote: Mutex::new(crate::ui::Remote::new(hub.clone())), confirms: Mutex::new(HashMap::new()),
-        next: AtomicU64::new(1), team_chan: Mutex::new(None), inline: Mutex::new(HashMap::new()), failed: Mutex::new(HashMap::new()) });
+        next: AtomicU64::new(1), team_chan: Mutex::new(None), inline: Mutex::new(HashMap::new()), failed: Mutex::new(HashMap::new()),
+        prev_mode: Mutex::new("auto-edit".into()) });
     { let s = st.clone(); std::thread::spawn(move || team_pusher(s)); }
     { let (h, s) = (hub.clone(), st.clone()); std::thread::spawn(move || pump(h, s, rx)); }
     match lock(&st.remote).start_team() {
@@ -678,6 +741,34 @@ mod winsock {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn approve_text_adds_edits() {
+        assert_eq!(super::approve_text("  "), "Go ahead with the plan.");
+        assert!(super::approve_text("skip step 2").ends_with("\nskip step 2"));
+    }
+
+    #[test]
+    fn memory_save_and_read() {
+        let d = std::env::temp_dir().join(format!("qh-mem-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("AGENTS.md"), "be nice").unwrap();
+        let p = super::save_memory(&d, "- fact one\n").unwrap();
+        assert_eq!(p, d.join("NOTES.md"));
+        let v = super::memory_json(&d);
+        assert_eq!(v["text"], "- fact one\n");
+        assert_eq!(v["instructions"][0]["text"], "be nice");
+        assert!(std::fs::read_dir(&d).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().ends_with(".tmp")));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn todo_updates_plan_items() {
+        let r = crate::engine::todo_for_test("plan-test-tab", &serde_json::json!({"items": [
+            {"text": "a", "status": "completed"}, {"text": "b", "status": "in_progress"}, {"text": "c"}]}));
+        assert!(r.starts_with("todo saved"));
+        let v = super::plan_json("plan-test-tab");
+        assert_eq!(v["items"], serde_json::json!([{"text":"a","status":"done"},{"text":"b","status":"active"},{"text":"c","status":"pending"}]));
+    }
     use super::*;
 
     #[test]

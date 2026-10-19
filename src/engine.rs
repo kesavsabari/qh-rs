@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
 use std::time::Instant;
+use std::path::PathBuf;
 
 const MAX_ERRORS: usize = 5;
 
@@ -75,6 +76,7 @@ fn turn(hub: &Arc<Hub>, m: &Arc<Member>, user: &str) -> Result<String, Error> {
     // the same call with the same result, counted over the turn: a model going round in circles
     let mut repeats: std::collections::HashMap<u64, u32> = Default::default();
     let mut circling: Option<String> = None;
+    let mut budget_ok = false; // "yes" to a budget ask covers the rest of this turn
     loop {
         compact(hub, m, false)?;
         // what teammates' agents just changed, before this session builds on stale ideas
@@ -98,6 +100,9 @@ fn turn(hub: &Arc<Hub>, m: &Arc<Member>, user: &str) -> Result<String, Error> {
         // it in, instead of answering it in a turn of its own afterwards
         for f in hub.take_followups(m) {
             m.push(json!({"role": "user", "content": f}));
+        }
+        if !budget_ok {
+            budget_ok = budget_gate(hub, m)?;
         }
         let (snapshot, schemas) = (lock(&m.msgs).clone(), hub.visible_tools(m));
         let msg = call(hub, m, &snapshot, &schemas, false)?;
@@ -638,11 +643,35 @@ fn call_locked(hub: &Arc<Hub>, m: &Arc<Member>, over: Option<(&str, &str)>, msgs
         t.usage.add(r.usage, price, paid);
         if r.plan_pct.is_some() { t.plan_pct = r.plan_pct }
     }
-    let spent = { let mut s = lock(&hub.spent); s.add(r.usage, price, paid); s.cost };
+    let (spent, delta) = { let mut s = lock(&hub.spent); let b = s.cost; s.add(r.usage, price, paid); (s.cost, s.cost - b) };
+    if delta > 0.0 && hub.cfg.budget_day > 0.0 { crate::budget::add_day(delta); }
     if let Some(w) = hub.cost_warn.check(spent, cfg.cost_warn) {
         hub.emit(&m.name, Event::Notice(w));
     }
     Ok(r.msg)
+}
+
+/// Before each model call: past `budget_session`/`budget_day`, ask like a tool would. Ok(true) =
+/// the user said yes for this turn, Ok(false) = under budget, Err = they said no.
+fn budget_gate(hub: &Hub, m: &Member) -> Result<bool, Error> {
+    let (cfg, (rs, rd)) = (&hub.cfg, *lock(&hub.budget_raise));
+    if cfg.budget_session <= 0.0 && cfg.budget_day <= 0.0 { return Ok(false) }
+    let session = lock(&hub.spent).cost;
+    let day = if cfg.budget_day > 0.0 { crate::budget::day_spent() } else { 0.0 };
+    let lim = |l: f64, r: f64| if l > 0.0 { l + r } else { 0.0 };
+    let Some((spent, limit, when)) = crate::budget::over(session, lim(cfg.budget_session, rs), day, lim(cfg.budget_day, rd)) else { return Ok(false) };
+    let text = format!("Spent {} of your {} budget for {when}. Continue?", crate::usage::dollars(spent), crate::usage::dollars(limit));
+    let args = json!({"text": text, "spent": spent, "budget": limit, "period": if when == "today" { "day" } else { "session" }});
+    match hub.ask(m, "budget", &args, Some(&text)) {
+        crate::hub::Answer::Yes => Ok(true),
+        crate::hub::Answer::Always(_) => {
+            // another full budget on top of what's spent, for as long as this qh runs
+            let mut r = lock(&hub.budget_raise);
+            if when == "today" { r.1 += spent - limit + cfg.budget_day } else { r.0 += spent - limit + cfg.budget_session }
+            Ok(true)
+        }
+        crate::hub::Answer::No => Err(Error::Other(format!("paused: {text} (answered no)"))),
+    }
 }
 
 /// Why a call failed in a way another model may not: rate limit, outage (5xx), unreachable.
@@ -806,6 +835,11 @@ relevant files first, then call ask_model again with the code, error or plan pas
         with_browse = { let mut c = hub.cfg.clone(); c.browser_allow_hosts.extend(browse); c };
         &with_browse
     };
+    let t0 = std::time::Instant::now();
+    let before: Vec<(PathBuf, String)> = if matches!(name, "write_file" | "edit_file") {
+        tools::preview(&cwd, name, &args).into_iter().map(|(p, _)| { let b = std::fs::read_to_string(&p).unwrap_or_default(); (p, b) }).collect()
+    } else { vec![] };
+    let ran_in = cwd.clone();
     let mut out = if name == "past_sessions" {
         // this session isn't a past one: leave it out of the list and the search
         let me = lock(&m.session).clone();
@@ -813,6 +847,7 @@ relevant files first, then call ask_model again with the code, error or plan pas
     } else {
         tools::call(name, &args, cfg, &mut cwd, &hub.limits(m), &sb)
     };
+    log_action(m, name, &args, &out, &ran_in, &before, t0.elapsed().as_secs_f64(), crate::sandbox::enabled(&hub.cfg));
     if !out.starts_with("error") {
         for t in &touched {
             crate::team::claim(&m.name, &lock(&m.purpose).clone(), t);
@@ -827,6 +862,32 @@ relevant files first, then call ask_model again with the code, error or plan pas
         *lock(&m.cwd) = cwd; // a cd in the command moves this session only
     }
     out
+}
+
+/// One timeline line for a command run or a file changed.
+#[allow(clippy::too_many_arguments)]
+fn log_action(m: &Member, name: &str, a: &Value, out: &str, cwd: &std::path::Path, before: &[(PathBuf, String)], secs: f64, sandboxed: bool) {
+    let session = lock(&m.session).clone();
+    match name {
+        "bash" => {
+            let cmd = a["cmd"].as_str().unwrap_or("");
+            let exit = crate::activity::exit_code(out);
+            let sandboxed = sandboxed && a["unsandboxed"].as_bool() != Some(true);
+            crate::activity::record(&session, "cmd", cmd, exit == Some(0) || (exit.is_none() && !out.starts_with("error")),
+                json!({"cmd": cmd, "cwd": cwd, "sandboxed": sandboxed, "exit": exit, "secs": (secs * 10.0).round() / 10.0,
+                       "background": a["background"].as_bool() == Some(true)}));
+        }
+        "write_file" | "edit_file" => {
+            let ok = !out.starts_with("error");
+            for (p, b) in before {
+                let after = std::fs::read_to_string(p).unwrap_or_default();
+                let (add, del) = crate::activity::plus_minus(b, &after);
+                crate::activity::record(&session, "edit", &format!("{} +{add} -{del}", p.display()), ok,
+                    json!({"path": p, "added": add, "removed": del, "tool": name}));
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Auto-approve rules: 'pytest*' matches bash commands, 'edit_file:src/*' a tool + path.

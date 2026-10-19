@@ -193,6 +193,8 @@ pub struct Hub {
     /// every tab's tokens and $ this run, closed tabs included
     pub spent: Mutex<crate::usage::Usage>,
     pub cost_warn: crate::usage::Warn,
+    /// dollars added to the budgets by answering "always" to a budget ask: (session, day)
+    pub budget_raise: Mutex<(f64, f64)>,
 }
 
 fn hubs_dir() -> PathBuf {
@@ -208,7 +210,7 @@ impl Hub {
             written: Mutex::new(HashMap::new()), links: Mutex::new(VecDeque::new()),
             mode: AtomicU8::new(MODES.iter().position(|m| *m == cfg_mode).unwrap_or(0) as u8),
             paused: AtomicBool::new(false), auto_yes,
-            spent: Mutex::new(Default::default()), cost_warn: Default::default(),
+            spent: Mutex::new(Default::default()), cost_warn: Default::default(), budget_raise: Default::default(),
         })
     }
 
@@ -663,6 +665,19 @@ session tests). Messages from other sessions start with [from <name>]. qh saves 
         if guard.is_none() && (self.auto_yes || self.mode_allows(tool, args)) {
             return true;
         }
+        match self.ask(m, tool, args, guard) {
+            Answer::Yes => true,
+            Answer::Always(rule) => {
+                self.emit(&m.name, Event::Notice(format!("auto-approving {rule} from now on (/allow lists rules)")));
+                lock(&m.set).allow.extend(rule.split(", ").map(String::from));
+                true
+            }
+            Answer::No => false,
+        }
+    }
+
+    /// Shows a confirm card and waits for its answer (No when cancelled); logged to the timeline.
+    pub fn ask(&self, m: &Member, tool: &str, args: &Value, guard: Option<&str>) -> Answer {
         *lock(&m.status) = "confirm";
         self.changed();
         let (tx, rx) = channel();
@@ -677,15 +692,12 @@ session tests). Messages from other sessions start with [from <name>]. qh saves 
         };
         *lock(&m.status) = "working";
         self.changed();
-        match ans {
-            Answer::Yes => true,
-            Answer::Always(rule) => {
-                self.emit(&m.name, Event::Notice(format!("auto-approving {rule} from now on (/allow lists rules)")));
-                lock(&m.set).allow.extend(rule.split(", ").map(String::from));
-                true
-            }
-            Answer::No => false,
-        }
+        let what = match &ans { Answer::Yes => "allowed", Answer::Always(_) => "allowed always", Answer::No => "denied" };
+        let subject = args["cmd"].as_str().or(args["path"].as_str()).or(args["host"].as_str())
+            .or(args["text"].as_str()).unwrap_or("");
+        crate::activity::record(&lock(&m.session), "ask", &format!("{tool} {subject}: {what}").replace("  ", " "),
+            !matches!(ans, Answer::No), json!({"tool": tool, "answer": what, "by": "user", "guard": guard.is_some()}));
+        ans
     }
 
     /// What this session's commands run with: its project and its allowlist proxy, whose every new
@@ -698,16 +710,22 @@ session tests). Messages from other sessions start with [from <name>]. qh saves 
             let (hub, name) = (Arc::downgrade(self), m.name.clone());
             let decide: crate::proxy::Decide = Arc::new(move |host: &str, port: u16| {
                 let Some(hub) = hub.upgrade() else { return false };
+                let Some(m) = hub.get(&name) else { return false };
+                let log = |ok: bool, why: &str| crate::activity::record(&lock(&m.session), "net", &format!("{host}:{port}"), ok,
+                    json!({"host": host, "port": port, "allowed": ok, "by": why}));
                 if crate::sandbox::host_listed(host, &hub.cfg.sandbox_hosts) {
+                    log(true, "allowlist");
                     return true;
                 }
-                let Some(m) = hub.get(&name) else { return false };
                 let target = format!("net:{host}");
                 if lock(&m.set).allow.iter().any(|r| r.starts_with("net:") && crate::engine::glob(r.as_bytes(), target.as_bytes())) {
+                    log(true, "rule");
                     return true;
                 }
-                hub.confirm(&m, "network", &json!({"host": host, "port": port}),
-                            Some(&format!("a command wants to reach {host}:{port}, which isn't on the allowlist")))
+                let ok = hub.confirm(&m, "network", &json!({"host": host, "port": port}),
+                            Some(&format!("a command wants to reach {host}:{port}, which isn't on the allowlist")));
+                log(ok, "user");
+                ok
             });
             match crate::proxy::start(decide) {
                 #[cfg(unix)]

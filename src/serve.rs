@@ -135,7 +135,7 @@ fn pump(hub: Arc<Hub>, st: Arc<State>, rx: Receiver<crate::ui::Ui>) {
             Event::Confirm { tool, args, reply, cwd, warn, guard } => {
                 let id = st.next.fetch_add(1, Relaxed);
                 let rules = hub.get(&tab).map(|m| lock(&m.set).allow.clone()).unwrap_or_default();
-                let rule = if guard && tool != "network" { String::new() } else { crate::ui::suggest_rule(&tool, &args, &rules) };
+                let rule = if tool == "budget" { "budget".to_string() } else if guard && tool != "network" { String::new() } else { crate::ui::suggest_rule(&tool, &args, &rules) };
                 lock(&st.confirms).insert(id, (rule.clone(), reply));
                 st.broadcast(&json!({"type": "confirm", "tab": tab, "id": id, "tool": tool, "args": args,
                     "cwd": cwd, "warn": warn, "guard": guard, "always": rule}));
@@ -312,6 +312,11 @@ fn command(hub: &Arc<Hub>, st: &Arc<State>, v: &Value) -> Option<String> {
         "files" => {
             let root = hub.get(tab).map(|m| m.root.clone()).unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
             st.broadcast(&json!({"type": "files", "tab": tab, "root": root, "files": project_files(&root)}));
+        }
+        "activity" => {
+            let Some(m) = hub.get(tab) else { return Some(format!("no tab {tab}")) };
+            let items = crate::activity::read(&lock(&m.session), crate::activity::MAX);
+            st.broadcast(&json!({"type": "activity", "tab": tab, "items": items}));
         }
         "tasks" => st.broadcast(&json!({"type": "tasks", "tab": tab, "text": crate::bg::list(tab)})),
         "changes" => {

@@ -26,6 +26,9 @@ pub struct Config {
     pub cloud_ctx: usize,
     /// warn once when a session's spend on API keys passes this many dollars (0 = never)
     pub cost_warn: f64,
+    /// pause and ask once spend on API keys passes this many dollars: per session / per UTC day (0 = off)
+    pub budget_session: f64,
+    pub budget_day: f64,
     pub profile: String,
     pub keep_alive: String,
     /// tried in order when the model is rate-limited or down; a plain string is a list of one
@@ -171,7 +174,7 @@ pub fn dump() -> serde_json::Value {
     let c = load();
     serde_json::json!({
         "path": config_file(), "model": c.model, "fallback_model": c.fallback_model, "ask_model": c.ask_model,
-        "fetch_model": c.fetch_model, "cost_warn": c.cost_warn, "cloud_ctx": c.cloud_ctx, "ctx": c.ctx,
+        "fetch_model": c.fetch_model, "cost_warn": c.cost_warn, "budget_session": c.budget_session, "budget_day": c.budget_day, "cloud_ctx": c.cloud_ctx, "ctx": c.ctx,
         "compact_at": c.compact_at, "mode": c.mode, "notify": c.notify, "update_check": c.update_check,
         "relay": c.relay, "team_share_files": c.team_share_files, "sandbox": c.sandbox,
         "sandbox_write": c.sandbox_write, "sandbox_hosts": c.sandbox_hosts, "sandbox_network": c.sandbox_network,
@@ -193,6 +196,8 @@ pub fn load_defaults() -> Config {
         compact_at: 11000,
         cloud_ctx: 0, // no cap: a cloud model uses its whole window
         cost_warn: 2.0,
+        budget_session: 0.0,
+        budget_day: 0.0,
         profile: "coding".into(),
         keep_alive: "30m".into(),
         fallback_model: vec![],
@@ -255,6 +260,9 @@ pub fn load() -> Config {
         if let Some(v) = n("compact_at") { c.compact_at = v }
         if let Some(v) = n("cloud_ctx") { c.cloud_ctx = v }
         if let Some(v) = t.get("cost_warn").and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64))) { c.cost_warn = v }
+        for (k, slot) in [("budget_session", &mut c.budget_session), ("budget_day", &mut c.budget_day)] {
+            if let Some(v) = t.get(k).and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64))) { *slot = v.max(0.0) }
+        }
         if let Some(v) = s("profile") { c.profile = v }
         if let Some(v) = s("keep_alive") { c.keep_alive = v }
         if let Some(v) = fallbacks(t.get("fallback_model")) { c.fallback_model = v }

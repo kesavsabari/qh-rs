@@ -14,6 +14,7 @@ mod mcp;
 mod notify;
 mod hooks;
 mod hub;
+mod inline;
 mod ide;
 mod jsonl;
 mod image;

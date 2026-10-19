@@ -88,6 +88,8 @@ final class Project: ObservableObject, Identifiable {
     @Published var tabs: [ChatTab] = []
     @Published var active = "main"
     @Published var mode = ""
+    /// qh serve pushes team changes itself (snapshot's team_push): no fast polling needed
+    var teamPush = false
     @Published var asks: [Ask] = []
     @Published var state: String = "starting"   // starting | live | closed: <why>
     @Published var setup: SetupState?
@@ -323,6 +325,7 @@ final class Project: ObservableObject, Identifiable {
             }
         case "snapshot":
             state = "live"
+            teamPush = e["team_push"] as? Bool ?? false
             loadFiles()
             if e["needs_setup"] as? Bool == true { showSetup = true; loadSetup() }
             mode = e["mode"] as? String ?? ""

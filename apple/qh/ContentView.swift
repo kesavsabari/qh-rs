@@ -459,7 +459,11 @@ struct TeamNav: View {
             .padding(.horizontal, 8)
         }
         .onAppear { refresh() }
-        .onReceive(tick) { _ in refresh() }
+        // a qh that pushes team changes only needs a slow safety poll (every 30 s), an older one every 3 s
+        .onReceive(tick) { d in
+            let push = ws.projects.first { $0.path == ws.teamProject }?.teamPush == true
+            if !push || Int(d.timeIntervalSince1970) % 30 < 3 { refresh() }
+        }
     }
 
     private var chatting: Bool { if case .channel = ws.teamPage { return true }; return false }

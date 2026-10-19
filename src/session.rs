@@ -159,8 +159,9 @@ pub fn for_project(cwd: &Path, n: usize) -> Vec<Value> {
 }
 
 /// The past_sessions tool: list (no args), search (`query`) or read (`id`) this folder's sessions.
-pub fn past(dir: &Path, cwd: &Path, a: &Value) -> String {
-    let all = project(dir, cwd);
+pub fn past(dir: &Path, cwd: &Path, a: &Value, current: &Path) -> String {
+    let mut all = project(dir, cwd);
+    all.retain(|(p, _)| p != current);
     let (q, want) = (a["query"].as_str().unwrap_or("").trim().to_lowercase(), a["id"].as_str().unwrap_or("").trim());
     if !want.is_empty() {
         let Some((_, msgs)) = all.iter().find(|(p, _)| id(p) == want) else { return format!("error: no session {want} in this folder") };
@@ -216,13 +217,17 @@ mod tests {
         save(&d.join("20261011-100000.jsonl"), &[sys("/p"), json!({"role": "user", "content": "add dark mode"})]);
         save(&d.join("20261012-100000.jsonl"), &[sys("/other"), json!({"role": "user", "content": "login elsewhere"})]);
         let cwd = Path::new("/p");
-        let l = past(&d, cwd, &json!({}));
+        let l = past(&d, cwd, &json!({}), Path::new(""));
         assert!(l.starts_with("20261011-100000") && l.contains("fix the login bug") && !l.contains("elsewhere"), "{l}");
-        let s = past(&d, cwd, &json!({"query": "LOGIN"}));
+        let s = past(&d, cwd, &json!({"query": "LOGIN"}), Path::new(""));
         assert!(s.contains("20261010-100000 user: fix the login bug") && !s.contains("20261012"), "{s}");
-        let r = past(&d, cwd, &json!({"id": "20261010-100000"}));
+        let r = past(&d, cwd, &json!({"id": "20261010-100000"}), Path::new(""));
         assert_eq!(r, "user: fix the login bug\n· 2 steps\nassistant: Fixed the token refresh.\n");
-        assert!(past(&d, cwd, &json!({"id": "20261012-100000"})).starts_with("error"));
+        assert!(past(&d, cwd, &json!({"id": "20261012-100000"}), Path::new("")).starts_with("error"));
+        // the session asking isn't one of its own past sessions
+        let me = d.join("20261011-100000.jsonl");
+        let mine = past(&d, cwd, &json!({}), &me);
+        assert!(!mine.contains("20261011-100000") && mine.contains("20261010-100000"), "{mine}");
         let _ = std::fs::remove_dir_all(&d);
     }
 }

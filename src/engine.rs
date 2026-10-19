@@ -806,7 +806,13 @@ relevant files first, then call ask_model again with the code, error or plan pas
         with_browse = { let mut c = hub.cfg.clone(); c.browser_allow_hosts.extend(browse); c };
         &with_browse
     };
-    let mut out = tools::call(name, &args, cfg, &mut cwd, &hub.limits(m), &sb);
+    let mut out = if name == "past_sessions" {
+        // this session isn't a past one: leave it out of the list and the search
+        let me = lock(&m.session).clone();
+        crate::session::past(&crate::session::dir(), &m.root, &args, &me)
+    } else {
+        tools::call(name, &args, cfg, &mut cwd, &hub.limits(m), &sb)
+    };
     if !out.starts_with("error") {
         for t in &touched {
             crate::team::claim(&m.name, &lock(&m.purpose).clone(), t);
@@ -966,6 +972,10 @@ mod fallback_tests {
         assert!(outage(&Error::Connect("refused".into())).is_some());
         assert!(outage(&Error::Other("read: timed out".into())).is_some());
         assert!(outage(&Error::Limited("slow down".into(), None)).is_some());
+        // a plan limit hours long: not retried, but it does fall back
+        let plan = Error::Limited("you've hit your ChatGPT plan's limit".into(), Some(7200));
+        assert!(!crate::backend::transient(&plan));
+        assert!(outage(&plan).is_some());
         assert!(outage(&Error::Other("HTTP 400: bad request".into())).is_none());
         assert!(outage(&Error::Cancelled).is_none());
     }

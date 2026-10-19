@@ -900,7 +900,7 @@ pub fn call(name: &str, a: &Value, cfg: &Config, cwd: &mut PathBuf, lim: &crate:
         "remember" => remember(cwd, a),
         "bash" => bash(cwd, a, cfg, sb),
         "grep" => grep(cwd, a),
-        "past_sessions" => Ok(crate::session::past(&crate::session::dir(), &sb.root, a)),
+        "past_sessions" => Ok(crate::session::past(&crate::session::dir(), &sb.root, a, Path::new(""))),
         n if crate::ide::TOOLS.contains(&n) => Ok(crate::ide::call(n, a)),
         "task_output" => crate::bg::output(&sb.tab, sa(a, "id"), a["tail_lines"].as_u64().map(|n| n as usize)),
         "task_stop" => crate::bg::stop(&sb.tab, sa(a, "id")),

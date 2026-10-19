@@ -557,8 +557,10 @@ pub fn chat(model: &str, messages: &[Value], tools: &[Value], think: &str,
                 let err: Value = serde_json::from_str(&text).unwrap_or_default();
                 let e = &err["error"];
                 if e["type"] == "usage_limit_reached" || e["code"] == "usage_limit_reached" {
-                    let wait = e["resets_in_seconds"].as_u64().map(|s| format!(" (resets in {}h {}m)", s / 3600, s / 60 % 60)).unwrap_or_default();
-                    return Error::Other(format!("you've hit your ChatGPT plan's limit for {model}{wait}; switch model with /model"));
+                    let resets = e["resets_in_seconds"].as_u64();
+                    let wait = resets.map(|s| format!(" (resets in {}h {}m)", s / 3600, s / 60 % 60)).unwrap_or_default();
+                    // a rate limit far too long to wait out: no retry, straight to fallback_model when one is set
+                    return Error::Limited(format!("you've hit your ChatGPT plan's limit for {model}{wait}"), Some(resets.unwrap_or(3600).max(31)));
                 }
                 if code == 429 {
                     let why = e["message"].as_str().unwrap_or("too many requests").to_string();

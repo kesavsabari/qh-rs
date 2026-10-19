@@ -22,6 +22,12 @@ jobs:
           Set-Content C:\demo\README.md "# demo"
           New-Item -ItemType Directory -Force "$env:LOCALAPPDATA\qh" | Out-Null
           Set-Content "$env:LOCALAPPDATA\qh\app.json" '{"Projects":["C:\\demo"]}'
+          # one saved session for the sidebar, in a state dir the app's qh serve inherits
+          "QH_STATE_DIR=C:\qhstate" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          New-Item -ItemType Directory -Force C:\qhstate\sessions | Out-Null
+          $sys = '{"role":"system","content":"You are a terse coding agent working in C:\\demo."}'
+          Set-Content C:\qhstate\sessions\20261018-101500.jsonl ($sys + "`n" + '{"role":"user","content":"Add a usage section to the README"}' + "`n" + '{"role":"assistant","content":"Done."}')
+          Set-Content C:\qhstate\sessions\20261017-160000.jsonl ($sys + "`n" + '{"role":"user","content":"Why does the build fail on Windows?"}' + "`n" + '{"role":"assistant","content":"A path separator."}')
       # the app starts, draws its window and keeps running; screenshots go up as an artifact
       # (1920×1080 at 100% scale; a 3840×2160 shot too if the runner's display takes it)
       - shell: pwsh
@@ -95,12 +101,26 @@ jobs:
           Shot "11-peek"
           [System.Windows.Forms.SendKeys]::SendWait("{ESC}")
           Start-Sleep 1
-          # back to personal, chat: the empty tab's starters; then settings, then dark from the palette
-          [System.Windows.Forms.SendKeys]::SendWait("^+t")
-          Start-Sleep 1
+          # chat: the empty tab's starters and the saved sessions in the sidebar; then settings, then dark from the palette
           [System.Windows.Forms.SendKeys]::SendWait("^1")
           Start-Sleep 1
-          Shot "12-empty"
+          Shot "12-empty-sessions"
+          [System.Windows.Forms.SendKeys]::SendWait("^k")
+          Start-Sleep 1
+          [System.Windows.Forms.SendKeys]::SendWait("activity log")
+          Start-Sleep 1
+          [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
+          Start-Sleep 2
+          Shot "12b-activity"
+          [System.Windows.Forms.SendKeys]::SendWait("^k")
+          Start-Sleep 1
+          [System.Windows.Forms.SendKeys]::SendWait("project memory")
+          Start-Sleep 1
+          [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
+          Start-Sleep 2
+          Shot "12c-memory"
+          [System.Windows.Forms.SendKeys]::SendWait("{ESC}")
+          Start-Sleep 1
           [System.Windows.Forms.SendKeys]::SendWait("^k")
           Start-Sleep 1
           [System.Windows.Forms.SendKeys]::SendWait("settings")

@@ -82,6 +82,9 @@ sealed partial class MainWindow
         Item("History · checkpoints", null, () => { showSettings = false; Page(p, "history"); });
         Item("Connect models", null, OpenModels);
         Item("Review changes", "Ctrl+D", () => { showSettings = false; Page(p, "review"); });
+        menu.Items.Add(new MenuFlyoutSeparator());
+        Item("Project memory", null, () => { showSettings = false; Page(p, "memory"); });
+        Item("Activity", null, () => { showSettings = false; Page(p, "activity"); });
         b.Tapped += (_, _) => menu.ShowAt(b);
         return b;
     }

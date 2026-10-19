@@ -7,12 +7,13 @@ namespace Qh;
 /// One thing in a thread, like apple/qh/QhTab.swift's Item.
 sealed class Item
 {
-    public enum Kind { User, Reply, Tool, Diff, Notice, Error }
+    public enum Kind { User, Reply, Tool, Diff, Notice, Error, Verify }
     public Kind K;
     public string Text = "";                 // user/reply/notice/error text; tool args; diff path
     public string Name = "", Summary = "", Output = "";
     public bool? Ok;                         // tool: null while it runs
     public int Added, Removed;
+    public double Secs;                      // verify: how long the check took
 }
 
 /// One tab of a project: what the snapshot says plus its thread.
@@ -22,12 +23,34 @@ sealed class Tab
     public List<Item> Items = [];
     public int Tokens;
     public double? Cost;
+    public List<(string Text, string Status)> Plan = [];
+    public bool PlanReady;                   // plan mode finished a turn: the plan waits for approval
     public string Title => Purpose.Length > 0 ? Purpose : Name;
     public bool Busy => Status is not ("" or "idle" or "done" or "ready");
 }
 
 /// A permission qh is waiting on.
-sealed record Ask(long Id, string Tab, string Tool, string Detail, string Warn, bool Guarded, string Always);
+sealed record Ask(long Id, string Tab, string Tool, string Detail, string Warn, bool Guarded, string Always, JsonObject? Args = null);
+
+/// A saved session for the sidebar (serve's "sessions").
+sealed record SavedSession(string Id, string Title, int Messages, DateTimeOffset When);
+
+/// One line of the activity log: a command, an edit, a network ask, an approval.
+sealed record ActivityEntry(DateTimeOffset T, string Kind, string Text, bool Ok)
+{
+    public string Group => Kind switch { "cmd" => "Commands", "edit" => "Edits", "net" => "Network", "ask" => "Approvals", _ => "Other" };
+}
+
+/// An inline edit in the code view: the selected lines, the instruction, the streamed answer.
+sealed class InlineEdit
+{
+    public long? Id;
+    public string Path = "";
+    public int Start, End;
+    public string Instruction = "", Preview = "", Before = "", After = "";
+    public bool Sent, Done;
+    public string? Error;
+}
 
 /// A connect-a-model choice on the setup screen.
 sealed record Source(string Id, string Label, string Kind, string Note, string Site, bool Connected, string Account);
@@ -51,6 +74,17 @@ sealed class Project
     public string? Page;                    // null = thread, "review", "history"
     public (string Path, int? Line, string Text)? Code;
     public string Draft = "";               // a rewind puts the prompt back here
+    // saved sessions, memory, activity, inline edits
+    public List<SavedSession> Sessions = [];
+    public Dictionary<string, string> OpenSessions = [];   // session id → tab showing it
+    public string MemoryPath = "", MemoryText = "";
+    public int MemoryVersion;
+    public List<(string Path, string Text)> Instructions = [];
+    public List<ActivityEntry> Activity = [];
+    public (int Start, int End)? Selection;     // code view: picked lines, 1-based
+    public InlineEdit? Inline;
+    /// serve pushes team changes itself: poll slowly
+    public bool TeamPush;
     // W4: team
     public bool TeamRunning;
     public string TeamMe = "", TeamStatus = "", Chan = "#team";
@@ -68,6 +102,8 @@ sealed class Project
     public string DefaultModel = "", SetupMessage = "";
     public bool SetupBusy, SetupError;
     readonly ServeClient serve;
+    readonly DispatcherQueue ui;
+    bool inlineQueued;
     /// the whole project changed (tabs, asks, setup): redraw everything
     public event Action? Changed;
     /// one item was added or changed in a tab's thread: redraw just that
@@ -76,6 +112,7 @@ sealed class Project
     public Project(string path, string qh, DispatcherQueue ui)
     {
         Path = path;
+        this.ui = ui;
         serve = new ServeClient(path, qh, ui) { OnEvent = Handle, OnClose = why => { State = "closed: " + why; Changed?.Invoke(); } };
         serve.Start();
     }
@@ -103,6 +140,8 @@ sealed class Project
                 Tabs = [];
                 foreach (var t in e["tabs"]?.AsArray() ?? []) Fill(t!.AsObject());
                 if ((bool?)e["needs_setup"] == true) { ShowSetup = true; LoadSetup(); }
+                if ((bool?)e["team_push"] == true) TeamPush = true;
+                Send("sessions");
                 Send("commands");
                 Send("files");
                 Send("changes");
@@ -151,6 +190,7 @@ sealed class Project
                 Add(TabNamed(tabName), new Item { K = Item.Kind.Notice, Text = (string?)e["message"] ?? "compacted the conversation" });
                 return;
             case "error":
+                if ((string?)e["re"] == "inline_edit" && Inline != null) { Inline.Error = (string?)e["message"] ?? "error"; break; }
                 Add(TabNamed(e["re"] != null ? null : tabName), new Item { K = Item.Kind.Error, Text = (string?)e["message"] ?? "error" });
                 return;
             case "usage":
@@ -159,16 +199,18 @@ sealed class Project
             case "turn_done":
                 TabNamed(tabName).Tokens = (int?)e["tokens"] ?? 0;
                 Send("checkpoints");
+                Send("sessions");
                 break;
             case "confirm":
             {
                 var a = new Ask((long?)e["id"] ?? -1, tabName ?? "", (string?)e["tool"] ?? "", Detail(e["args"]),
-                    (string?)e["warn"] ?? "", (bool?)e["guard"] ?? false, (string?)e["always"] ?? "");
+                    (string?)e["warn"] ?? "", (bool?)e["guard"] ?? false, (string?)e["always"] ?? "", e["args"] as JsonObject);
                 Asks.Add(a);
                 AskArrived?.Invoke(this, a);
                 break;
             }
             case "team":
+                if ((bool?)e["team_push"] == true) TeamPush = true;
                 TeamRunning = (bool?)e["running"] ?? false;
                 TeamMe = (string?)e["me"] ?? "";
                 TeamStatus = (string?)e["status"] ?? "";
@@ -191,6 +233,75 @@ sealed class Project
                 break;
             case "history":
                 Fill(e);
+                Send("sessions");
+                break;
+            case "sessions":
+                Sessions = e["sessions"]?.AsArray().Select(x => new SavedSession((string?)x!["id"] ?? "", (string?)x["title"] ?? "",
+                    (int?)x["messages"] ?? 0, DateTimeOffset.FromUnixTimeSeconds((long?)x["when"] ?? 0).ToLocalTime())).ToList() ?? [];
+                OpenSessions = [];
+                foreach (var o in e["open"]?.AsArray() ?? [])
+                    if ((string?)o!["id"] is { } sid && (string?)o["tab"] is { } st) OpenSessions[sid] = st;
+                break;
+            case "verify":
+                Add(TabNamed(tabName), new Item { K = Item.Kind.Verify, Name = (string?)e["cmd"] ?? "", Ok = (bool?)e["ok"] ?? false,
+                    Secs = (double?)e["secs"] ?? 0, Output = (string?)e["tail"] ?? "" });
+                return;
+            case "plan":
+            {
+                var t = TabNamed(tabName);
+                t.Plan = e["items"]?.AsArray().Select(x => ((string?)x!["text"] ?? "", (string?)x["status"] ?? "pending")).ToList() ?? [];
+                if (t.Plan.Count == 0) t.PlanReady = false;
+                break;
+            }
+            case "plan_ready":
+                TabNamed(tabName).PlanReady = true;
+                break;
+            case "memory":
+                MemoryPath = (string?)e["path"] ?? "";
+                MemoryText = (string?)e["text"] ?? "";
+                Instructions = e["instructions"]?.AsArray().Select(x => ((string?)x!["path"] ?? "", (string?)x["text"] ?? "")).ToList() ?? [];
+                MemoryVersion++;
+                break;
+            case "activity":
+                if (tabName != (Current?.Name ?? "main")) return;
+                Activity = e["items"]?.AsArray().Select(x =>
+                {
+                    var raw = (double?)x!["t"] ?? 0;
+                    return new ActivityEntry(DateTimeOffset.FromUnixTimeMilliseconds((long)(raw > 1e12 ? raw : raw * 1000)).ToLocalTime(),
+                        (string?)x["kind"] ?? "", (string?)x["text"] ?? "", (bool?)x["ok"] ?? true);
+                }).Reverse().ToList() ?? [];
+                break;
+            case "inline_delta":
+                if (Inline is { } il && (il.Id == null || il.Id == (long?)e["id"]))
+                {
+                    il.Id = (long?)e["id"];
+                    il.Preview += (string?)e["delta"] ?? "";
+                    // a streamed preview redraws at most every 80 ms
+                    if (!inlineQueued)
+                    {
+                        inlineQueued = true;
+                        var tm = ui.CreateTimer();
+                        tm.Interval = TimeSpan.FromMilliseconds(80);
+                        tm.IsRepeating = false;
+                        tm.Tick += (_, _) => { inlineQueued = false; Changed?.Invoke(); };
+                        tm.Start();
+                    }
+                }
+                return;
+            case "inline_result":
+                if (Inline is { } ir)
+                {
+                    ir.Id = (long?)e["id"];
+                    ir.Before = (string?)e["before"] ?? "";
+                    ir.After = (string?)e["after"] ?? "";
+                    ir.Done = true;
+                }
+                break;
+            case "inline_applied":
+                Add(TabNamed(tabName), new Item { K = Item.Kind.Notice, Text = "inline edit kept: " + ((string?)e["path"] ?? "") });
+                if (Code is { } c && c.Path == (string?)e["path"]) OpenFile(c.Path, Inline?.Start);
+                Inline = null;
+                Selection = null;
                 break;
             case "rewound":
                 Draft = (string?)e["prompt"] ?? "";
@@ -322,6 +433,30 @@ sealed class Project
     public void TeamSend(string text) => Send("team_send", new JsonObject { ["chan"] = Chan, ["text"] = text });
     public bool Waits => Asks.Count > 0;
     public void LoadCheckpoints() => Send("checkpoints");
+    public void LoadSessions() => Send("sessions");
+    public void Resume(string id) => Send("resume", new JsonObject { ["id"] = id });
+    public void FixVerify() => Send("fix_verify");
+    public void ApprovePlan(string edits)
+    {
+        if (Current is { } t) { t.PlanReady = false; Send("plan_approve", new JsonObject { ["edits"] = edits }); Changed?.Invoke(); }
+    }
+    public void LoadMemory() => Send("memory");
+    public void SaveMemory(string text) => Send("memory_save", new JsonObject { ["text"] = text });
+    public void LoadActivity() => Send("activity");
+    public void InlineAsk(string instruction)
+    {
+        if (Inline is not { } il || instruction.Trim().Length == 0) return;
+        il.Instruction = instruction; il.Sent = true; il.Preview = ""; il.Error = null;
+        Send("inline_edit", new JsonObject { ["path"] = il.Path, ["start"] = il.Start, ["end"] = il.End, ["instruction"] = instruction });
+        Changed?.Invoke();
+    }
+    public void InlineApply() { if (Inline?.Id is { } id) Send("inline_apply", new JsonObject { ["id"] = id }); }
+    public void InlineDiscard()
+    {
+        if (Inline?.Id is { } id) Send("inline_discard", new JsonObject { ["id"] = id });
+        Inline = null;
+        Changed?.Invoke();
+    }
 
     /// A path from the thread or the tree: read it here (the app sits on the same disk) and show it.
     public bool OpenFile(string rel, int? line = null)
@@ -332,7 +467,9 @@ sealed class Project
         if (!full.StartsWith(Path, StringComparison.OrdinalIgnoreCase) || !File.Exists(full)) return false;
         string text;
         try { text = new FileInfo(full).Length > 2_000_000 ? "(file too big to show)" : File.ReadAllText(full); } catch (Exception e) { text = e.Message; }
-        Code = (rel.Replace('\\', '/'), line, text);
+        var np = rel.Replace('\\', '/');
+        if (Code?.Path != np) { Selection = null; Inline = null; }
+        Code = (np, line, text);
         if (Layout == "chat") Layout = "split";
         Changed?.Invoke();
         return true;

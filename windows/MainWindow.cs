@@ -53,6 +53,7 @@ sealed partial class MainWindow : Window
         Title = "qh";
         ws = new Workspace(DispatcherQueue);
         ws.Changed += Render;
+        threadView.FixVerify = () => ws.Current?.FixVerify();
         ws.ItemChanged += (t, i, added) => { threadView.Changed(t, i, added); if (added) RenderMeta(); };
         Closed += (_, _) => { tray?.Dispose(); peek?.Dispose(); Notify.Stop(); ws.Shutdown(); };
         Activated += (_, e) => active = e.WindowActivationState != WindowActivationState.Deactivated;
@@ -60,10 +61,16 @@ sealed partial class MainWindow : Window
         ws.AskArrived += (p, a) => { if (!active) { Notify.Ask(p, a); toasted.Add((p.Path, a.Id)); } };
         tray = new Tray(WinRT.Interop.WindowNative.GetWindowHandle(this), Front, Close);
         peek = new Peek(WinRT.Interop.WindowNative.GetWindowHandle(this), () => ws.Current);
-        // the team room has no push yet: ask every 3 s while it's on screen
+        // the team room while it's on screen: every 3 s, or every 30 s once serve pushes changes itself
         var poll = DispatcherQueue.CreateTimer();
         poll.Interval = TimeSpan.FromSeconds(3);
-        poll.Tick += (_, _) => { if (ws.Space == "team" && active) ws.Current?.LoadTeam(); };
+        var ticks = 0;
+        poll.Tick += (_, _) =>
+        {
+            ticks++;
+            if (ws.Space != "team" || !active || ws.Current is not { } tp) return;
+            if (!tp.TeamPush || ticks % 10 == 0) tp.LoadTeam();
+        };
         poll.Start();
         AppWindow.Resize(new Windows.Graphics.SizeInt32(1280, 820));
         // CI screenshots: fill the screen so the corner hover lands on the window
@@ -215,6 +222,7 @@ sealed partial class MainWindow : Window
             ToggleCompact();
         };
         Key((VirtualKey)188, ToggleSettings); // Ctrl+,
+        Key(VirtualKey.I, StartInline);
         // the first waiting permission: Ctrl+Enter allows once, Ctrl+Backspace denies
         Key(VirtualKey.Enter, () => { if (FirstAsk() is { } a) ws.Current!.Answer(a, "yes"); });
         Key(VirtualKey.Back, () => { if (FirstAsk() is { } a) ws.Current!.Answer(a, "no"); });
@@ -433,6 +441,8 @@ sealed partial class MainWindow : Window
             Act("Code", "Ctrl+3", () => SetLayout(p, "code"));
             Act("Review changes", "Ctrl+D", () => Page(p, "review"));
             Act("Checkpoints", "", () => Page(p, "history"));
+            Act("Project memory", "NOTES.md", () => { showSettings = false; Page(p, "memory"); });
+            Act("Activity log", "commands, edits, network", () => { showSettings = false; Page(p, "activity"); });
             Act("Connect models", "", () => { p.ShowSetup = true; p.LoadSetup(); Render(); });
             Act("Settings", "Ctrl+,", ToggleSettings);
             foreach (var th in new[] { "system", "light", "dark" }) { var v = th; Act($"Theme: {v}", "appearance", () => { ws.ThemePref = v; ws.Save(); Retheme(v); }); }
@@ -496,6 +506,7 @@ sealed partial class MainWindow : Window
         asks.Children.Clear();
         if (ws.Current is not { } p || p.Current is not { } t) return;
         foreach (var a in p.Asks.Where(a => a.Tab == t.Name)) asks.Children.Add(Cards.Ask(a, p));
+        if (t.Plan.Count > 0 || t.PlanReady) asks.Children.Add(PlanCard(p, t));
     }
 
     // MARK: compact mode: the sidebar shrinks to a column of project initials, the card fills the rest.
@@ -586,6 +597,7 @@ sealed partial class MainWindow : Window
             var name = t.Name;
             sidebar.Children.Add(Row(Label(t.Title, 13, Theme.Ink), t == cur.Current, () => { cur.CurrentTab = name; Render(); }, new Thickness(8, 0, 8, 0)));
         }
+        RenderSessions(cur);
     }
 
     FrameworkElement Tile(string path)
@@ -646,6 +658,8 @@ sealed partial class MainWindow : Window
         p.Page = p.Page == page ? null : page;
         if (p.Page == "review") p.LoadChanges();
         if (p.Page == "history") p.LoadCheckpoints();
+        if (p.Page == "memory") p.LoadMemory();
+        if (p.Page == "activity") p.LoadActivity();
         Render();
     }
 
@@ -695,7 +709,9 @@ sealed partial class MainWindow : Window
             if (p.Draft.Length > 0) { input.Text = p.Draft; input.SelectionStart = input.Text.Length; p.Draft = ""; }
             if (p.Page == "review") { thread.Content = CodeViews.Review(p, reviewPick, path => { reviewPick = path; Render(); }); return; }
             if (p.Page == "history") { thread.Content = CodeViews.History(p); return; }
-            if (p.Layout == "code") { thread.Content = Columns(CodeViews.Tree(p), CodeViews.Code(p), 260); return; }
+            if (p.Page == "memory") { thread.Content = Pages.Memory(p, () => { p.Page = null; Render(); }); return; }
+            if (p.Page == "activity") { thread.Content = Pages.Activity(p, Render, () => { p.Page = null; Render(); }); return; }
+            if (p.Layout == "code") { thread.Content = Columns(CodeViews.Tree(p), CodeViews.Code(p, Render), 260); return; }
         }
         string? hint = ws.Qh == null ? "qh isn't installed. Install it with install.ps1, then reopen."
             : p == null ? "Open a folder to start."
@@ -718,7 +734,7 @@ sealed partial class MainWindow : Window
         }
         threadView.Show(p!.Current!);
         // Split shows the code beside the chat once a file is open; until then, just the chat
-        thread.Content = p.Layout == "split" && p.Code != null ? Columns(threadView.View, CodeViews.Code(p), 0) : threadView.View;
+        thread.Content = p.Layout == "split" && p.Code != null ? Columns(threadView.View, CodeViews.Code(p, Render), 0) : threadView.View;
     }
 
     // MARK: composer suggestions: / commands and @ files, like the Mac's popup

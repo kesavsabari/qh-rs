@@ -13,6 +13,7 @@ sealed class ThreadView
     readonly Dictionary<Item, Border> drawn = [];
     readonly HashSet<Item> open = [];
     Tab? tab;
+    public Action? FixVerify;
     List<Item>? shown;
     Item? pending;
     readonly DispatcherTimer timer = new() { Interval = TimeSpan.FromMilliseconds(60) };
@@ -93,6 +94,7 @@ sealed class ThreadView
         },
         Item.Kind.Reply => Markdown.Render(i.Text),
         Item.Kind.Tool => Tool(i),
+        Item.Kind.Verify => Verify(i),
         Item.Kind.Diff => Line($"{i.Text}", $"+{i.Added} −{i.Removed}", Theme.Accent, ""),
         Item.Kind.Error => new TextBlock { Text = i.Text, FontFamily = Theme.Sans, FontSize = 13, Foreground = Theme.Accent, TextWrapping = TextWrapping.Wrap },
         _ => new TextBlock { Text = i.Text, FontFamily = Theme.Sans, FontSize = 12.5, Foreground = Theme.Faint, TextWrapping = TextWrapping.Wrap },
@@ -113,6 +115,42 @@ sealed class ThreadView
                 Child = new ScrollViewer { Content = new TextBlock { Text = i.Output, FontFamily = Theme.Mono, FontSize = 12, Foreground = Theme.Soft, TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true } },
             });
         head.Tapped += (_, _) => { if (!open.Remove(i)) open.Add(i); Redraw(i); };
+        return box;
+    }
+
+    /// The check qh ran after editing: one quiet ✓/✗ line; click for the output, "Fix it" when it failed.
+    UIElement Verify(Item i)
+    {
+        var ok = i.Ok == true;
+        var head = Line($"{(ok ? "✓" : "✗")}  {i.Name}", ok ? $"passed · {i.Secs:0.#}s" : $"failed · {i.Secs:0.#}s", ok ? Theme.Faint : Theme.Accent, "");
+        var box = new StackPanel { Spacing = 6 };
+        var row = new Grid { ColumnSpacing = 10 };
+        row.ColumnDefinitions.Add(new ColumnDefinition());
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        row.Children.Add(head);
+        if (i.Output.Length > 0)
+        {
+            var show = new TextBlock { Text = open.Contains(i) ? "hide output" : "show output", FontFamily = Theme.Sans, FontSize = 12, Foreground = Theme.Soft, VerticalAlignment = VerticalAlignment.Center };
+            var sb = new Border { Child = show, Padding = new Thickness(6, 2, 6, 2), Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent) };
+            sb.Tapped += (_, _) => { if (!open.Remove(i)) open.Add(i); Redraw(i); };
+            Grid.SetColumn(sb, 1);
+            row.Children.Add(sb);
+        }
+        if (!ok)
+        {
+            var fix = Cards.Button("Fix it", "", Theme.Card, Theme.Ink, () => FixVerify?.Invoke());
+            fix.Padding = new Thickness(10, 3, 10, 3);
+            Grid.SetColumn(fix, 2);
+            row.Children.Add(fix);
+        }
+        box.Children.Add(row);
+        if (open.Contains(i))
+            box.Children.Add(new Border
+            {
+                Background = Theme.Tile, CornerRadius = new CornerRadius(8), Padding = new Thickness(12, 8, 12, 8), MaxHeight = 320,
+                Child = new ScrollViewer { Content = new TextBlock { Text = i.Output, FontFamily = Theme.Mono, FontSize = 12, Foreground = Theme.Soft, TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true } },
+            });
         return box;
     }
 
@@ -139,6 +177,7 @@ static class Cards
     /// The quiet permission card: the exact command or edit, Allow once / Always / Deny.
     public static FrameworkElement Ask(Ask a, Project p)
     {
+        if (a.Tool == "budget") return Budget(a, p);
         var col = new StackPanel { Spacing = 10 };
         col.Children.Add(new TextBlock
         {
@@ -155,6 +194,26 @@ static class Cards
         buttons.Children.Add(Button("Allow once", "Ctrl+Enter", Theme.Ink, Theme.Card, () => p.Answer(a, "yes")));
         if (a.Always.Length > 0) buttons.Children.Add(Button($"Always for {a.Always}", "", Theme.Card, Theme.Ink, () => p.Answer(a, "always")));
         buttons.Children.Add(Button("Deny", "Ctrl+Backspace", null, Theme.Soft, () => p.Answer(a, "no")));
+        col.Children.Add(buttons);
+        return new Border
+        {
+            Background = Theme.Card, BorderBrush = Theme.Line, BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(12),
+            Padding = new Thickness(16, 14, 16, 14), Margin = new Thickness(0, 0, 0, 10), MaxWidth = 760, Child = col,
+        };
+    }
+
+    /// The spend limit was reached: what's spent of what, keep going or stop.
+    static FrameworkElement Budget(Ask a, Project p)
+    {
+        var spent = (double?)a.Args?["spent"] ?? 0;
+        var budget = (double?)a.Args?["budget"] ?? 0;
+        var period = (string?)a.Args?["period"] == "day" ? "today" : "this session";
+        var col = new StackPanel { Spacing = 10 };
+        col.Children.Add(new TextBlock { Text = "Budget reached", FontFamily = Theme.SansMedium, FontSize = 13, Foreground = Theme.Ink });
+        col.Children.Add(new TextBlock { Text = $"${spent:0.00} of ${budget:0.00} spent {period}.", FontFamily = Theme.Sans, FontSize = 13, Foreground = Theme.Soft, TextWrapping = TextWrapping.Wrap });
+        var buttons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+        buttons.Children.Add(Button("Keep spending", "Ctrl+Enter", Theme.Ink, Theme.Card, () => p.Answer(a, "yes")));
+        buttons.Children.Add(Button("Stop here", "Ctrl+Backspace", null, Theme.Soft, () => p.Answer(a, "no")));
         col.Children.Add(buttons);
         return new Border
         {

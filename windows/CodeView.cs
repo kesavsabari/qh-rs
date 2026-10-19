@@ -172,12 +172,13 @@ static class CodeViews
     sealed record FileEntry(string Name, string Path, bool Dir) { public override string ToString() => Name; }
 
     /// Read-only code with line numbers; the line a link pointed at is marked and scrolled to.
-    public static FrameworkElement Code(Project p)
+    public static FrameworkElement Code(Project p, Action redraw)
     {
         if (p.Code is not { } c) return Empty("No file open", "Click a path in the chat, or pick one in Code (Ctrl+3).");
         var g = new Grid();
         g.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         g.RowDefinitions.Add(new RowDefinition());
+        g.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         var head = new Grid { Padding = new Thickness(16, 12, 16, 8) };
         head.Children.Add(new TextBlock { Text = c.Path, FontFamily = Theme.Mono, FontSize = 12, Foreground = Theme.Soft, VerticalAlignment = VerticalAlignment.Center });
         var full = Path.Combine(p.Path, c.Path);
@@ -194,20 +195,96 @@ static class CodeViews
         var rows = new Grid { Padding = new Thickness(0, 0, 16, 16), ColumnSpacing = 14 };
         rows.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(52) });
         rows.ColumnDefinitions.Add(new ColumnDefinition());
-        if (c.Line is int ln && ln >= 1 && ln <= lines.Length)
+        void Mark(int from, int to, Brush b)
         {
-            var mark = new Border { Background = Theme.Tile, Height = 19, VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(0, (ln - 1) * 19, 0, 0) };
-            Grid.SetColumnSpan(mark, 2);
-            rows.Children.Add(mark);
+            var m = new Border { Background = b, Height = 19 * (to - from + 1), VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(0, (from - 1) * 19, 0, 0) };
+            Grid.SetColumnSpan(m, 2);
+            rows.Children.Add(m);
         }
-        rows.Children.Add(nums);
+        if (p.Selection is { } sel) Mark(sel.Start, Math.Min(sel.End, lines.Length), new SolidColorBrush(Theme.Hex(Theme.Dark ? 0x3A2A1Eu : 0xFBEADFu)));
+        else if (c.Line is int ln && ln >= 1 && ln <= lines.Length) Mark(ln, ln, Theme.Tile);
+        // click a line number to pick it, shift-click for a range; Ctrl+I asks for an edit
+        var gutter = new Border { Background = Clear, Child = nums };
+        gutter.PointerPressed += (_, e) =>
+        {
+            var line = Math.Clamp((int)(e.GetCurrentPoint(nums).Position.Y / 19) + 1, 1, lines.Length);
+            var shift = (e.KeyModifiers & Windows.System.VirtualKeyModifiers.Shift) != 0;
+            p.Selection = shift && p.Selection is { } s0 ? (Math.Min(s0.Start, line), Math.Max(s0.Start, line)) : (line, line);
+            if (p.Inline is { Sent: false } il) { il.Start = p.Selection.Value.Start; il.End = p.Selection.Value.End; }
+            redraw();
+        };
+        ToolTipService.SetToolTip(gutter, "Click a line, shift-click for a range, then Ctrl+I to edit it");
+        rows.Children.Add(gutter);
         Grid.SetColumn(body, 1);
         rows.Children.Add(body);
         var sv = new ScrollViewer { Content = rows, HorizontalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollMode = ScrollMode.Auto };
         if (c.Line is int l2) sv.Loaded += (_, _) => sv.ChangeView(null, Math.Max(0, (l2 - 8) * 19), null, true);
         Grid.SetRow(sv, 1);
         g.Children.Add(sv);
+        if (p.Inline is { } il2 && il2.Path == c.Path)
+        {
+            var panel = InlinePanel(p, il2);
+            Grid.SetRow(panel, 2);
+            g.Children.Add(panel);
+        }
+        else if (p.Selection is { } ps)
+        {
+            var hint = new TextBlock { Text = $"lines {ps.Start}–{ps.End} picked · Ctrl+I to edit them", FontFamily = Theme.Sans, FontSize = 12, Foreground = Theme.Faint, Margin = new Thickness(16, 6, 16, 10) };
+            Grid.SetRow(hint, 2);
+            g.Children.Add(hint);
+        }
         return g;
+    }
+
+    // MARK: inline edit: instruction, streamed preview, then a before/after mini diff with Keep / Discard
+
+    static readonly TextBox instr = new() { PlaceholderText = "Change these lines… (Enter to send, Esc to cancel)", FontSize = 13 };
+    static Project? instrFor;
+
+    static FrameworkElement InlinePanel(Project p, InlineEdit il)
+    {
+        var col = new StackPanel { Spacing = 8 };
+        col.Children.Add(new TextBlock { Text = $"Edit {il.Path}:{il.Start}–{il.End}", FontFamily = Theme.SansMedium, FontSize = 12.5, Foreground = Theme.Ink });
+        if (!il.Sent)
+        {
+            if (instr.Parent is Panel old) old.Children.Remove(instr);
+            instr.FontFamily = Theme.Sans;
+            if (instrFor != p) { instr.Text = ""; instrFor = p; }
+            instr.KeyDown -= InstrKey;
+            instr.KeyDown += InstrKey;
+            col.Children.Add(instr);
+            instr.Loaded += Focus;
+        }
+        else
+        {
+            col.Children.Add(new TextBlock { Text = "› " + il.Instruction, FontFamily = Theme.Sans, FontSize = 12.5, Foreground = Theme.Soft, TextWrapping = TextWrapping.Wrap });
+            if (il.Error != null) col.Children.Add(new TextBlock { Text = il.Error, FontFamily = Theme.Sans, FontSize = 12.5, Foreground = Theme.Accent, TextWrapping = TextWrapping.Wrap });
+            else if (!il.Done)
+                col.Children.Add(new Border
+                {
+                    Background = Theme.Tile, CornerRadius = new CornerRadius(8), Padding = new Thickness(12, 8, 12, 8), MaxHeight = 220,
+                    Child = new ScrollViewer { Content = new TextBlock { Text = il.Preview.Length > 0 ? il.Preview : "thinking…", FontFamily = Theme.Mono, FontSize = 12, Foreground = Theme.Soft, TextWrapping = TextWrapping.Wrap } },
+                });
+            else
+            {
+                var d = Diff(il.Before, il.After);
+                col.Children.Add(new Border { Background = Theme.Tile, CornerRadius = new CornerRadius(8), MaxHeight = 260, Padding = new Thickness(0, 6, 0, 0), Child = d });
+            }
+        }
+        var acts = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+        if (il.Done && il.Error == null) acts.Children.Add(Cards.Button("Keep", "", Theme.Ink, Theme.Card, p.InlineApply));
+        acts.Children.Add(Cards.Button("Discard", "", null, Theme.Soft, p.InlineDiscard));
+        col.Children.Add(acts);
+        return new Border { BorderBrush = Theme.Line, BorderThickness = new Thickness(0, 1, 0, 0), Padding = new Thickness(16, 10, 16, 12), Child = col };
+    }
+
+    static void Focus(object s, RoutedEventArgs e) { instr.Loaded -= Focus; instr.Focus(FocusState.Programmatic); }
+
+    static void InstrKey(object s, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
+    {
+        if (instrFor is not { } p) return;
+        if (e.Key == Windows.System.VirtualKey.Enter) { e.Handled = true; var t = instr.Text; instr.Text = ""; p.InlineAsk(t); }
+        else if (e.Key == Windows.System.VirtualKey.Escape) { e.Handled = true; p.InlineDiscard(); }
     }
 
     /// VS Code at the line when it's there, else whatever opens the file type.

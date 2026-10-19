@@ -1,0 +1,81 @@
+/* qh thread: Zen colours (apple/qh/Theme.swift). Light first, dark below. */
+:root {
+  --qh-card: #FBFBF9; --qh-tile: #F0EFEA; --qh-ink: #0E0E0D; --qh-soft: #6B6B66;
+  --qh-faint: #9A9A94; --qh-rule: #DCDCD5; --qh-line: #E3E2DC; --qh-hover: #E6E6E0;
+  --qh-accent: #FF4D1C; --qh-red: #C4342B; --qh-green: #2F7D3A;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --qh-card: #1D1D1B; --qh-tile: #262624; --qh-ink: #ECEBE6; --qh-soft: #9C9B94;
+    --qh-faint: #85847D; --qh-rule: #34342F; --qh-line: #31312E; --qh-hover: #2E2E2B;
+    --qh-accent: #FF5A2A; --qh-red: #FF6B5E; --qh-green: #8FD18A;
+  }
+}
+
+.qh-thread, .qh-thread > viewport { background: var(--qh-card); }
+.qh-thread-items { padding: 20px 24px 28px 24px; }
+.qh-thread label, .qh-ask label, .qh-plan label, .qh-md label {
+  font-family: "Geist", "Geist Variable", sans-serif; color: var(--qh-ink);
+}
+.qh-md label { font-size: 15px; }
+.qh-md label link, .qh-md label link:link { color: var(--qh-ink); text-decoration: underline; text-decoration-color: var(--qh-faint); }
+.qh-thread label link, .qh-thread label link:link, .qh-diff label link { color: var(--qh-soft); text-decoration-color: var(--qh-faint); }
+.qh-md label link:hover { color: var(--qh-accent); }
+.qh-md .qh-h1 { font-size: 22px; font-weight: 500; margin-top: 8px; }
+.qh-md .qh-h2 { font-size: 18px; font-weight: 500; margin-top: 6px; }
+.qh-md .qh-h3 { font-size: 15px; font-weight: 500; margin-top: 4px; }
+.qh-md .qh-bullet { color: var(--qh-faint); }
+.qh-md .qh-quote { border-left: 2px solid var(--qh-rule); padding-left: 12px; }
+.qh-md .qh-quote label { color: var(--qh-soft); }
+.qh-code { background: var(--qh-tile); border-radius: 6px; }
+.qh-code label, .qh-mono, label.qh-mono { font-family: "Geist Mono", monospace; font-size: 12.5px; }
+.qh-code > scrolledwindow > viewport > label, .qh-code > scrolledwindow > label { padding: 12px; }
+.qh-copy { min-height: 22px; padding: 0 8px; border-radius: 5px; background: transparent; margin: 6px;
+  font-family: "Geist Mono", monospace; font-size: 11px; color: var(--qh-faint); box-shadow: none; }
+.qh-copy:hover { background: var(--qh-hover); color: var(--qh-ink); }
+
+.qh-user { background: var(--qh-tile); border-radius: 14px; padding: 10px 14px; font-size: 15px; }
+.qh-notice, .qh-thread label.qh-notice { font-family: "Geist Mono", monospace; font-size: 12px; color: var(--qh-faint); }
+.qh-thread label.qh-error { font-family: "Geist Mono", monospace; font-size: 12px; color: var(--qh-red); }
+
+.qh-tool-head { background: transparent; box-shadow: none; padding: 1px 0; min-height: 0; border-radius: 4px; }
+.qh-tool-head:hover { background: transparent; }
+.qh-tool-head label { font-family: "Geist Mono", monospace; font-size: 12px; }
+.qh-thread label.qh-soft, .qh-ask label.qh-soft, .qh-plan label.qh-soft { color: var(--qh-soft); }
+.qh-thread label.qh-faint, .qh-ask label.qh-faint, .qh-plan label.qh-faint { color: var(--qh-faint); }
+.qh-thread label.qh-accent, .qh-ask label.qh-accent, .qh-plan label.qh-accent { color: var(--qh-accent); }
+.qh-thread label.qh-red { color: var(--qh-red); }
+.qh-thread label.qh-green { color: var(--qh-green); }
+.qh-out { background: var(--qh-tile); border-radius: 5px; }
+.qh-out label { font-family: "Geist Mono", monospace; font-size: 11.5px; padding: 8px; }
+
+.qh-diff { border: 1px solid var(--qh-line); border-radius: 10px; padding: 8px 12px; }
+.qh-diff label.qh-path { font-family: "Geist Mono", monospace; font-size: 13px; }
+.qh-btn { min-height: 28px; padding: 0 12px; border-radius: 7px; box-shadow: none;
+  font-family: "Geist", sans-serif; font-size: 12px; }
+.qh-btn-ink { background: var(--qh-ink); color: var(--qh-card); }
+.qh-btn-ink label { color: var(--qh-card); }
+.qh-btn-ink:hover { background: alpha(var(--qh-ink), 0.85); }
+.qh-btn-card { background: var(--qh-card); }
+.qh-btn-card:hover { background: var(--qh-hover); }
+.qh-btn-plain { background: transparent; }
+.qh-btn-plain label { color: var(--qh-soft); }
+.qh-btn-plain:hover { background: alpha(var(--qh-ink), 0.06); }
+.qh-btn-accent { background: var(--qh-accent); }
+.qh-btn-accent label { color: #FFFFFF; }
+.qh-key { font-family: "Geist Mono", monospace; font-size: 11px; opacity: 0.6; }
+
+.qh-ask { background: var(--qh-tile); border-radius: 12px; padding: 14px; border: 1px solid transparent; }
+.qh-ask.guarded { border-color: alpha(var(--qh-accent), 0.7); }
+.qh-ask .qh-title, .qh-plan .qh-title { font-size: 14px; font-weight: 500; }
+.qh-ask .qh-detail { font-family: "Geist Mono", monospace; font-size: 12.5px; color: var(--qh-soft); }
+.qh-ask .qh-warn { font-family: "Geist Mono", monospace; font-size: 11.5px; color: var(--qh-accent); }
+.qh-ask button { min-height: 32px; padding: 0 14px; border-radius: 8px; font-size: 13px; }
+.qh-ask .qh-big { font-family: "Geist Mono", monospace; font-size: 20px; }
+
+.qh-plan { background: var(--qh-tile); border-radius: 12px; padding: 12px 14px; }
+.qh-plan .qh-step { font-size: 13.5px; }
+.qh-plan .qh-step.done { color: var(--qh-faint); text-decoration: line-through; }
+.qh-plan .qh-mark { font-family: "Geist Mono", monospace; font-size: 13px; min-width: 16px; }
+.qh-plan entry { background: var(--qh-card); border-radius: 8px; font-family: "Geist", sans-serif; font-size: 13px; color: var(--qh-ink); min-height: 30px; }
+.qh-plan .qh-tool-head label { font-family: "Geist", sans-serif; font-size: 14px; font-weight: 500; }

@@ -1,0 +1,13 @@
+[package]
+name = "qh-thread"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "qh chat thread widgets for GTK4/libadwaita: markdown, thread, ask and plan cards"
+
+[workspace]
+
+[dependencies]
+gtk = { package = "gtk4", version = "0.11", features = ["v4_16"] }
+adw = { package = "libadwaita", version = "0.9", features = ["v1_6"] }
+pango = { version = "0.22", features = ["v1_56"] }

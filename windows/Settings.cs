@@ -24,12 +24,14 @@ static class SettingsPage
         col.Children.Add(Row("Default layout", "How a project opens: the chat alone, or the chat with code beside it.",
             Segmented([("Chat", "chat"), ("Split", "split")], ws.DefaultLayout, v => { ws.DefaultLayout = v; ws.Save(); changed(); })));
         var reopen = new ToggleSwitch { IsOn = ws.Reopen, OnContent = "", OffContent = "", MinWidth = 0 };
+        // the one accent, not Windows blue
+        foreach (var k in new[] { "ToggleSwitchFillOn", "ToggleSwitchFillOnPointerOver", "ToggleSwitchFillOnPressed" }) reopen.Resources[k] = Theme.Accent;
         reopen.Toggled += (_, _) => { ws.Reopen = reopen.IsOn; ws.Save(); };
         col.Children.Add(Row("Reopen last project", "Start where you left off.", reopen));
         var connect = Segmented([("Connect models…", "go")], "", _ => models());
         col.Children.Add(Row("Models", "API keys, ChatGPT sign-in, the default model.", connect));
 
-        var sv = new ScrollViewer { Content = col, IsTabStop = true };
+        var sv = new ScrollViewer { Content = col, IsTabStop = true, UseSystemFocusVisuals = false };
         sv.KeyDown += (_, e) => { if (e.Key == Windows.System.VirtualKey.Escape) { e.Handled = true; close(); } };
         sv.Loaded += (_, _) => sv.Focus(FocusState.Programmatic);
         return sv;

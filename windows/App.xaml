@@ -1,0 +1,8 @@
+<Application x:Class="Qh.App"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <!-- the only XAML: WinUI's control styles. The UI itself is built in code, like the SwiftUI views. -->
+    <Application.Resources>
+        <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" />
+    </Application.Resources>
+</Application>

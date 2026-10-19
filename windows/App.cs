@@ -1,31 +1,25 @@
 using Microsoft.UI.Xaml;
-using Microsoft.UI.Xaml.Controls;
 
 namespace Qh;
 
-/// Code-only WinUI app: the Fluent control styles come from XamlControlsResources, the rest is ours.
-sealed class App : Application
+partial class App : Application
 {
     MainWindow? window;
+    static readonly string CrashLog = Path.Combine(Path.GetTempPath(), "qh-app-crash.txt");
 
-    public App() => UnhandledException += (_, e) => e.Handled = true;
+    public App()
+    {
+        InitializeComponent();
+        UnhandledException += (_, e) => { File.AppendAllText(CrashLog, $"{DateTime.Now:s} {e.Exception}\n"); e.Handled = true; };
+    }
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
-        Resources.MergedDictionaries.Add(new XamlControlsResources());
-        window = new MainWindow();
-        window.Activate();
-    }
-
-    [STAThread]
-    static void Main()
-    {
-        WinRT.ComWrappersSupport.InitializeComWrappers();
-        Start(p =>
+        try
         {
-            var ctx = new Microsoft.UI.Dispatching.DispatcherQueueSynchronizationContext(Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread());
-            SynchronizationContext.SetSynchronizationContext(ctx);
-            _ = new App();
-        });
+            window = new MainWindow();
+            window.Activate();
+        }
+        catch (Exception e) { File.AppendAllText(CrashLog, $"{DateTime.Now:s} launch: {e}\n"); throw; }
     }
 }

@@ -204,7 +204,10 @@ fn project_files(root: &Path) -> Vec<String> {
                 for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
                     let (p, name) = (e.path(), e.file_name().to_string_lossy().to_string());
                     if name.starts_with('.') || SKIP.contains(&name.as_str()) { continue }
-                    if p.is_dir() { stack.push(p) } else if let Ok(r) = p.strip_prefix(root) { out.push(r.to_string_lossy().to_string()) }
+                    if p.is_dir() { stack.push(p) } else if let Ok(r) = p.strip_prefix(root) {
+                        // "/" on every OS, as git ls-files prints them: clients match paths across both
+                        out.push(r.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/"))
+                    }
                 }
                 if out.len() >= MAX { break }
             }

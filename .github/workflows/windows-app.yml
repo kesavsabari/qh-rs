@@ -1,7 +1,7 @@
 name: windows-app
 on:
   push:
-    paths: ["windows/**", "apple/qh/Fonts/**", ".github/workflows/windows-app.yml"]
+    paths: ["windows/**", "apple/qh/Fonts/**", "src/serve.rs", ".github/workflows/windows-app.yml"]
   workflow_dispatch:
 jobs:
   build:
@@ -11,14 +11,44 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with: { dotnet-version: "8.0.x" }
       - run: dotnet build windows/qh.csproj -c Release -p:Platform=x64
-      # the app starts, draws its window and keeps running for a few seconds (no qh here: it shows the install hint)
+      # qh itself, so the app has a real `qh serve` to attach to
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release
       - shell: pwsh
         run: |
+          New-Item -ItemType Directory -Force "$env:LOCALAPPDATA\qh\bin" | Out-Null
+          Copy-Item target/release/qh.exe "$env:LOCALAPPDATA\qh\bin\qh.exe"
+          New-Item -ItemType Directory -Force C:\demo\src | Out-Null
+          Set-Content C:\demo\README.md "# demo"
+          New-Item -ItemType Directory -Force "$env:LOCALAPPDATA\qh" | Out-Null
+          Set-Content "$env:LOCALAPPDATA\qh\app.json" '{"Projects":["C:\\demo"]}'
+      # the app starts, draws its window and keeps running; screenshots go up as an artifact
+      - shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          function Shot($name) {
+            $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+            $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+            [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+            $bmp.Save("shots/$name.png")
+          }
+          New-Item -ItemType Directory -Force shots | Out-Null
           $exe = Get-ChildItem windows/bin -Recurse -Filter qh-app.exe | Select-Object -First 1
+          $env:QH_APP_MAXIMIZE = "1"
           $p = Start-Process $exe.FullName -PassThru
-          Start-Sleep 8
+          Start-Sleep 12
+          Shot "1-window"
+          # pointer to the top-right corner: the caption buttons should fade in
+          [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point(([System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Width - 60), 20)
+          Start-Sleep 1
+          Shot "2-captions-on-hover"
+          $crash = Join-Path $env:TEMP qh-app-crash.txt
+          if (Test-Path $crash) { Get-Content $crash }
           if ($p.HasExited) { throw "qh-app exited early with $($p.ExitCode)" }
           Stop-Process $p
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: screenshots, path: shots/ }
       - uses: actions/upload-artifact@v4
         with:
           name: qh-app-win-x64

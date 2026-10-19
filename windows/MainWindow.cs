@@ -35,6 +35,8 @@ sealed class MainWindow : Window
         ws.Changed += Render;
         Closed += (_, _) => ws.Shutdown();
         AppWindow.Resize(new Windows.Graphics.SizeInt32(1280, 820));
+        // CI screenshots: fill the screen so the corner hover lands on the window
+        if (Environment.GetEnvironmentVariable("QH_APP_MAXIMIZE") == "1" && AppWindow.Presenter is OverlappedPresenter op) op.Maximize();
         Chrome();
         Build();
         Render();

@@ -30,6 +30,8 @@ struct ProjectView: View {
         .sheet(item: $project.picker) { p in PickerSheet(picker: p, project: project) }
         .sheet(isPresented: $project.showReview) { ReviewView(project: project) }
         .sheet(isPresented: $project.showTasks) { TasksView(project: project) }
+        .sheet(isPresented: $project.showMemory) { MemoryView(project: project) }
+        .sheet(isPresented: $project.showActivity) { ActivityLogView(project: project) }
         // links in the thread point at this project's files
         .onAppear { if !project.tree.children.isEmpty { PathLinks.use(project.fileSet, root: project.path) } }
     }
@@ -49,8 +51,11 @@ extension ProjectView {
                         project.openFile(c?.path ?? url.path, line: line.flatMap { Int($0) })
                         return .handled
                     })
+                if tab.plan.contains(where: { $0.status != "done" }) || (tab.planReady && !tab.plan.isEmpty) {
+                    PlanCard(tab: tab, project: project)
+                }
                 ForEach(project.asks.filter { $0.tab == tab.name }) { a in
-                    AskCard(ask: a, project: project)
+                    Group { if a.tool == "budget" { BudgetAsk(ask: a, project: project) } else { AskCard(ask: a, project: project) } }
                         .transition(reduceMotion ? .opacity : .move(edge: .bottom).combined(with: .opacity))
                 }
                 Composer(project: project, tab: tab)
@@ -95,6 +100,8 @@ struct ChatTabBar: View {
                     }
                     Button((ws.inspector ? "Hide" : "Show") + " checkpoints  ⌥⌘I") { withAnimation(.smooth(duration: 0.25)) { ws.toggleInspector() } }
                     Button("Background tasks  ⇧⌘B") { project.showTasks = true }
+                    Button("Project memory") { project.memory = nil; project.showMemory = true }
+                    Button("Activity") { project.showActivity = true }
                     Button((project.showSetup ? "Hide" : "Connect") + " models  ⇧⌘M") { project.showSetup.toggle() }
                 } label: {
                     Image(systemName: "ellipsis").font(.system(size: 13)).foregroundStyle(Theme.soft)
@@ -383,6 +390,8 @@ struct ItemView: View, Equatable {
             Text(t).font(Theme.mono(12)).foregroundStyle(Theme.faint).textSelection(.enabled)
         case .error(let t):
             Text(t).font(Theme.mono(12)).foregroundStyle(Color(nsColor: .systemRed)).textSelection(.enabled)
+        case .verify(let cmd, let ok, let secs, let tail):
+            VerifyLine(cmd: cmd, ok: ok, secs: secs, tail: tail)
         }
     }
 }

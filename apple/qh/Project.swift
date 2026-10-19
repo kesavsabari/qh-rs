@@ -10,6 +10,7 @@ struct Item: Identifiable, Equatable {
         case diff(path: String, added: Int, removed: Int)
         case notice(String)
         case error(String)
+        case verify(cmd: String, ok: Bool, secs: Double, tail: String)
     }
     let id = UUID()
     var kind: Kind
@@ -26,6 +27,7 @@ struct Ask: Identifiable {
     let warn: String
     let guarded: Bool
     let always: String
+    var args: [String: Any] = [:]
 }
 
 @MainActor
@@ -41,6 +43,8 @@ final class ChatTab: ObservableObject, Identifiable {
     @Published var cost: Double?
     @Published var think = false
     @Published var effort = ""
+    @Published var plan: [PlanItem] = []
+    @Published var planReady = false        // plan mode finished a turn: the plan waits for approval
     @Published var lastActivity = Date()   // the thread last showed something: the quiet timer starts here
     var busy: Bool { status == "working" || status == "confirm" }
 
@@ -106,6 +110,11 @@ final class Project: ObservableObject, Identifiable {
     @Published var showTasks = false
     @Published var repliesOnly = false
     @Published var showReview = false
+    @Published var showMemory = false
+    @Published var showActivity = false
+    @Published var memory: MemoryState?
+    @Published var activity: [ActivityEntry] = []
+    @Published var inline: InlineEdit?
     @Published var secret: String?          // provider whose API key the composer is asking for
     @Published var commands: [(cmd: String, about: String)] = []
     var files: [String] = []        // from `qh serve` (follows .gitignore), filled right after connecting
@@ -212,6 +221,30 @@ final class Project: ObservableObject, Identifiable {
     func loadTeam(_ chan: String) { client.send(["type": "team", "chan": chan]) }
     func teamSend(_ chan: String, _ text: String) { client.send(["type": "team_send", "chan": chan, "text": text]) }
     func loadTasks() { client.send(["type": "tasks", "tab": current?.name ?? "main"]) }
+    func fixVerify(_ tab: String) { client.send(["type": "fix_verify", "tab": tab]) }
+    func approvePlan(_ tab: ChatTab, edits: String) {
+        tab.planReady = false
+        tab.status = "working"
+        client.send(["type": "plan_approve", "tab": tab.name, "edits": edits])
+    }
+    func loadMemory() { client.send(["type": "memory", "tab": current?.name ?? "main"]) }
+    func saveMemory(_ text: String) { client.send(["type": "memory_save", "tab": current?.name ?? "main", "text": text]) }
+    func loadActivity() { client.send(["type": "activity", "tab": current?.name ?? "main"]) }
+    /// Ask the model to rewrite lines `start...end` (1-based) of `path`; the result comes back to keep or discard.
+    func inlineEdit(path: String, start: Int, end: Int, instruction: String) {
+        let tab = current?.name ?? "main"
+        inline = InlineEdit(tab: tab, path: path, start: start, end: end, instruction: instruction)
+        client.send(["type": "inline_edit", "tab": tab, "path": path, "start": start, "end": end, "instruction": instruction])
+    }
+    func inlineKeep() {
+        guard let i = inline, let id = i.id else { return }
+        inline = nil
+        client.send(["type": "inline_apply", "id": id])
+    }
+    func inlineDiscard() {
+        if let id = inline?.id { client.send(["type": "inline_discard", "id": id]) }
+        inline = nil
+    }
     func loadCommands() { client.send(["type": "commands", "tab": current?.name ?? "main"]) }
 
     func answer(_ a: Ask, _ choice: String) {
@@ -358,7 +391,38 @@ final class Project: ObservableObject, Identifiable {
         case "notice", "compact":
             let msg = e["message"] as? String ?? "compacted the conversation"
             tab(tabName).items.append(Item(kind: .notice(msg)))
+        case "verify":
+            tab(tabName).items.append(Item(kind: .verify(cmd: e["cmd"] as? String ?? "", ok: e["ok"] as? Bool ?? false,
+                                                          secs: e["secs"] as? Double ?? 0, tail: e["tail"] as? String ?? "")))
+        case "plan":
+            let t = tab(tabName)
+            t.plan = (e["items"] as? [[String: Any]] ?? []).map { PlanItem(text: $0["text"] as? String ?? "", status: $0["status"] as? String ?? "pending") }
+            if t.plan.isEmpty { t.planReady = false }
+        case "plan_ready":
+            tab(tabName).planReady = true
+        case "memory":
+            memory = MemoryState(path: e["path"] as? String ?? "", text: e["text"] as? String ?? "",
+                                 instructions: (e["instructions"] as? [[String: Any]] ?? []).map { ($0["path"] as? String ?? "", $0["text"] as? String ?? "") })
+        case "activity":
+            if tabName == (current?.name ?? "main") {
+                activity = (e["items"] as? [[String: Any]] ?? []).map(ActivityEntry.init).reversed()
+            }
+        case "inline_delta":
+            if let i = inline, i.id == nil || i.id == e["id"] as? Int {
+                inline?.id = e["id"] as? Int
+                inline?.preview += e["delta"] as? String ?? ""
+            }
+        case "inline_result":
+            if inline != nil {
+                inline?.id = e["id"] as? Int
+                inline?.before = e["before"] as? String ?? ""
+                inline?.after = e["after"] as? String ?? ""
+                inline?.done = true
+            }
+        case "inline_applied":
+            tab(tabName).items.append(Item(kind: .notice("inline edit kept: \(e["path"] as? String ?? "")")))
         case "error":
+            if e["re"] as? String == "inline_edit", inline != nil { inline?.error = e["message"] as? String ?? "error"; break }
             let msg = e["message"] as? String ?? "error"
             if e["re"] != nil { tab(current?.name ?? "main").items.append(Item(kind: .error(msg))) }
             else { tab(tabName).items.append(Item(kind: .error(msg))) }
@@ -371,7 +435,8 @@ final class Project: ObservableObject, Identifiable {
         case "confirm":
             asks.append(Ask(id: e["id"] as? Int ?? -1, tab: tabName, tool: e["tool"] as? String ?? "",
                             detail: Self.detail(e["tool"] as? String ?? "", e["args"]), warn: e["warn"] as? String ?? "",
-                            guarded: e["guard"] as? Bool ?? false, always: e["always"] as? String ?? ""))
+                            guarded: e["guard"] as? Bool ?? false, always: e["always"] as? String ?? "",
+                            args: e["args"] as? [String: Any] ?? [:]))
             if let a = asks.last { Notify.ask(self, a) }
         case "confirm_closed":
             let id = e["id"] as? Int ?? -1

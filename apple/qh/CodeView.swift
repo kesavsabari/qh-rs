@@ -199,6 +199,10 @@ struct CodeView: View {
     @State private var landed = ""          // the target we've already scrolled to
     @State private var width: CGFloat = 0   // widest line: a lazy stack only measures the rows on screen
     @AppStorage("codeSize") private var codeSize = 12.0   // Settings → Appearance
+    @State private var sel: ClosedRange<Int>?   // lines picked by clicking the gutter (shift-click extends)
+    @State private var editing = false          // the ⌘I bar is open
+    @State private var selStart = 1
+    @State private var selEnd = 1
 
     var body: some View {
         let abs = project.absolute(target.path)
@@ -208,6 +212,7 @@ struct CodeView: View {
                 Text(target.path).font(Theme.mono(13)).foregroundStyle(Theme.ink).textSelection(.enabled).lineLimit(1).truncationMode(.head)
                 if let l = target.line { Text("line \(l)").font(Theme.mono(11)).foregroundStyle(Theme.faint) }
                 Text("read-only").font(Theme.mono(11)).foregroundStyle(Theme.faint)
+                Button("Edit lines ⌘I") { openInline() }.keyboardShortcut("i").help("Click line numbers to pick lines, then ask for an edit")
                 Spacer()
                 Button("Reveal in Finder") { NSWorkspace.shared.selectFile(abs, inFileViewerRootedAtPath: "") }
                 Button("Open in your editor") { Editor.open(abs, line: target.line) }.keyboardShortcut("e")
@@ -227,12 +232,15 @@ struct CodeView: View {
                             ForEach(Array(lines.enumerated()), id: \.offset) { i, l in
                                 HStack(spacing: 0) {
                                     Text("\(i + 1)").frame(width: 48, alignment: .trailing).foregroundStyle(Theme.faint).padding(.trailing, 14)
+                                        .contentShape(Rectangle()).hand()
+                                        .onTapGesture { pick(i + 1, extend: NSEvent.modifierFlags.contains(.shift)) }
                                     Text(Syntax.color(l, lang)).fixedSize(horizontal: true, vertical: false)
                                     Spacer(minLength: 0)
                                 }
                                 .font(Theme.mono(codeSize))
                                 .padding(.vertical, 1)
-                                .background(target.line == i + 1 ? Theme.accent.opacity(0.14) : .clear)
+                                .background(sel?.contains(i + 1) == true ? Theme.accent.opacity(0.22)
+                                            : target.line == i + 1 ? Theme.accent.opacity(0.14) : .clear)
                                 .id(i + 1)
                             }
                         }
@@ -251,10 +259,27 @@ struct CodeView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .overlay(alignment: .bottom) {
+            if editing || project.inline?.path == target.path {
+                InlineEditBar(project: project, path: target.path, start: $selStart, end: $selEnd) { editing = false; sel = nil }
+            }
+        }
         .background(Theme.paper)
         .task(id: "\(target.id)#\(reloads)#\(codeSize)") { load(abs) }
         .onAppear { watch = FileWatch(abs) { reloads += 1 } }
         .onChange(of: target.id) { _, _ in watch = FileWatch(project.absolute(target.path)) { reloads += 1 } }
+    }
+
+    private func pick(_ n: Int, extend: Bool) {
+        if extend, let s = sel { sel = min(s.lowerBound, n)...max(s.upperBound, n) } else { sel = n...n }
+    }
+
+    /// ⌘I: the picked lines, else the line it was opened at, else line 1.
+    private func openInline() {
+        let r = sel ?? ((target.line ?? 1)...(target.line ?? 1))
+        selStart = r.lowerBound
+        selEnd = r.upperBound
+        editing = true
     }
 
     private func load(_ abs: String) {

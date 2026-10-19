@@ -126,8 +126,8 @@ sealed class MainWindow : Window
         if (show == captionsShown) return;
         captionsShown = show;
         var tb = AppWindow.TitleBar;
-        // the ground colour, not transparent: Windows still draws the glyphs at alpha 0
-        Color clear = Theme.Ground.Color, fg = show ? Theme.Soft.Color : clear;
+        // the card's colour (the buttons sit over its corner), not transparent: Windows still draws glyphs at alpha 0
+        Color clear = Theme.Card.Color, fg = show ? Theme.Soft.Color : clear;
         tb.ButtonBackgroundColor = clear;
         tb.ButtonInactiveBackgroundColor = clear;
         tb.ButtonForegroundColor = fg;

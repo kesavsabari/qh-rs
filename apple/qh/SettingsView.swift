@@ -156,6 +156,7 @@ private struct Note: View {
 private struct General: View {
     @ObservedObject var cfg: ConfigStore
     @AppStorage("reopenLast") private var reopen = true
+    @AppStorage("peekHotkey") private var peek = true
     var body: some View {
         Form {
             Picker("New tabs start in", selection: cfg.binding("mode") { cfg.setStr("mode", $0) }) {
@@ -170,6 +171,7 @@ private struct General: View {
             }
             Toggle("Check for updates daily", isOn: cfg.toggle("update_check") { cfg.set("update_check", $0 ? "true" : "false") })
             Toggle("Reopen the last project on launch", isOn: $reopen)
+            Toggle("Peek with ⌥Space", isOn: $peek)
             Note("Changes apply to new tabs and the next start of qh.")
         }
         .formStyle(.grouped)

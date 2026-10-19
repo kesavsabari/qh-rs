@@ -60,7 +60,7 @@ static class Pages
     {
         // the box keeps what's being typed across redraws; a fresh "memory" from serve replaces it
         if (shownVersion != p.MemoryVersion || shownFor != p) { notes.Text = p.MemoryText; shownVersion = p.MemoryVersion; shownFor = p; }
-        if (notes.Parent is Panel old) old.Children.Remove(notes);
+        if (notes.Parent is Border old) old.Child = null;
         notes.FontFamily = Theme.Mono;
         notes.Foreground = Theme.Ink;
         var col = Column("Project memory", "What qh remembers about this project (NOTES.md). It reads this at the start of every chat.", close);

@@ -45,6 +45,7 @@ static class Pages
     {
         // what's being typed survives redraws; a fresh "memory" from serve replaces it
         if (shownVersion != p.MemoryVersion || shownFor != p) { draft = p.MemoryText; shownVersion = p.MemoryVersion; shownFor = p; }
+        Action? save = null;
         var notes = new TextBox
         {
             AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, FontSize = 12.5, MinHeight = 260, MaxHeight = 520, Text = draft,
@@ -57,7 +58,6 @@ static class Pages
             { e.Handled = true; save?.Invoke(); }
         };
         var col = Column("Project memory", "What qh remembers about this project (NOTES.md). It reads this at the start of every chat.", close);
-        Action? save = null;
         var status = new TextBlock { FontFamily = Theme.Sans, FontSize = 12, Foreground = Theme.Faint, VerticalAlignment = VerticalAlignment.Center };
         save = () => { p.SaveMemory(notes.Text); status.Text = "saved"; };
         col.Children.Add(new TextBlock { Text = p.MemoryPath, FontFamily = Theme.Mono, FontSize = 11.5, Foreground = Theme.Faint, TextTrimming = TextTrimming.CharacterEllipsis });

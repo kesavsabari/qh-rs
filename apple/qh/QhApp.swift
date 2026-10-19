@@ -22,7 +22,7 @@ struct QhApp: App {
                 .environmentObject(ws)
                 .frame(minWidth: 760, minHeight: 480)
         }
-        .windowToolbarStyle(.unified(showsTitle: false))
+        .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1280, height: 820)
         .commands {
             CommandGroup(after: .toolbar) {

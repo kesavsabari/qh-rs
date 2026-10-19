@@ -63,6 +63,7 @@ extension ProjectView {
 }
 
 struct ChatTabBar: View {
+    @EnvironmentObject var ws: Workspace
     @ObservedObject var project: Project
 
     var body: some View {
@@ -73,7 +74,8 @@ struct ChatTabBar: View {
                     Text("+").font(Theme.sans(15)).foregroundStyle(Theme.faint).frame(width: 30, height: 34).contentShape(Rectangle())
                 }
                 .buttonStyle(.hand).help("New tab (⌘T)")
-                Spacer()
+                // the empty part of the bar moves the window, there's no title bar to grab
+                DragArea().frame(maxWidth: .infinity, maxHeight: .infinity)
                 LayoutSwitch(layout: $project.layout).padding(.bottom, 5).padding(.trailing, 12)
                 if !project.changes.isEmpty {
                     Button { project.loadChanges(); project.showReview = true } label: {
@@ -81,6 +83,10 @@ struct ChatTabBar: View {
                     }
                     .buttonStyle(.hand).padding(.bottom, 9).padding(.trailing, 10).help("Review changes (⌘D)")
                 }
+                Button { withAnimation(.smooth(duration: 0.25)) { ws.toggleInspector() } } label: {
+                    Image(systemName: "sidebar.right").font(.system(size: 12.5)).foregroundStyle(ws.inspector ? Theme.ink : Theme.soft)
+                }
+                .buttonStyle(.hand).padding(.bottom, 9).padding(.trailing, 10).help("Inspector (⌘⌥I)")
                 Button { project.showTasks = true } label: {
                     Text("tasks").font(Theme.sans(12.5)).foregroundStyle(Theme.soft)
                 }
@@ -94,6 +100,18 @@ struct ChatTabBar: View {
             .frame(height: 44, alignment: .bottom)
         }
     }
+}
+
+/// An empty patch that drags the window (and double-click zooms, as a title bar would).
+struct DragArea: NSViewRepresentable {
+    final class V: NSView {
+        override func mouseDown(with e: NSEvent) {
+            if e.clickCount == 2 { window?.performZoom(nil) } else { window?.performDrag(with: e) }
+        }
+        override var mouseDownCanMoveWindow: Bool { true }
+    }
+    func makeNSView(context: Context) -> NSView { V() }
+    func updateNSView(_ v: NSView, context: Context) {}
 }
 
 /// Chat | Split | Code, as a quiet pill group.

@@ -42,6 +42,13 @@ jobs:
           [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point(([System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Width - 60), 20)
           Start-Sleep 1
           Shot "2-captions-on-hover"
+          # no model on CI: the setup screen. Then the composer's / popup.
+          [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point(600, 400)
+          Start-Sleep 1
+          Shot "3-setup"
+          [System.Windows.Forms.SendKeys]::SendWait("/")
+          Start-Sleep 1
+          Shot "4-slash-commands"
           $crash = Join-Path $env:TEMP qh-app-crash.txt
           if (Test-Path $crash) { Get-Content $crash }
           if ($p.HasExited) { throw "qh-app exited early with $($p.ExitCode)" }

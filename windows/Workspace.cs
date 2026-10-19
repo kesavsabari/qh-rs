@@ -4,16 +4,35 @@ using Microsoft.UI.Dispatching;
 
 namespace Qh;
 
-/// One tab of a project, as the snapshot describes it.
-sealed class Tab
+/// One thing in a thread, like apple/qh/QhTab.swift's Item.
+sealed class Item
 {
-    public string Name = "", Purpose = "", Model = "", Status = "", Mode = "";
-    public List<(string Role, string Text)> Messages = [];
-    public string Title => Purpose.Length > 0 ? Purpose : Name;
-    public bool Busy => Status is "thinking" or "running" or "busy";
+    public enum Kind { User, Reply, Tool, Diff, Notice, Error }
+    public Kind K;
+    public string Text = "";                 // user/reply/notice/error text; tool args; diff path
+    public string Name = "", Summary = "", Output = "";
+    public bool? Ok;                         // tool: null while it runs
+    public int Added, Removed;
 }
 
-/// A project: its `qh serve`, tabs and the current one. Like apple/qh/Project.swift.
+/// One tab of a project: what the snapshot says plus its thread.
+sealed class Tab
+{
+    public string Name = "", Purpose = "", Model = "", Status = "";
+    public List<Item> Items = [];
+    public int Tokens;
+    public double? Cost;
+    public string Title => Purpose.Length > 0 ? Purpose : Name;
+    public bool Busy => Status is not ("" or "idle" or "done" or "ready");
+}
+
+/// A permission qh is waiting on.
+sealed record Ask(long Id, string Tab, string Tool, string Detail, string Warn, bool Guarded, string Always);
+
+/// A connect-a-model choice on the setup screen.
+sealed record Source(string Id, string Label, string Kind, string Note, string Site, bool Connected, string Account);
+
+/// A project: its `qh serve`, tabs, threads and asks. Like apple/qh/Project.swift.
 sealed class Project
 {
     public readonly string Path;
@@ -22,9 +41,20 @@ sealed class Project
     public string? CurrentTab;
     public string State = "starting";
     public string Mode = "";
-    public bool NeedsSetup;
+    public List<Ask> Asks = [];
+    public List<(string Cmd, string About)> Commands = [];
+    public List<string> Files = [];
+    // setup screen
+    public bool ShowSetup;
+    public List<Source> Sources = [];
+    public List<(string Id, string From)> Models = [];
+    public string DefaultModel = "", SetupMessage = "";
+    public bool SetupBusy, SetupError;
     readonly ServeClient serve;
+    /// the whole project changed (tabs, asks, setup): redraw everything
     public event Action? Changed;
+    /// one item was added or changed in a tab's thread: redraw just that
+    public event Action<Tab, Item, bool>? ItemChanged;
 
     public Project(string path, string qh, DispatcherQueue ui)
     {
@@ -35,55 +65,204 @@ sealed class Project
 
     public Tab? Current => Tabs.FirstOrDefault(t => t.Name == CurrentTab) ?? Tabs.FirstOrDefault();
 
+    Tab TabNamed(string? n)
+    {
+        n ??= Current?.Name ?? "main";
+        var t = Tabs.FirstOrDefault(x => x.Name == n);
+        if (t == null) { t = new Tab { Name = n }; Tabs.Add(t); }
+        return t;
+    }
+
+    void Add(Tab t, Item i) { t.Items.Add(i); ItemChanged?.Invoke(t, i, true); }
+
     void Handle(JsonObject e)
     {
+        var tabName = (string?)e["tab"];
         switch ((string?)e["type"])
         {
             case "snapshot":
                 State = "ready";
                 Mode = (string?)e["mode"] ?? "";
-                NeedsSetup = (bool?)e["needs_setup"] ?? false;
-                Tabs = e["tabs"]?.AsArray().Select(t => ParseTab(t!.AsObject())).ToList() ?? [];
+                Tabs = [];
+                foreach (var t in e["tabs"]?.AsArray() ?? []) Fill(t!.AsObject());
+                if ((bool?)e["needs_setup"] == true) { ShowSetup = true; LoadSetup(); }
+                Send("commands");
+                Send("files");
                 break;
             case "tabs":
-                // tab list without history: keep the messages we already have
-                var old = Tabs.ToDictionary(t => t.Name);
-                Tabs = e["tabs"]?.AsArray().Select(t =>
-                {
-                    var n = ParseTab(t!.AsObject());
-                    if (n.Messages.Count == 0 && old.TryGetValue(n.Name, out var o)) n.Messages = o.Messages;
-                    return n;
-                }).ToList() ?? Tabs;
                 Mode = (string?)e["mode"] ?? Mode;
+                var list = e["tabs"]?.AsArray().Select(x => x!.AsObject()).ToList() ?? [];
+                foreach (var t in list) Update(TabNamed((string?)t["name"]), t);
+                var names = list.Select(t => (string?)t["name"]).ToHashSet();
+                Tabs.RemoveAll(t => !names.Contains(t.Name));
                 break;
             case "active":
-                CurrentTab = (string?)e["tab"];
+                CurrentTab = tabName;
+                break;
+            case "text":
+            {
+                var t = TabNamed(tabName);
+                var delta = (string?)e["delta"] ?? "";
+                if (t.Items.LastOrDefault() is { K: Item.Kind.Reply } last) { last.Text += delta; ItemChanged?.Invoke(t, last, false); }
+                else Add(t, new Item { K = Item.Kind.Reply, Text = delta });
+                return;
+            }
+            case "tool_call":
+                Add(TabNamed(tabName), new Item { K = Item.Kind.Tool, Name = (string?)e["name"] ?? "", Text = Brief(e["args"]) });
+                return;
+            case "tool_result":
+            {
+                var t = TabNamed(tabName);
+                if (t.Items.LastOrDefault(i => i.K == Item.Kind.Tool && i.Ok == null) is { } it)
+                {
+                    it.Ok = (bool?)e["ok"] ?? true;
+                    it.Summary = (string?)e["summary"] ?? "";
+                    it.Output = (string?)e["output"] ?? "";
+                    ItemChanged?.Invoke(t, it, false);
+                }
+                return;
+            }
+            case "diff":
+                Add(TabNamed(tabName), new Item { K = Item.Kind.Diff, Text = (string?)e["path"] ?? "", Added = (int?)e["added"] ?? 0, Removed = (int?)e["removed"] ?? 0 });
+                return;
+            case "notice":
+            case "compact":
+                Add(TabNamed(tabName), new Item { K = Item.Kind.Notice, Text = (string?)e["message"] ?? "compacted the conversation" });
+                return;
+            case "error":
+                Add(TabNamed(e["re"] != null ? null : tabName), new Item { K = Item.Kind.Error, Text = (string?)e["message"] ?? "error" });
+                return;
+            case "usage":
+                TabNamed(tabName).Cost = (double?)e["cost"];
                 break;
             case "turn_done":
-                serve.Send(new JsonObject { ["type"] = "snapshot" });
+                TabNamed(tabName).Tokens = (int?)e["tokens"] ?? 0;
                 break;
+            case "confirm":
+                Asks.Add(new Ask((long?)e["id"] ?? -1, tabName ?? "", (string?)e["tool"] ?? "", Detail(e["args"]),
+                    (string?)e["warn"] ?? "", (bool?)e["guard"] ?? false, (string?)e["always"] ?? ""));
+                break;
+            case "confirm_closed":
+                Asks.RemoveAll(a => a.Id == ((long?)e["id"] ?? -1));
+                break;
+            case "commands":
+                Commands = e["commands"]?.AsArray().Where(c => c?["sub"] == null)
+                    .Select(c => ((string?)c!["cmd"] ?? "", (string?)c["about"] ?? "")).ToList() ?? [];
+                return;
+            case "files":
+                Files = e["files"]?.AsArray().Select(f => (string?)f ?? "").ToList() ?? [];
+                return;
+            case "setup":
+                Sources = e["sources"]?.AsArray().Select(x => new Source((string?)x!["id"] ?? "", (string?)x["label"] ?? "", (string?)x["kind"] ?? "",
+                    (string?)x["note"] ?? "", (string?)x["site"] ?? "", (bool?)x["connected"] ?? false, (string?)x["account"] ?? "")).ToList() ?? [];
+                DefaultModel = (string?)e["default"] ?? "";
+                if ((bool?)e["needed"] == true) ShowSetup = true;
+                break;
+            case "setup_progress":
+                SetupMessage = (string?)e["message"] ?? "";
+                break;
+            case "setup_result":
+            {
+                SetupBusy = false;
+                var ok = (bool?)e["ok"] ?? false;
+                SetupError = !ok;
+                var step = (string?)e["step"] ?? "";
+                var data = e["data"]?.AsObject();
+                if (!ok) SetupMessage = (string?)e["error"] ?? "that didn't work";
+                else if (step == "models")
+                {
+                    Models = data?["models"]?.AsArray().Select(m => ((string?)m!["id"] ?? "", (string?)m["from"] ?? "")).ToList() ?? [];
+                    if (Models.Count > 0 && SetupMessage.Length == 0) SetupMessage = "pick a default model below";
+                }
+                else if (step == "default") { SetupMessage = $"default model: {(string?)data?["model"]}"; ShowSetup = false; }
+                else
+                {
+                    SetupMessage = step == "chatgpt" ? $"signed in as {(string?)data?["account"]}" : $"connected: {(int?)data?["models"] ?? 0} models";
+                    Send("setup_models");
+                }
+                break;
+            }
             default:
                 return;
         }
         Changed?.Invoke();
     }
 
-    static Tab ParseTab(JsonObject t) => new()
+    void Fill(JsonObject t)
     {
-        Name = (string?)t["name"] ?? "",
-        Purpose = (string?)t["purpose"] ?? "",
-        Model = (string?)t["model"] ?? "",
-        Status = t["status"]?.ToString() ?? "",
-        Messages = t["messages"]?.AsArray().Select(m => ((string?)m!["role"] ?? "", (string?)m["text"] ?? "")).ToList() ?? [],
-    };
+        var tab = TabNamed((string?)t["name"]);
+        Update(tab, t);
+        tab.Items = [];
+        foreach (var m in t["messages"]?.AsArray() ?? [])
+        {
+            var text = (string?)m!["text"] ?? "";
+            if ((string?)m["role"] == "user") { if (text.Length > 0) tab.Items.Add(new Item { K = Item.Kind.User, Text = text }); continue; }
+            if (text.Length > 0) tab.Items.Add(new Item { K = Item.Kind.Reply, Text = text });
+            foreach (var n in m["tools"]?.AsArray() ?? []) tab.Items.Add(new Item { K = Item.Kind.Tool, Name = (string?)n ?? "", Ok = true });
+        }
+    }
+
+    static void Update(Tab tab, JsonObject t)
+    {
+        tab.Purpose = (string?)t["purpose"] ?? tab.Purpose;
+        tab.Model = (string?)t["model"] ?? tab.Model;
+        tab.Status = t["status"]?.ToString() ?? tab.Status;
+        tab.Tokens = (int?)t["tokens"] ?? tab.Tokens;
+    }
+
+    /// One line for a tool call: its command, path or query.
+    static string Brief(JsonNode? a)
+    {
+        if (a is not JsonObject d) return "";
+        foreach (var k in new[] { "cmd", "path", "pattern", "query", "url", "host", "name" })
+            if (d[k] is JsonValue v && v.TryGetValue<string>(out var s)) return s;
+        return d.ToJsonString();
+    }
+
+    /// What an approval card shows in full: the command, or the edit.
+    static string Detail(JsonNode? a)
+    {
+        if (a is not JsonObject d) return "";
+        if ((string?)d["cmd"] is { } c) return c;
+        if ((string?)d["path"] is { } p)
+        {
+            if ((string?)d["old"] is { } o && (string?)d["new"] is { } n)
+                return string.Join("\n", new[] { p }.Concat(o.Split('\n').Select(l => "- " + l)).Concat(n.Split('\n').Select(l => "+ " + l)));
+            if ((string?)d["content"] is { } body) return p + "\n" + string.Join("\n", body.Split('\n').Take(40).Select(l => "+ " + l));
+            return p;
+        }
+        return Brief(d);
+    }
+
+    void Send(string type, JsonObject? more = null)
+    {
+        var m = more ?? new JsonObject();
+        m["type"] = type;
+        if (Current is { } t && m["tab"] == null) m["tab"] = t.Name;
+        serve.Send(m);
+    }
 
     public void Prompt(string text)
     {
         if (Current is not { } t || text.Trim().Length == 0) return;
-        serve.Send(new JsonObject { ["type"] = "prompt", ["tab"] = t.Name, ["text"] = text });
+        text = text.Trim();
+        if (text.StartsWith('/')) Add(t, new Item { K = Item.Kind.Notice, Text = "› " + text });
+        else { Add(t, new Item { K = Item.Kind.User, Text = text }); t.Status = "working"; }
+        Send("prompt", new JsonObject { ["text"] = text });
+        Changed?.Invoke();
     }
-    public void NewTab() => serve.Send(new JsonObject { ["type"] = "new_tab" });
-    public void Stop() { if (Current is { } t) serve.Send(new JsonObject { ["type"] = "stop", ["tab"] = t.Name }); }
+    public void Answer(Ask a, string choice)
+    {
+        Asks.Remove(a);
+        serve.Send(new JsonObject { ["type"] = "answer", ["id"] = a.Id, ["answer"] = choice });
+        Changed?.Invoke();
+    }
+    public void NewTab() => Send("new_tab");
+    public void Stop() => Send("stop");
+    public void LoadSetup() { Send("setup_state"); Send("setup_models"); }
+    public void ConnectKey(string provider, string key) { SetupBusy = true; SetupMessage = "checking the key…"; Send("setup_key", new JsonObject { ["provider"] = provider, ["key"] = key }); Changed?.Invoke(); }
+    public void SignInChatGpt() { SetupBusy = true; SetupMessage = "opening the sign-in page…"; Send("setup_chatgpt"); Changed?.Invoke(); }
+    public void SetDefault(string model) { SetupBusy = true; Send("setup_default", new JsonObject { ["model"] = model }); Changed?.Invoke(); }
     public void Close() => serve.Stop();
 }
 
@@ -97,6 +276,7 @@ sealed class Workspace
     public readonly string? Qh = FindQh();
     readonly DispatcherQueue ui;
     public event Action? Changed;
+    public event Action<Tab, Item, bool>? ItemChanged;
 
     static readonly string Dir = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "qh");
     static readonly string SettingsFile = System.IO.Path.Combine(Dir, "app.json");
@@ -126,6 +306,7 @@ sealed class Workspace
         {
             Current = new Project(path, Qh, ui);
             Current.Changed += () => Changed?.Invoke();
+            Current.ItemChanged += (t, i, a) => ItemChanged?.Invoke(t, i, a);
             Projects.Add(Current);
         }
         Changed?.Invoke();

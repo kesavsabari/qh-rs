@@ -23,6 +23,13 @@ sealed class MainWindow : Window
     readonly Grid card = new();
     readonly StackPanel tabBar = new() { Orientation = Orientation.Horizontal, Spacing = 2, VerticalAlignment = VerticalAlignment.Bottom };
     readonly ContentControl thread = new() { HorizontalContentAlignment = HorizontalAlignment.Stretch, VerticalContentAlignment = VerticalAlignment.Stretch };
+    readonly ThreadView threadView = new();
+    readonly StackPanel asks = new() { Padding = new Thickness(16, 0, 16, 0) };
+    readonly StackPanel suggestions = new() { Spacing = 1 };
+    readonly Border suggestBox = new();
+    readonly StackPanel tabRight = new() { Orientation = Orientation.Horizontal, Spacing = 14, HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 16, 0) };
+    List<(string Insert, string Label, string About)> sugg = [];
+    int suggSel;
     readonly TextBox input = new();
     readonly TextBlock meta = new();
     readonly Border send = new();
@@ -33,6 +40,7 @@ sealed class MainWindow : Window
         Title = "qh";
         ws = new Workspace(DispatcherQueue);
         ws.Changed += Render;
+        ws.ItemChanged += (t, i, added) => { threadView.Changed(t, i, added); if (added) RenderMeta(); };
         Closed += (_, _) => ws.Shutdown();
         AppWindow.Resize(new Windows.Graphics.SizeInt32(1280, 820));
         // CI screenshots: fill the screen so the corner hover lands on the window
@@ -122,18 +130,27 @@ sealed class MainWindow : Window
         card.RowDefinitions.Add(new RowDefinition { Height = new GridLength(44) });
         card.RowDefinitions.Add(new RowDefinition());
         card.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        card.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         tabBar.Margin = new Thickness(12, 0, 12, 0);
         card.Children.Add(tabBar);
+        card.Children.Add(tabRight);
         Grid.SetRow(thread, 1);
         card.Children.Add(thread);
+        Grid.SetRow(asks, 2);
+        card.Children.Add(asks);
         var composer = Composer();
-        Grid.SetRow(composer, 2);
+        Grid.SetRow(composer, 3);
         card.Children.Add(composer);
 
         Key(VirtualKey.T, () => ws.Current?.NewTab());
         Key(VirtualKey.O, Pick);
+        // the first waiting permission: Ctrl+Enter allows once, Ctrl+Backspace denies
+        Key(VirtualKey.Enter, () => { if (FirstAsk() is { } a) ws.Current!.Answer(a, "yes"); });
+        Key(VirtualKey.Back, () => { if (FirstAsk() is { } a) ws.Current!.Answer(a, "no"); });
         Content = root;
     }
+
+    Ask? FirstAsk() => ws.Current is { } p && p.Current is { } t ? p.Asks.FirstOrDefault(a => a.Tab == t.Name) : null;
 
     void Key(VirtualKey k, Action a)
     {
@@ -164,9 +181,27 @@ sealed class MainWindow : Window
         RenderSidebar();
         RenderTabs();
         RenderThread();
+        RenderAsks();
+        RenderMeta();
+    }
+
+    void RenderMeta()
+    {
         var t = ws.Current?.Current;
-        meta.Text = t == null ? "" : string.Join("   ", new[] { Theme.ShortModel(t.Model), ws.Current!.Mode }.Where(s => s.Length > 0));
-        send.Background = t?.Busy == true ? Theme.Accent : input.Text.Length > 0 ? Theme.Ink : Theme.Faint;
+        var bits = t == null ? [] : new List<string> { Theme.ShortModel(t.Model), ws.Current!.Mode };
+        if (t is { Tokens: >= 1000 }) bits.Add($"{t.Tokens / 1000}k tokens");
+        if (t?.Cost is > 0) bits.Add($"${t.Cost:0.000}");
+        meta.Text = string.Join("   ", bits.Where(s => s.Length > 0));
+        var busy = t?.Busy == true;
+        send.Background = busy ? Theme.Accent : input.Text.Length > 0 ? Theme.Ink : Theme.Faint;
+        ((FontIcon)send.Child).Glyph = busy ? "\uE71A" : "\uE74A";
+    }
+
+    void RenderAsks()
+    {
+        asks.Children.Clear();
+        if (ws.Current is not { } p || p.Current is not { } t) return;
+        foreach (var a in p.Asks.Where(a => a.Tab == t.Name)) asks.Children.Add(Cards.Ask(a, p));
     }
 
     void RenderSidebar()
@@ -238,7 +273,10 @@ sealed class MainWindow : Window
     void RenderTabs()
     {
         tabBar.Children.Clear();
+        tabRight.Children.Clear();
         if (ws.Current is not { } p) return;
+        var models = Plain(Label("models", 12.5, p.ShowSetup ? Theme.Ink : Theme.Soft), () => { p.ShowSetup = !p.ShowSetup; if (p.ShowSetup) p.LoadSetup(); Render(); }, "Connect models");
+        tabRight.Children.Add(models);
         foreach (var t in p.Tabs)
         {
             bool on = t == p.Current;
@@ -258,12 +296,12 @@ sealed class MainWindow : Window
     void RenderThread()
     {
         var p = ws.Current;
+        if (p is { ShowSetup: true, State: "ready" }) { thread.Content = Cards.Setup(p); return; }
         string? hint = ws.Qh == null ? "qh isn't installed. Install it with install.ps1, then reopen."
             : p == null ? "Open a folder to start."
             : p.State.StartsWith("closed") ? p.State[8..]
             : p.State == "starting" ? $"starting qh in {p.Name}…"
-            : p.NeedsSetup ? "Connect a model: run qh once in a terminal for now (setup comes to the app in W2)."
-            : p.Current is not { } t || t.Messages.Count == 0 ? "Ask qh anything about this project." : null;
+            : p.Current is not { } t || t.Items.Count == 0 ? "Ask qh anything about this project." : null;
         if (hint != null)
         {
             thread.Content = new TextBlock
@@ -273,18 +311,66 @@ sealed class MainWindow : Window
             };
             return;
         }
-        // W1: plain text turns; markdown, tool cards and approvals are W2
-        var col = new StackPanel { Spacing = 18, MaxWidth = 760, Padding = new Thickness(32, 24, 32, 24) };
-        foreach (var (role, text) in p!.Current!.Messages.Where(m => m.Text.Length > 0))
+        threadView.Show(p!.Current!);
+        thread.Content = threadView.View;
+    }
+
+    // MARK: composer suggestions: / commands and @ files, like the Mac's popup
+
+    void Suggest()
+    {
+        sugg = [];
+        var p = ws.Current;
+        var text = input.Text;
+        if (p != null && text.StartsWith('/') && !text.Contains(' '))
+            sugg = p.Commands.Where(c => c.Cmd.StartsWith(text, StringComparison.OrdinalIgnoreCase)).Take(8).Select(c => (c.Cmd + " ", c.Cmd, c.About)).ToList();
+        else if (p != null && LastWord(text) is { } w && w.StartsWith('@'))
         {
-            var tb = new TextBlock { Text = text, FontFamily = Theme.Sans, FontSize = 14, Foreground = Theme.Ink, TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true, LineHeight = 22 };
-            col.Children.Add(role == "user"
-                ? new Border { Background = Theme.Tile, CornerRadius = new CornerRadius(12), Padding = new Thickness(14, 10, 14, 10), HorizontalAlignment = HorizontalAlignment.Right, MaxWidth = 560, Child = tb }
-                : tb);
+            var q = w[1..].ToLowerInvariant();
+            sugg = p.Files.Select(f => (f, score: Fuzzy(f.ToLowerInvariant(), q))).Where(x => x.score >= 0)
+                .OrderBy(x => x.score).ThenBy(x => x.f.Length).Take(8).Select(x => ("@" + x.f + " ", x.f, "")).ToList();
         }
-        var sv = new ScrollViewer { Content = col };
-        sv.Loaded += (_, _) => sv.ChangeView(null, sv.ScrollableHeight, null, true);
-        thread.Content = sv;
+        suggSel = 0;
+        DrawSuggestions();
+    }
+
+    static string? LastWord(string s) { var i = s.LastIndexOfAny([' ', '\n']); return s[(i + 1)..]; }
+
+    /// lower is better; -1 = not a match. Letters in order, a hit in the file name beats one in the folders.
+    static int Fuzzy(string f, string q)
+    {
+        if (q.Length == 0) return f.Count(c => c == '/');
+        int at = 0, gaps = 0;
+        foreach (var c in q) { var k = f.IndexOf(c, at); if (k < 0) return -1; gaps += k - at; at = k + 1; }
+        return gaps + (f[(f.LastIndexOf('/') + 1)..].Contains(q) ? 0 : 50);
+    }
+
+    void DrawSuggestions()
+    {
+        suggestions.Children.Clear();
+        suggestBox.Visibility = sugg.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        for (int i = 0; i < sugg.Count; i++)
+        {
+            var (_, label, about) = sugg[i];
+            var g = new Grid { Padding = new Thickness(10, 5, 10, 5) };
+            g.Children.Add(new TextBlock { Text = label, FontFamily = Theme.Mono, FontSize = 12, Foreground = Theme.Ink, TextTrimming = TextTrimming.CharacterEllipsis });
+            g.Children.Add(new TextBlock { Text = about, FontFamily = Theme.Sans, FontSize = 12, Foreground = Theme.Faint, HorizontalAlignment = HorizontalAlignment.Right, TextTrimming = TextTrimming.CharacterEllipsis, MaxWidth = 360 });
+            var k = i;
+            var b = new Border { Child = g, CornerRadius = new CornerRadius(6), Background = i == suggSel ? Theme.Tile : new SolidColorBrush(Colors.Transparent) };
+            b.Tapped += (_, _) => { suggSel = k; Accept(); };
+            suggestions.Children.Add(b);
+        }
+    }
+
+    void Accept()
+    {
+        if (suggSel >= sugg.Count) return;
+        var ins = sugg[suggSel].Insert;
+        var t = input.Text;
+        input.Text = ins.StartsWith('@') ? t[..(t.Length - (LastWord(t)?.Length ?? 0))] + ins : ins;
+        input.SelectionStart = input.Text.Length;
+        sugg = [];
+        DrawSuggestions();
     }
 
     FrameworkElement Composer()
@@ -302,12 +388,16 @@ sealed class MainWindow : Window
             input.Resources[k] = new SolidColorBrush(Colors.Transparent);
         foreach (var k in new[] { "TextControlBorderBrushFocused", "TextControlBorderBrushPointerOver", "TextControlBorderBrush" })
             input.Resources[k] = new SolidColorBrush(Colors.Transparent);
-        input.TextChanged += (_, _) => send.Background = input.Text.Length > 0 ? Theme.Ink : Theme.Faint;
+        input.TextChanged += (_, _) => { RenderMeta(); Suggest(); };
         // ⏎ sends, Shift+⏎ is a newline, Esc stops
         input.PreviewKeyDown += (_, e) =>
         {
             var shift = Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Shift).HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
-            if (e.Key == VirtualKey.Enter && !shift) { e.Handled = true; Send(); }
+            if (sugg.Count > 0 && e.Key is VirtualKey.Down or VirtualKey.Up)
+            { e.Handled = true; suggSel = (suggSel + (e.Key == VirtualKey.Down ? 1 : sugg.Count - 1)) % sugg.Count; DrawSuggestions(); }
+            else if (sugg.Count > 0 && (e.Key == VirtualKey.Tab || (e.Key == VirtualKey.Enter && !shift)))
+            { e.Handled = true; Accept(); }
+            else if (e.Key == VirtualKey.Enter && !shift) { e.Handled = true; Send(); }
             else if (e.Key == VirtualKey.Escape) { e.Handled = true; ws.Current?.Stop(); }
         };
 
@@ -321,6 +411,7 @@ sealed class MainWindow : Window
         send.Background = Theme.Faint;
         send.Child = new FontIcon { Glyph = "", FontSize = 12, Foreground = Theme.Card };
         send.Tapped += (_, _) => { if (ws.Current?.Current?.Busy == true) ws.Current.Stop(); else Send(); };
+        ToolTipService.SetToolTip(send, "Send (Enter) · Stop (Esc)");
 
         var bar = new Grid { Margin = new Thickness(8, 2, 8, 8) };
         var left = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 14 };
@@ -330,7 +421,12 @@ sealed class MainWindow : Window
         send.HorizontalAlignment = HorizontalAlignment.Right;
         bar.Children.Add(send);
 
-        var box = new StackPanel { Children = { input, bar } };
+        suggestBox.Child = suggestions;
+        suggestBox.Visibility = Visibility.Collapsed;
+        suggestBox.BorderBrush = Theme.Line;
+        suggestBox.BorderThickness = new Thickness(0, 0, 0, 1);
+        suggestBox.Padding = new Thickness(4);
+        var box = new StackPanel { Children = { suggestBox, input, bar } };
         return new Border
         {
             Background = Theme.Card, BorderBrush = Theme.Line, BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(12),

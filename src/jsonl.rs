@@ -58,6 +58,7 @@ pub fn events(ev: &Event, last_call: &mut Option<(String, Value)>) -> Vec<Value>
         }
         Event::Notice(n) if n.starts_with("error") => vec![json!({"type": "error", "message": n})],
         Event::Notice(n) => vec![json!({"type": "notice", "message": n})],
+        Event::Verify { cmd, ok, secs, tail } => vec![json!({"type": "verify", "cmd": cmd, "ok": ok, "secs": secs, "tail": tail})],
         Event::Compact { stage, before, after } => vec![json!({"type": "compact", "stage": stage, "before": before, "after": after})],
         _ => vec![],
     }

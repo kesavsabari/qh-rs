@@ -824,6 +824,11 @@ impl App {
                 }
                 self.worktree_hint(&name);
             }
+            Event::Verify { cmd, ok, secs, tail } => {
+                let last = tail.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("");
+                let msg = if ok { format!("✓ check passed: {cmd} ({secs:.1} s)") } else { format!("✗ check failed: {cmd} ({secs:.1} s): {}", clip(last, 100)) };
+                self.note(&name, msg)
+            }
             Event::Compact { stage, before, after } => self.note(&name, format!("compacted ({stage}): ≈{before} → ≈{after} tokens")),
             Event::Notice(t) => {
                 self.view(&name).streaming = false;

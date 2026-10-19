@@ -49,6 +49,9 @@ pub struct Config {
     /// qh-link relay server for teammates nothing else reaches: "default", "none", or
     /// "host:port#secret" (from `qh relay`), comma-separated for several
     pub relay: String,
+    /// `verify`: the check run after a turn that edited files; "" = auto-detect, "off" = never,
+    /// "test" = auto with tests
+    pub verify: String,
     /// `team_share_files = "auto" | "off"`: whether teammates' agents may read this machine's
     /// working copy of a team project over the line (read_team_file / list_team_files)
     pub team_share_files: bool,
@@ -212,6 +215,7 @@ pub fn load_defaults() -> Config {
         ctx_set: false,
         mouse: true,
         relay: "default".into(),
+        verify: String::new(),
         team_share_files: true,
         update_check: true,
         notify: "auto".into(),
@@ -265,6 +269,7 @@ pub fn load() -> Config {
         }
         if let Some(v) = s("mode") { c.mode = v }
         if let Some(v) = s("relay") { c.relay = v }
+        if let Some(v) = s("verify") { c.verify = v }
         match t.get("team_share_files") {
             Some(toml::Value::Boolean(b)) => c.team_share_files = *b,
             Some(toml::Value::String(v)) => c.team_share_files = !matches!(v.to_lowercase().as_str(), "off" | "false" | "no"),

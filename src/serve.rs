@@ -59,6 +59,8 @@ struct State {
     team_chan: Mutex<Option<String>>,
     /// inline edits waiting for inline_apply / inline_discard, by id
     inline: Mutex<HashMap<u64, crate::inline::Pending>>,
+    /// each tab's last failed check (cmd, output tail), for `fix_verify`
+    failed: Mutex<HashMap<String, (String, String)>>,
 }
 
 impl State {
@@ -153,6 +155,9 @@ fn pump(hub: Arc<Hub>, st: Arc<State>, rx: Receiver<crate::ui::Ui>) {
             Event::Done { tokens } => st.broadcast(&json!({"type": "turn_done", "tab": tab, "tokens": tokens})),
             Event::Log(l) => st.broadcast(&json!({"type": "log", "tab": tab, "message": l})),
             ev => {
+                if let Event::Verify { cmd, ok, tail, .. } = &ev {
+                    if *ok { lock(&st.failed).remove(&tab); } else { lock(&st.failed).insert(tab.clone(), (cmd.clone(), tail.clone())); }
+                }
                 // the app shows what a tool returned, not just its one-line summary
                 let output = match &ev { Event::ToolResult { result, .. } => Some(result.chars().take(8000).collect::<String>()), _ => None };
                 for mut v in crate::jsonl::events(&ev, last.entry(tab.clone()).or_default()) {
@@ -253,6 +258,13 @@ fn project_files(root: &Path) -> Vec<String> {
 fn command(hub: &Arc<Hub>, st: &Arc<State>, v: &Value) -> Option<String> {
     let tab = v["tab"].as_str().unwrap_or("main");
     match v["type"].as_str().unwrap_or("") {
+        "fix_verify" => {
+            let Some((cmd, tail)) = lock(&st.failed).remove(tab) else { return Some(format!("no failed check on {tab}")) };
+            if hub.get(tab).is_none() { return Some(format!("no tab {tab}")) }
+            let out = lock(&st.remote).input(tab, &format!("The check `{cmd}` failed:\n{tail}\nFix it."), vec![]);
+            for e in out { st.broadcast(&e) }
+            hub.changed();
+        }
         "prompt" => {
             // typed text and /commands both: exactly what Enter does in the TUI
             let text = v["text"].as_str().unwrap_or("");
@@ -579,7 +591,7 @@ pub fn run(hub: Arc<Hub>, rx: Receiver<crate::ui::Ui>) -> i32 {
     println!("{}", json!({"type": "listening", "socket": sock, "token_file": tok_path, "protocol": PROTOCOL, "pid": std::process::id()}));
     let _ = std::io::stdout().flush();
     let st = Arc::new(State { clients: Mutex::new(vec![]), remote: Mutex::new(crate::ui::Remote::new(hub.clone())), confirms: Mutex::new(HashMap::new()),
-        next: AtomicU64::new(1), team_chan: Mutex::new(None), inline: Mutex::new(HashMap::new()) });
+        next: AtomicU64::new(1), team_chan: Mutex::new(None), inline: Mutex::new(HashMap::new()), failed: Mutex::new(HashMap::new()) });
     { let s = st.clone(); std::thread::spawn(move || team_pusher(s)); }
     { let (h, s) = (hub.clone(), st.clone()); std::thread::spawn(move || pump(h, s, rx)); }
     match lock(&st.remote).start_team() {

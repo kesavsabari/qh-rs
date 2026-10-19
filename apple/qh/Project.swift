@@ -35,6 +35,7 @@ final class ChatTab: ObservableObject, Identifiable {
     @Published var items: [Item] = []
     @Published var status = "idle"
     @Published var model = ""
+    @Published var provider = ""
     @Published var purpose = ""
     @Published var tokens = 0
     @Published var cost: Double?
@@ -401,6 +402,7 @@ final class Project: ObservableObject, Identifiable {
         let was = tab.busy
         tab.status = t["status"] as? String ?? tab.status
         tab.model = t["model"] as? String ?? tab.model
+        tab.provider = t["provider"] as? String ?? tab.provider
         tab.purpose = t["purpose"] as? String ?? tab.purpose
         tab.tokens = t["tokens"] as? Int ?? tab.tokens
         tab.think = t["think"] as? Bool ?? tab.think

@@ -188,7 +188,7 @@ sealed class MainWindow : Window
     void RenderMeta()
     {
         var t = ws.Current?.Current;
-        var bits = t == null ? [] : new List<string> { Theme.ShortModel(t.Model), ws.Current!.Mode };
+        var bits = t == null ? [] : new List<string> { Theme.ShortModel(t.Model, t.Provider), ws.Current!.Mode };
         if (t is { Tokens: >= 1000 }) bits.Add($"{t.Tokens / 1000}k tokens");
         if (t?.Cost is > 0) bits.Add($"${t.Cost:0.000}");
         meta.Text = string.Join("   ", bits.Where(s => s.Length > 0));

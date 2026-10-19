@@ -66,7 +66,7 @@ fn tab_json(hub: &Hub, name: &str, history: bool) -> Value {
     let Some(m) = hub.get(name) else { return json!({"name": name}) };
     let set = lock(&m.set);
     let model = if set.provider.is_empty() { set.model.clone() } else { format!("{}:{}", set.provider, set.model) };
-    let mut v = json!({"name": name, "status": m.status(), "model": model, "effort": set.effort,
+    let mut v = json!({"name": name, "status": m.status(), "model": model, "provider": set.provider, "effort": set.effort,
         "think": set.think, "purpose": *lock(&m.purpose), "cwd": m.cwd(), "tokens": m.live_tokens()});
     drop(set);
     if history {

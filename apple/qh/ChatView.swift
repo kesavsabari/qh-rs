@@ -684,7 +684,7 @@ struct Composer: View {
                 HStack(spacing: 14) {
                     Button { attachPanel() } label: { Image(systemName: "plus").font(.system(size: 13)).foregroundStyle(Theme.soft).frame(width: 24, height: 24) }
                         .buttonStyle(.hand).help("Attach an image (or paste / drop one)").accessibilityLabel("Attach")
-                    Button { project.prompt("/model") } label: { Text(Theme.shortModel(tab.model)).font(Theme.sans(11.5)).foregroundStyle(Theme.faint) }
+                    Button { project.prompt("/model") } label: { Text(Theme.shortModel(tab.model, provider: tab.provider)).font(Theme.sans(11.5)).foregroundStyle(Theme.faint) }
                         .buttonStyle(.hand).help("Switch model (/model)")
                     EffortPicker(project: project, tab: tab)
                     ModePicker(project: project, small: true)

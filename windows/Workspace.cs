@@ -18,7 +18,7 @@ sealed class Item
 /// One tab of a project: what the snapshot says plus its thread.
 sealed class Tab
 {
-    public string Name = "", Purpose = "", Model = "", Status = "";
+    public string Name = "", Purpose = "", Model = "", Provider = "", Status = "";
     public List<Item> Items = [];
     public int Tokens;
     public double? Cost;
@@ -206,6 +206,7 @@ sealed class Project
     {
         tab.Purpose = (string?)t["purpose"] ?? tab.Purpose;
         tab.Model = (string?)t["model"] ?? tab.Model;
+        tab.Provider = (string?)t["provider"] ?? tab.Provider;
         tab.Status = t["status"]?.ToString() ?? tab.Status;
         tab.Tokens = (int?)t["tokens"] ?? tab.Tokens;
     }

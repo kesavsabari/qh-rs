@@ -29,12 +29,11 @@ static class Theme
     public static FontFamily SansMedium => new(Font("Geist-Medium.ttf", "Geist Medium"));
     public static FontFamily Mono => new(Font("GeistMono-Regular.ttf", "Geist Mono"));
 
-    /// "openrouter:anthropic/claude-opus-5.5" → "claude-opus-5.5", "ollama:qwen3.5:9b" → "qwen3.5:9b":
-    /// the provider is noise in the composer, the model's own tag isn't
-    public static string ShortModel(string m)
+    /// "openrouter:anthropic/claude-opus-5.5" → "claude-opus-5.5"; a local "qwen3.5:9b" stays whole.
+    /// Only the provider qh says the tab uses is cut, so a model's own tag never is.
+    public static string ShortModel(string m, string provider)
     {
-        var i = m.IndexOf(':');
-        var rest = i >= 0 ? m[(i + 1)..] : m;
+        var rest = provider.Length > 0 && m.StartsWith(provider + ":") ? m[(provider.Length + 1)..] : m;
         return rest[(rest.LastIndexOf('/') + 1)..] is { Length: > 0 } s ? s : m;
     }
 }

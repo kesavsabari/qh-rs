@@ -46,6 +46,11 @@ jobs:
           [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point(600, 400)
           Start-Sleep 1
           Shot "3-setup"
+          # click into the composer, then type
+          Add-Type -MemberDefinition '[DllImport("user32.dll")] public static extern void mouse_event(int f, int x, int y, int d, int e);' -Name M -Namespace W
+          [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point(600, 637)
+          [W.M]::mouse_event(2, 0, 0, 0, 0); [W.M]::mouse_event(4, 0, 0, 0, 0)
+          Start-Sleep 1
           [System.Windows.Forms.SendKeys]::SendWait("/")
           Start-Sleep 1
           Shot "4-slash-commands"

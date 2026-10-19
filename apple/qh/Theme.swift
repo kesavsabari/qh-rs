@@ -22,10 +22,10 @@ enum Theme {
 
     static func sans(_ size: CGFloat, medium: Bool = false) -> Font { .custom(medium ? "Geist-Medium" : "Geist-Regular", size: size) }
     static func mono(_ size: CGFloat, medium: Bool = false) -> Font { .custom(medium ? "GeistMono-Medium" : "GeistMono-Regular", size: size) }
-    /// "openrouter:anthropic/claude-opus-5.5" → "claude-opus-5.5", "ollama:qwen3.5:9b" → "qwen3.5:9b":
-    /// the provider is noise in the composer, the model's own tag isn't
-    static func shortModel(_ m: String) -> String {
-        let rest = m.firstIndex(of: ":").map { String(m[m.index(after: $0)...]) } ?? m
+    /// "openrouter:anthropic/claude-opus-5.5" → "claude-opus-5.5"; a local "qwen3.5:9b" stays whole.
+    /// Only the provider qh says the tab uses is cut, so a model's own tag never is.
+    static func shortModel(_ m: String, provider: String) -> String {
+        let rest = !provider.isEmpty && m.hasPrefix(provider + ":") ? String(m.dropFirst(provider.count + 1)) : m
         let s = rest.split(separator: "/").last.map(String.init) ?? rest
         return s.isEmpty ? m : s
     }

@@ -19,6 +19,8 @@ final class Workspace: ObservableObject {
     @Published var space = UserDefaults.standard.string(forKey: "space") ?? "personal"
     @Published var inspector = UserDefaults.standard.bool(forKey: "inspector")
     @Published var teamPage: TeamPage = .agent
+    /// the narrow sidebar: follows the window width until the user picks one, then sticks
+    @Published var compact = UserDefaults.standard.bool(forKey: "compactSidebar")
 
     /// the team project the team space shows: the open one if it's a team project, else the last
     var teamProject: String? {
@@ -102,6 +104,18 @@ final class Workspace: ObservableObject {
         if s == "team" && space != "team" { teamPage = .agent }   // the team space opens on Work, not Messages
         space = s
         UserDefaults.standard.set(s, forKey: "space")
+    }
+
+    func toggleCompact() {
+        compact.toggle()
+        UserDefaults.standard.set(compact, forKey: "compactSidebar")
+    }
+
+    /// The window crossed ~900pt: follow it, unless the user chose a sidebar themselves.
+    func fitCompact(_ width: CGFloat) {
+        guard UserDefaults.standard.object(forKey: "compactSidebar") == nil else { return }
+        let want = width < 900
+        if compact != want { compact = want }
     }
 
     func toggleInspector() {

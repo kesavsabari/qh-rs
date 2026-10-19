@@ -1,0 +1,100 @@
+name: e2e-model
+on:
+  push:
+    paths: ["src/**", "windows/**", "scripts/e2e_serve.py", ".github/workflows/e2e-model.yml"]
+  workflow_dispatch:
+env:
+  MODEL: qwen2.5:0.5b
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: curl -fsSL https://ollama.com/install.sh | sh
+      - run: |
+          (ollama serve > ollama.log 2>&1 &)
+          for i in $(seq 30); do curl -sf localhost:11434/api/tags && break; sleep 1; done
+          ollama pull "$MODEL"
+      - run: cargo build --release
+      - run: python3 scripts/e2e_serve.py target/release/qh "$MODEL"
+      - if: always()
+        run: tail -50 ollama.log || true
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with: { dotnet-version: "8.0.x" }
+      - uses: dtolnay/rust-toolchain@stable
+      - shell: pwsh
+        run: |
+          # the installer starts the tray app and never returns: the plain zip instead
+          Invoke-WebRequest https://github.com/ollama/ollama/releases/latest/download/ollama-windows-amd64.zip -OutFile ollama.zip
+          Expand-Archive ollama.zip C:\ollama
+          $o = Get-Item C:\ollama\ollama.exe
+          Start-Process $o.FullName -ArgumentList "serve" -WindowStyle Hidden
+          for ($i = 0; $i -lt 60; $i++) { try { Invoke-RestMethod http://localhost:11434/api/tags | Out-Null; break } catch { Start-Sleep 1 } }
+          & $o.FullName pull $env:MODEL
+      - run: cargo build --release
+      - run: dotnet publish windows/qh.csproj -c Release -p:Platform=x64 -r win-x64 --self-contained -o publish
+      - shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force "$env:LOCALAPPDATA\qh\bin" | Out-Null
+          Copy-Item target/release/qh.exe "$env:LOCALAPPDATA\qh\bin\qh.exe"
+          New-Item -ItemType Directory -Force C:\demo | Out-Null
+          Set-Content C:\demo\notes.txt "first line"
+          git -C C:\demo init -q; git -C C:\demo add .; git -C C:\demo -c user.name=e2e -c user.email=e@e commit -qm init
+          Set-Content "$env:LOCALAPPDATA\qh\app.json" '{"Projects":["C:\\demo"]}'
+          New-Item -ItemType Directory -Force C:\qhstate | Out-Null
+          [IO.File]::WriteAllText("C:\qhstate\default_model", $env:MODEL)
+      - shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          Add-Type -TypeDefinition @"
+          using System; using System.Runtime.InteropServices;
+          public static class Res {
+            [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Ansi)]
+            public struct DEVMODE { [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string n; public short a, b, size, extra; public int fields;
+              public int x, y, o, f; public short c, d, e, g, h; [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string form;
+              public short lp; public int bpp, w, ht, flags, freq, i1, i2, i3, i4, i5, i6, i7, i8; }
+            [DllImport("user32.dll")] static extern int EnumDisplaySettings(string d, int m, ref DEVMODE dm);
+            [DllImport("user32.dll")] static extern int ChangeDisplaySettings(ref DEVMODE dm, int f);
+            public static int Set(int w, int h) { var d = new DEVMODE(); d.size = (short)Marshal.SizeOf(d);
+              EnumDisplaySettings(null, -1, ref d); d.w = w; d.ht = h; d.fields = 0x80000 | 0x100000; return ChangeDisplaySettings(ref d, 0); }
+          }
+          "@
+          "1080p: " + [Res]::Set(1920, 1080)
+          function Shot($name) {
+            $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+            $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+            [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+            $bmp.Save("shots/$name.png")
+          }
+          New-Item -ItemType Directory -Force shots | Out-Null
+          $env:QH_APP_MAXIMIZE = "1"
+          $env:QH_STATE_DIR = "C:\qhstate"
+          $p = Start-Process (Get-Item publish/qh-app.exe).FullName -PassThru
+          Start-Sleep 15
+          Shot "e2e-0-start"
+          Add-Type -MemberDefinition '[DllImport("user32.dll")] public static extern void mouse_event(int f, int x, int y, int d, int e);' -Name M -Namespace W
+          $sb = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point(900, ($sb.Height - 120))
+          [W.M]::mouse_event(2, 0, 0, 0, 0); [W.M]::mouse_event(4, 0, 0, 0, 0)
+          Start-Sleep 1
+          [System.Windows.Forms.SendKeys]::SendWait("Add a line hello to notes.txt using the edit tool{ENTER}")
+          Start-Sleep 60
+          Shot "e2e-1-thread"
+          Shot "e2e-2-ask"
+          [System.Windows.Forms.SendKeys]::SendWait("^{ENTER}")
+          Start-Sleep 30
+          Shot "e2e-3-after"
+          "notes.txt now:"; Get-Content C:\demo\notes.txt
+          Get-ChildItem -Recurse C:\qhstate -ErrorAction SilentlyContinue | Select-Object -First 30 FullName
+          Stop-Process $p -ErrorAction SilentlyContinue
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with: { name: e2e-screenshots, path: shots/ }

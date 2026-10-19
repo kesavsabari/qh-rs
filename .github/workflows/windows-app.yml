@@ -82,6 +82,18 @@ jobs:
           [System.Windows.Forms.SendKeys]::SendWait("{ESC}^+t")
           Start-Sleep 2
           Shot "8-team"
+          # compact mode (Ctrl+\), back to personal first; then the peek window (Ctrl+Alt+Space)
+          [System.Windows.Forms.SendKeys]::SendWait("^+t")
+          Start-Sleep 1
+          [System.Windows.Forms.SendKeys]::SendWait('^\')
+          Start-Sleep 1
+          Shot "10-compact"
+          [System.Windows.Forms.SendKeys]::SendWait('^\')
+          Start-Sleep 1
+          [System.Windows.Forms.SendKeys]::SendWait("^% ")
+          Start-Sleep 2
+          Shot "11-peek"
+          [System.Windows.Forms.SendKeys]::SendWait("{ESC}")
           # lean check: what a low-end PC pays to keep it open
           $p.Refresh()
           $mb = [math]::Round($p.WorkingSet64 / 1MB)

@@ -37,6 +37,9 @@ sealed class MainWindow : Window
     List<(string Title, string Hint, Action Run)> paletteItems = [];
     int paletteSel;
     Tray? tray;
+    Peek? peek;
+    bool compact;
+    FrameworkElement? sideBottom;
     bool active = true;
     readonly HashSet<(string, long)> toasted = [];
     int suggSel;
@@ -51,11 +54,12 @@ sealed class MainWindow : Window
         ws = new Workspace(DispatcherQueue);
         ws.Changed += Render;
         ws.ItemChanged += (t, i, added) => { threadView.Changed(t, i, added); if (added) RenderMeta(); };
-        Closed += (_, _) => { tray?.Dispose(); Notify.Stop(); ws.Shutdown(); };
+        Closed += (_, _) => { tray?.Dispose(); peek?.Dispose(); Notify.Stop(); ws.Shutdown(); };
         Activated += (_, e) => active = e.WindowActivationState != WindowActivationState.Deactivated;
         Notify.Start(ws, DispatcherQueue, Front);
         ws.AskArrived += (p, a) => { if (!active) { Notify.Ask(p, a); toasted.Add((p.Path, a.Id)); } };
         tray = new Tray(WinRT.Interop.WindowNative.GetWindowHandle(this), Front, Close);
+        peek = new Peek(WinRT.Interop.WindowNative.GetWindowHandle(this), () => ws.Current);
         // the team room has no push yet: ask every 3 s while it's on screen
         var poll = DispatcherQueue.CreateTimer();
         poll.Interval = TimeSpan.FromSeconds(3);
@@ -154,7 +158,7 @@ sealed class MainWindow : Window
         root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(260) });
         root.ColumnDefinitions.Add(new ColumnDefinition());
         // the window drags from that edge and the empty part of the tab bar (see DragRegions)
-        root.SizeChanged += (_, _) => DragRegions();
+        root.SizeChanged += (_, _) => { AutoCompact(); DragRegions(); };
         tabBar.SizeChanged += (_, _) => DragRegions();
         tabRight.SizeChanged += (_, _) => DragRegions();
 
@@ -162,7 +166,7 @@ sealed class MainWindow : Window
         side.RowDefinitions.Add(new RowDefinition());
         side.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         side.Children.Add(new ScrollViewer { Content = sidebar });
-        var bottom = SidebarBottom();
+        var bottom = sideBottom = SidebarBottom();
         Grid.SetRow(bottom, 1);
         side.Children.Add(bottom);
         Grid.SetRow(side, 1);
@@ -203,6 +207,7 @@ sealed class MainWindow : Window
         Markdown.IsFile = s => ws.Current?.Files.Contains(s.Split(':')[0].Replace('\\', '/')) == true;
         Markdown.Open = s => ws.Current?.OpenFile(s);
         Key(VirtualKey.O, Pick);
+        Key((VirtualKey)220, ToggleCompact);   // Ctrl+\ (VK_OEM_5)
         // the first waiting permission: Ctrl+Enter allows once, Ctrl+Backspace denies
         Key(VirtualKey.Enter, () => { if (FirstAsk() is { } a) ws.Current!.Answer(a, "yes"); });
         Key(VirtualKey.Back, () => { if (FirstAsk() is { } a) ws.Current!.Answer(a, "no"); });
@@ -237,7 +242,13 @@ sealed class MainWindow : Window
     {
         RenderDots();
         RenderTray();
-        if (ws.Space == "team") { RenderTeam(); return; }
+        if (ws.Space == "team")
+        {
+            RenderTeam();
+            // nothing of the room fits in 56 px: just the project initials
+            if (compact) { sidebar.Children.Clear(); RenderCompactSidebar(); }
+            return;
+        }
         tabRight.Visibility = Visibility.Visible;
         RenderSidebar();
         RenderTabs();
@@ -404,6 +415,7 @@ sealed class MainWindow : Window
         void Act(string t, string k, Action a) => all.Add((t, k, a));
         Act("New tab", "Ctrl+T", () => p?.NewTab());
         Act("Open folder…", "Ctrl+O", Pick);
+        Act(compact ? "Full sidebar" : "Compact mode", "Ctrl+\\", ToggleCompact);
         Act(ws.Space == "team" ? "Personal space" : "Team space", "Ctrl+Shift+T", () => SetSpace(ws.Space == "team" ? "personal" : "team"));
         if (p != null)
         {
@@ -474,9 +486,61 @@ sealed class MainWindow : Window
         foreach (var a in p.Asks.Where(a => a.Tab == t.Name)) asks.Children.Add(Cards.Ask(a, p));
     }
 
+    // MARK: compact mode: the sidebar shrinks to a column of project initials, the card fills the rest.
+    // Ctrl+\ sets it explicitly (remembered); otherwise it follows the width (on under ~900 px).
+
+    void ToggleCompact() { ws.Compact = !compact; SetCompact(!compact); }
+
+    void AutoCompact()
+    {
+        var want = ws.Compact ?? root.ActualWidth < 900;
+        if (want != compact) SetCompact(want);
+    }
+
+    void SetCompact(bool on)
+    {
+        compact = on;
+        root.ColumnDefinitions[0].Width = new GridLength(on ? 56 : 260);
+        if (sideBottom != null) sideBottom.Visibility = on ? Visibility.Collapsed : Visibility.Visible;
+        Render();
+        // the card moved: the caption rects follow it once layout has run
+        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, DragRegions);
+    }
+
+    void RenderCompactSidebar()
+    {
+        var col = new StackPanel { Spacing = 6, Margin = new Thickness(8, 4, 0, 0) };
+        foreach (var path in ws.Recent)
+        {
+            bool on = ws.Current?.Path == path;
+            var name = Path.GetFileName(path.TrimEnd('\\'));
+            var b = new Border
+            {
+                Width = 40, Height = 40, CornerRadius = new CornerRadius(10), Background = on ? Theme.Card : Theme.Tile,
+                Child = new TextBlock
+                {
+                    Text = name.Length > 0 ? name[..1].ToUpperInvariant() : "?", FontFamily = on ? Theme.SansMedium : Theme.Sans, FontSize = 14,
+                    Foreground = on ? Theme.Ink : Theme.Soft, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center,
+                },
+            };
+            if (on) b.Shadow = new ThemeShadow();
+            Hover(b, on ? Theme.Card : Theme.Tile);
+            var p = path;
+            b.Tapped += (_, _) => ws.Open(p);
+            ToolTipService.SetToolTip(b, path);
+            col.Children.Add(b);
+        }
+        var open = Plain(Icon("\uE8B7"), Pick, "Open folder (Ctrl+O)");
+        open.HorizontalAlignment = HorizontalAlignment.Left;
+        open.Margin = new Thickness(8, 0, 0, 0);
+        col.Children.Add(open);
+        sidebar.Children.Add(col);
+    }
+
     void RenderSidebar()
     {
         sidebar.Children.Clear();
+        if (compact) { RenderCompactSidebar(); return; }
         if (ws.Recent.Count == 0)
         {
             sidebar.Children.Add(Label("Open a folder to start.  Ctrl+O", 13, Theme.Soft, new Thickness(16, 8, 16, 0)));

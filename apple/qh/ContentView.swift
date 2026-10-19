@@ -18,24 +18,17 @@ struct ContentView: View {
             DetailView()
                 .background(Theme.card, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                 .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(Theme.line, lineWidth: 0.5))
-                .padding([.leading, .trailing, .bottom], 8)
+                .padding(8)
                 .background(Theme.ground)
-                .toolbarBackground(Theme.ground, for: .windowToolbar)
-                .toolbarBackground(.visible, for: .windowToolbar)
+                // no title strip: the card starts at the top edge, like the Windows app
+                .ignoresSafeArea(.container, edges: .top)
                 .inspector(isPresented: $ws.inspector) {
                     InspectorView().inspectorColumnWidth(min: 260, ideal: 300, max: 420)
                 }
         }
         .navigationSplitViewStyle(.balanced)
         .sheet(isPresented: $ws.palette) { Palette().environmentObject(ws) }
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button { withAnimation(.smooth(duration: 0.25)) { ws.toggleInspector() } } label: {
-                    Image(systemName: "sidebar.right")
-                }
-                .help("Inspector (⌘⌥I)")
-            }
-        }
+        .toolbar(.hidden, for: .windowToolbar)
     }
 }
 

@@ -32,6 +32,7 @@ struct QhApp: App {
                     Text("Dark").tag("dark")
                 }
                 .onChange(of: look) { _, v in QhApp.apply(v) }
+                Button("Compact Sidebar") { ws.toggleCompact() }.keyboardShortcut("\\", modifiers: [.command, .control])
             }
             // settings live in the main window, not a separate one
             CommandGroup(replacing: .appSettings) {

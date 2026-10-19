@@ -90,6 +90,7 @@ struct Palette: View {
         }
         act("Open Folder…", "⌘O") { ws.pick() }
         act("Inspector", "⌘⌥I") { ws.toggleInspector() }
+        act(ws.compact ? "Full Sidebar" : "Compact Sidebar", "⌃⌘\\") { ws.toggleCompact() }
         act(ws.space == "team" ? "Personal Space" : "Team Space", "⌃space") { ws.setSpace(ws.space == "team" ? "personal" : "team") }
         if let p {
             for c in p.commands { out.append(Entry(id: "c:" + c.cmd, kind: "command", title: c.cmd, detail: c.about) { p.draft = c.cmd + " "; p.layout = p.layout == "code" ? "chat" : p.layout }) }

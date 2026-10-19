@@ -7,28 +7,121 @@ struct ContentView: View {
     @EnvironmentObject var ws: Workspace
     @State private var columns = NavigationSplitViewVisibility.all
 
+    @Environment(\.accessibilityReduceMotion) private var still
+
     var body: some View {
+        Group {
+            if ws.compact {
+                // compact: a 56pt rail of tiles on the ground, the card takes the rest
+                HStack(spacing: 0) {
+                    CompactSidebar().frame(width: 56)
+                    card.padding(.leading, -8)
+                }
+                .background(Theme.ground)
+                .transition(.opacity)
+            } else {
+                split.transition(.opacity)
+            }
+        }
+        .animation(still ? nil : .smooth, value: ws.compact)
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { ws.fitCompact($0) }
+        .sheet(isPresented: $ws.palette) { Palette().environmentObject(ws) }
+        .toolbar(.hidden, for: .windowToolbar)
+    }
+
+    private var card: some View {
+        // Zen: no chrome around the work, just the chat floating as a card on the ground
+        DetailView()
+            .background(Theme.card, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(Theme.line, lineWidth: 0.5))
+            .padding(8)
+            .background(Theme.ground)
+            // no title strip: the card starts at the top edge, like the Windows app
+            .ignoresSafeArea(.container, edges: .top)
+            .inspector(isPresented: $ws.inspector) {
+                InspectorView().inspectorColumnWidth(min: 260, ideal: 300, max: 420)
+            }
+    }
+
+    private var split: some View {
         NavigationSplitView(columnVisibility: $columns) {
             SidebarView()
                 .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 340)
                 // the system sidebar button drew as an empty circle; ⌃⌘S and View ▸ Hide Sidebar still work
                 .toolbar(removing: .sidebarToggle)
         } detail: {
-            // Zen: no chrome around the work, just the chat floating as a card on the ground
-            DetailView()
-                .background(Theme.card, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(Theme.line, lineWidth: 0.5))
-                .padding(8)
-                .background(Theme.ground)
-                // no title strip: the card starts at the top edge, like the Windows app
-                .ignoresSafeArea(.container, edges: .top)
-                .inspector(isPresented: $ws.inspector) {
-                    InspectorView().inspectorColumnWidth(min: 260, ideal: 300, max: 420)
-                }
+            card
         }
         .navigationSplitViewStyle(.balanced)
-        .sheet(isPresented: $ws.palette) { Palette().environmentObject(ws) }
-        .toolbar(.hidden, for: .windowToolbar)
+    }
+}
+
+/// Compact mode (⌃⌘\): the sidebar as a rail of small project tiles, space dots and the gear.
+struct CompactSidebar: View {
+    @EnvironmentObject var ws: Workspace
+
+    var body: some View {
+        let team = ws.space == "team"
+        let mine = ws.recent.filter { (ws.teamRepos[$0] != nil) == team }
+        let cur = ws.active
+        VStack(spacing: 6) {
+            ScrollView(showsIndicators: false) {
+                VStack(spacing: 6) {
+                    ForEach(mine, id: \.self) { p in CompactTile(path: p, on: cur == p && !ws.settings) }
+                    Button(action: ws.pick) { Image(systemName: "plus").font(.system(size: 12)) }
+                        .buttonStyle(.hand).foregroundStyle(Theme.soft).frame(width: 40, height: 32).help("Open folder (⌘O)")
+                }
+                .padding(.top, 2)
+            }
+            SpaceSwitch()
+            Button { ws.settings.toggle() } label: { Image(systemName: "gearshape").font(.system(size: 12.5)) }
+                .buttonStyle(.hand).foregroundStyle(ws.settings ? Theme.ink : Theme.soft).help("Settings (⌘,) · \(ws.version)")
+                .padding(.bottom, 10)
+        }
+        // clear of the traffic lights, which fade in over the rail's top on hover
+        .padding(.top, 40)
+        .frame(maxHeight: .infinity, alignment: .top)
+        .ignoresSafeArea(.container, edges: .top)
+        .background(Theme.ground)
+    }
+}
+
+/// A rail tile: the project's two initials, raised on the card colour when it's the one open.
+struct CompactTile: View {
+    @EnvironmentObject var ws: Workspace
+    let path: String
+    let on: Bool
+    @State private var over = false
+
+    static func initials(_ name: String) -> String {
+        let words = name.split { " -_.".contains($0) }.filter { !$0.isEmpty }
+        let s = words.count > 1 ? String(words[0].prefix(1) + words[1].prefix(1)) : String(name.prefix(2))
+        return s.prefix(1).uppercased() + s.dropFirst().lowercased()
+    }
+
+    var body: some View {
+        let live = ws.projects.first { $0.path == path }
+        let name = (path as NSString).lastPathComponent
+        Button { ws.open(path) } label: {
+            Text(Self.initials(name))
+                .font(Theme.sans(12, medium: on))
+                .foregroundStyle(on ? Theme.ink : Theme.soft)
+                .frame(width: 40, height: 36)
+                .background(RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(on ? Theme.card : over ? Theme.hover : Theme.tile))
+                .shadow(color: .black.opacity(on ? 0.08 : 0), radius: 3, y: 1)
+                .overlay(alignment: .topTrailing) { if let live { LiveDot(project: live).scaleEffect(0.8).offset(x: 3, y: -3) } }
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.hand)
+        .onHover { h in withAnimation(.easeOut(duration: 0.12)) { over = h } }
+        .help(name)
+        .accessibilityLabel(name)
+        .contextMenu {
+            Button("Show in Finder") { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: path) }
+            if let live { Button("Stop qh here") { ws.close(live) } }
+            Button("Remove from list") { ws.forget(path) }
+        }
     }
 }
 

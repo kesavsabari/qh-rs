@@ -324,7 +324,7 @@ struct EmptyThread: View {
                             HStack {
                                 Text(s.title.isEmpty ? "untitled" : s.title).font(Theme.sans(13.5)).foregroundStyle(Theme.ink).lineLimit(1)
                                 Spacer(minLength: 12)
-                                Text(s.when, style: .relative).font(Theme.sans(12)).foregroundStyle(Theme.faint).lineLimit(1)
+                                Text(Sessions.ago(s.when)).font(Theme.sans(12)).foregroundStyle(Theme.faint).lineLimit(1)
                             }
                         }
                     }

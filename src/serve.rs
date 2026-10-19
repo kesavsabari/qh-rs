@@ -1,7 +1,8 @@
 //! `qh serve`: one core per project behind a user-only Unix socket, for the Mac app (and later
 //! VS Code and the TUI). JSON lines both ways. A client's first line is
 //! `{"type":"hello","token":"…"}`; it then gets a snapshot and every hub event, tagged with its tab.
-//! Up: prompt, answer (to a confirm), stop, mode, model, new_tab, close_tab, files.
+//! Up: prompt, answer (to a confirm), stop, mode, model, new_tab, close_tab, files,
+//! inline_edit / inline_apply / inline_discard (Cmd+I: inline_delta then inline_result down).
 //! On Windows the same socket is an AF_UNIX one (Windows 10 1803+), so clients there speak the
 //! identical protocol (.NET: UnixDomainSocketEndPoint).
 
@@ -53,6 +54,8 @@ struct State {
     remote: Mutex<crate::ui::Remote>,
     confirms: Mutex<HashMap<u64, (String, Sender<Answer>)>>,
     next: AtomicU64,
+    /// inline edits waiting for inline_apply / inline_discard, by id
+    inline: Mutex<HashMap<u64, crate::inline::Pending>>,
 }
 
 impl State {
@@ -325,6 +328,56 @@ fn command(hub: &Arc<Hub>, st: &Arc<State>, v: &Value) -> Option<String> {
             if v["type"] == "accept" { t.ckpt.accept(path) } else if let Err(e) = t.ckpt.reject(path) { return Some(e) }
             st.broadcast(&changes_json(tab, &m.root, &t.ckpt));
         }
+        "inline_edit" => {
+            let Some(m) = hub.get(tab) else { return Some(format!("no tab {tab}")) };
+            let rel = v["path"].as_str().unwrap_or("").to_string();
+            let (start, end) = (v["start"].as_u64().unwrap_or(0) as usize, v["end"].as_u64().unwrap_or(0) as usize);
+            let instruction = v["instruction"].as_str().unwrap_or("").to_string();
+            if instruction.trim().is_empty() { return Some("inline_edit needs an instruction".into()) }
+            let abs = match crate::inline::resolve(&m.root, &rel) { Ok(p) => p, Err(e) => return Some(e) };
+            let text = match std::fs::read_to_string(&abs) { Ok(t) => t, Err(e) => return Some(format!("{rel}: {e}")) };
+            let (pre, sel, post) = match crate::inline::slice(&text, start, end, crate::inline::CONTEXT) { Ok(x) => x, Err(e) => return Some(e) };
+            let id = st.next.fetch_add(1, Relaxed);
+            let (provider, model) = { let s = lock(&m.set); (s.provider.clone(), s.model.clone()) };
+            let ctx = hub.ctx_for(&m, false).0;
+            let user = crate::inline::user_msg(&rel, &pre, &sel, &post, &instruction);
+            let (st, hub, tab) = (st.clone(), hub.clone(), tab.to_string());
+            std::thread::spawn(move || {
+                let mut on = |d: &str| st.broadcast(&json!({"type": "inline_delta", "id": id, "tab": tab, "delta": d}));
+                match crate::inline::run(&provider, &model, ctx, &hub.cfg.keep_alive, &user, &mut on) {
+                    Ok(after) => {
+                        let p = crate::inline::Pending { tab, abs, rel, start, end, before: sel, after };
+                        st.broadcast(&crate::inline::result_json(id, &p));
+                        lock(&st.inline).insert(id, p);
+                    }
+                    Err(e) => st.broadcast(&json!({"type": "error", "message": e, "re": "inline_edit", "id": id, "tab": tab})),
+                }
+            });
+        }
+        "inline_apply" => {
+            let id = v["id"].as_u64().unwrap_or(0);
+            let Some(p) = lock(&st.inline).remove(&id) else { return Some(format!("no inline edit {id}")) };
+            let Some(m) = hub.get(&p.tab) else { return Some(format!("no tab {}", p.tab)) };
+            let text = match std::fs::read_to_string(&p.abs) { Ok(t) => t, Err(e) => return Some(format!("{}: {e}", p.rel)) };
+            // the file moved on since the model saw it: refuse rather than clobber
+            match crate::inline::slice(&text, p.start, p.end, 0) {
+                Ok((_, sel, _)) if sel == p.before => {}
+                _ => return Some(format!("{} changed since the inline edit; ask again", p.rel)),
+            }
+            let (turn, prompt) = {
+                let msgs = lock(&m.msgs);
+                let users: Vec<&Value> = msgs.iter().filter(|x| x["role"] == "user").collect();
+                (users.len().saturating_sub(1), format!("inline edit {}:{}-{}", p.rel, p.start, p.end))
+            };
+            let mut t = lock(&m.turn);
+            t.ckpt.snapshot("write_file", &json!({"path": p.abs.to_string_lossy()}), &m.root, turn, &prompt);
+            if let Err(e) = std::fs::write(&p.abs, crate::inline::splice(&text, p.start, p.end, &p.after)) {
+                return Some(format!("{}: {e}", p.rel));
+            }
+            st.broadcast(&json!({"type": "inline_applied", "id": id, "tab": p.tab, "path": p.rel}));
+            st.broadcast(&changes_json(&p.tab, &m.root, &t.ckpt));
+        }
+        "inline_discard" => { lock(&st.inline).remove(&v["id"].as_u64().unwrap_or(0)); }
         "checkpoints" => {
             let Some(m) = hub.get(tab) else { return Some(format!("no tab {tab}")) };
             st.broadcast(&checkpoints_json(tab, &lock(&m.turn).ckpt));
@@ -494,7 +547,7 @@ pub fn run(hub: Arc<Hub>, rx: Receiver<crate::ui::Ui>) -> i32 {
     // the app reads this line to know where to connect
     println!("{}", json!({"type": "listening", "socket": sock, "token_file": tok_path, "protocol": PROTOCOL, "pid": std::process::id()}));
     let _ = std::io::stdout().flush();
-    let st = Arc::new(State { clients: Mutex::new(vec![]), remote: Mutex::new(crate::ui::Remote::new(hub.clone())), confirms: Mutex::new(HashMap::new()), next: AtomicU64::new(1) });
+    let st = Arc::new(State { clients: Mutex::new(vec![]), remote: Mutex::new(crate::ui::Remote::new(hub.clone())), confirms: Mutex::new(HashMap::new()), next: AtomicU64::new(1), inline: Mutex::new(HashMap::new()) });
     { let (h, s) = (hub.clone(), st.clone()); std::thread::spawn(move || pump(h, s, rx)); }
     match lock(&st.remote).start_team() {
         Some(Ok(s)) => eprintln!("team: {s}"),

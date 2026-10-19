@@ -56,7 +56,8 @@ sealed partial class MainWindow : Window
         threadView.FixVerify = () => ws.Current?.FixVerify();
         ws.ItemChanged += (t, i, added) => { threadView.Changed(t, i, added); if (added) RenderMeta(); };
         Closed += (_, _) => { tray?.Dispose(); peek?.Dispose(); Notify.Stop(); ws.Shutdown(); };
-        Activated += (_, e) => active = e.WindowActivationState != WindowActivationState.Deactivated;
+        // coming back to the window: sessions saved meanwhile (a terminal qh) show up in the sidebar
+        Activated += (_, e) => { var was = active; active = e.WindowActivationState != WindowActivationState.Deactivated; if (active && !was) ws.Current?.LoadSessions(); };
         Notify.Start(ws, DispatcherQueue, Front);
         ws.AskArrived += (p, a) => { if (!active) { Notify.Ask(p, a); toasted.Add((p.Path, a.Id)); } };
         tray = new Tray(WinRT.Interop.WindowNative.GetWindowHandle(this), Front, Close);
@@ -815,6 +816,14 @@ sealed partial class MainWindow : Window
         input.PreviewKeyDown += (_, e) =>
         {
             var shift = Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Shift).HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
+            var ctrl = Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Control).HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
+            // Ctrl+Enter / Ctrl+Backspace answer the waiting permission, never send or delete a word
+            if (ctrl && e.Key is VirtualKey.Enter or VirtualKey.Back)
+            {
+                if (FirstAsk() is { } fa) { e.Handled = true; ws.Current!.Answer(fa, e.Key == VirtualKey.Enter ? "yes" : "no"); }
+                else if (e.Key == VirtualKey.Enter) e.Handled = true;
+                return;
+            }
             if (sugg.Count > 0 && e.Key is VirtualKey.Down or VirtualKey.Up)
             { e.Handled = true; suggSel = (suggSel + (e.Key == VirtualKey.Down ? 1 : sugg.Count - 1)) % sugg.Count; DrawSuggestions(); }
             else if (sugg.Count > 0 && (e.Key == VirtualKey.Tab || (e.Key == VirtualKey.Enter && !shift)))

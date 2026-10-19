@@ -93,7 +93,55 @@ jobs:
           [System.Windows.Forms.SendKeys]::SendWait("^% ")
           Start-Sleep 2
           Shot "11-peek"
+          # two saved sessions, tagged with the project root qh uses (\\?\C:\demo); they show when the window is active again
+          $sd = "$env:LOCALAPPDATA\qh\sessions"
+          $sys = '{"role":"system","content":"You are a terse coding agent working in \\\\?\\C:\\demo."}'
+          Set-Content $sd\20261018-101500.jsonl ($sys + "`n" + '{"role":"user","content":"Add a usage section to the README"}' + "`n" + '{"role":"assistant","content":"Done."}')
+          Set-Content $sd\20261017-160000.jsonl ($sys + "`n" + '{"role":"user","content":"Why does the build fail on Windows?"}' + "`n" + '{"role":"assistant","content":"A path separator."}')
+          # the hotkey again hides the peek; click the main window's composer to take focus back
+          [System.Windows.Forms.SendKeys]::SendWait("^% ")
+          Start-Sleep 1
+          [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point(900, ($sb.Height - 120))
+          [W.M]::mouse_event(2, 0, 0, 0, 0); [W.M]::mouse_event(4, 0, 0, 0, 0)
+          Start-Sleep 1
+          [System.Windows.Forms.SendKeys]::SendWait("{BACKSPACE}")
+          # chat: the empty tab's starters and the saved sessions in the sidebar; then settings, then dark from the palette
+          [System.Windows.Forms.SendKeys]::SendWait("^1")
+          Start-Sleep 1
+          Shot "12-empty-sessions"
+          [System.Windows.Forms.SendKeys]::SendWait("^k")
+          Start-Sleep 1
+          [System.Windows.Forms.SendKeys]::SendWait("activity log")
+          Start-Sleep 2
+          [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
+          Start-Sleep 2
+          Shot "12b-activity"
+          [System.Windows.Forms.SendKeys]::SendWait("^k")
+          Start-Sleep 1
+          [System.Windows.Forms.SendKeys]::SendWait("project memory")
+          Start-Sleep 2
+          [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
+          Start-Sleep 2
+          Shot "12c-memory"
           [System.Windows.Forms.SendKeys]::SendWait("{ESC}")
+          Start-Sleep 1
+          [System.Windows.Forms.SendKeys]::SendWait("^k")
+          Start-Sleep 1
+          [System.Windows.Forms.SendKeys]::SendWait("settings")
+          Start-Sleep 2
+          [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
+          Start-Sleep 1
+          Shot "13-settings"
+          [System.Windows.Forms.SendKeys]::SendWait("^k")
+          Start-Sleep 1
+          [System.Windows.Forms.SendKeys]::SendWait("theme: dark")
+          Start-Sleep 2
+          [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
+          Start-Sleep 2
+          Shot "14-dark"
+          [System.Windows.Forms.SendKeys]::SendWait("{ESC}")
+          Start-Sleep 1
+          Shot "15-dark-chat"
           # lean check: what a low-end PC pays to keep it open
           $p.Refresh()
           $mb = [math]::Round($p.WorkingSet64 / 1MB)

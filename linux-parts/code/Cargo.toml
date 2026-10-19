@@ -1,0 +1,16 @@
+[package]
+name = "qh-code"
+version = "0.1.0"
+edition = "2021"
+description = "qh Linux code widgets: review, checkpoints, file tree, code view, layout switch"
+license = "MIT"
+
+[workspace]
+
+[dependencies]
+gtk = { package = "gtk4", version = "0.11", features = ["v4_14"] }
+pango = { version = "0.22", features = ["v1_50"] }
+regex = "1"
+
+[dev-dependencies]
+adw = { package = "libadwaita", version = "0.9", features = ["v1_6"] }

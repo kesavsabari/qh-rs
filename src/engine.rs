@@ -676,15 +676,39 @@ fn read_only(hub: &Hub, name: &str, a: &Value) -> bool {
 
 /// The model's own checklist, per session. Resent in full each call so a small model sees
 /// the whole plan in its latest tool result instead of having to remember it.
+type PlanList = Vec<(String, &'static str)>;
+static PLANS: Mutex<Vec<(String, PlanList)>> = Mutex::new(Vec::new());
+
+/// The session's current checklist as (text, pending|active|done), for apps showing a live plan.
+pub fn plan_items(session: &str) -> PlanList {
+    lock(&PLANS).iter().find(|(s, _)| s == session).map(|p| p.1.clone()).unwrap_or_default()
+}
+
+#[cfg(test)]
+pub fn todo_for_test(session: &str, a: &Value) -> String { todo(session, a) }
+
 fn todo(session: &str, a: &Value) -> String {
     static LISTS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
     let Some(items) = a["items"].as_array() else {
         return "error: items must be a list of {text, status}".into();
     };
+    let plan: PlanList = items.iter().map(|i| {
+        let st = match i["status"].as_str().unwrap_or("pending") {
+            "done" | "completed" => "done",
+            "doing" | "in_progress" | "active" => "active",
+            _ => "pending",
+        };
+        (i["text"].as_str().or_else(|| i.as_str()).unwrap_or("").to_string(), st)
+    }).collect();
+    {
+        let mut p = lock(&PLANS);
+        p.retain(|(s, _)| s != session);
+        p.push((session.into(), plan));
+    }
     let rows: Vec<String> = items.iter().map(|i| {
         let mark = match i["status"].as_str().unwrap_or("pending") {
             "done" | "completed" => "[x]",
-            "doing" | "in_progress" => "[~]",
+            "doing" | "in_progress" | "active" => "[~]",
             _ => "[ ]",
         };
         format!("{mark} {}", i["text"].as_str().or_else(|| i.as_str()).unwrap_or(""))

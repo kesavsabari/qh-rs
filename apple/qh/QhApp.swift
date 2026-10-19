@@ -66,6 +66,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ n: Notification) {
         QhApp.apply(UserDefaults.standard.string(forKey: "appearance") ?? "system")
         TrafficLights.start()
+        Peek.start()
         // for checking the UI from another machine without screen-recording rights: when the
         // `debugSnapshot` default is on, a distributed "io.qh.snapshot" notification makes the app
         // draw its own window into /tmp/qh-window.png (only its own pixels, nothing else on screen)
@@ -106,9 +107,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let p = n.object as? String ?? ""
                 MainActor.assumeIsolated { Notify.workspace?.current?.openFile(p) }
             }
+            // "io.qh.peek": open the peek panel, as ⌥Space would
+            DistributedNotificationCenter.default().addObserver(forName: .init("io.qh.peek"), object: nil, queue: .main) { _ in
+                MainActor.assumeIsolated { Peek.show() }
+            }
             DistributedNotificationCenter.default().addObserver(forName: .init("io.qh.snapshot"), object: nil, queue: .main) { _ in
                 MainActor.assumeIsolated {
-                    guard let main = NSApp.windows.first(where: { $0.isVisible && $0.contentView != nil && $0.sheetParent == nil }), case let w = main.attachedSheet ?? main, let v = w.contentView?.superview ?? w.contentView,
+                    guard let main = Peek.window ?? NSApp.windows.first(where: { $0.isVisible && $0.contentView != nil && $0.sheetParent == nil }), case let w = main.attachedSheet ?? main, let v = w.contentView?.superview ?? w.contentView,
                           let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) else { return }
                     v.cacheDisplay(in: v.bounds, to: rep)
                     try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: "/tmp/qh-window.png"))

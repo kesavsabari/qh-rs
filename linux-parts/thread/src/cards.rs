@@ -142,6 +142,40 @@ impl AskCard {
         AskCard { root }
     }
 
+    /// A teammate's agent asked for changes before a push: Hold and fix (Ctrl+Enter) /
+    /// Hand to <owner> in team chat / Push anyway. Answers: Deny = hold, Always = hand off,
+    /// Once = push anyway (qh serve's no / always / yes).
+    pub fn review(owners: &str, comments: &str, on_answer: impl Fn(Answer) + 'static) -> Self {
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 12);
+        root.add_css_class("qh-ask");
+        root.add_css_class("guarded");
+        let head = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        head.append(&label(&format!("{owners}'s agent asked for changes"), &["qh-title"]));
+        head.append(&label("push held", &["qh-mono", "qh-accent"]));
+        root.append(&head);
+        let d = label(comments, &["qh-detail"]);
+        d.set_selectable(true);
+        d.set_focusable(false);
+        root.append(&d);
+        let on: Rc<dyn Fn(Answer)> = Rc::new(on_answer);
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        let hold = button("Hold and fix", "Ctrl+⏎", "qh-btn-ink");
+        let f = on.clone();
+        hold.connect_clicked(move |_| f(Answer::Deny));
+        row.append(&hold);
+        shortcut(&root, "<Control>Return", &hold);
+        let hand = button(&format!("Hand to {owners} in chat"), "", "qh-btn-card");
+        let f = on.clone();
+        hand.connect_clicked(move |_| f(Answer::Always));
+        row.append(&hand);
+        let push = button("Push anyway", "", "qh-btn-plain");
+        let f = on.clone();
+        push.connect_clicked(move |_| f(Answer::Once));
+        row.append(&push);
+        root.append(&row);
+        AskCard { root }
+    }
+
     pub fn widget(&self) -> &gtk::Box {
         &self.root
     }

@@ -819,6 +819,13 @@ fn render_asks(st: &Shared, p: &model::Project, u: &Ui) {
                 if let Some(p) = s.borrow_mut().project_mut() { p.answer(id, if keep { "yes" } else { "no" }) }
                 schedule(&s);
             })
+        } else if ask.tool == "review_hold" {
+            let s = st.clone();
+            qh_thread::AskCard::review(ask.args["owners"].as_str().unwrap_or("the owner"), ask.args["text"].as_str().unwrap_or(""), move |ans| {
+                let ans = match ans { qh_thread::Answer::Once => "yes", qh_thread::Answer::Always => "always", qh_thread::Answer::Deny => "no" };
+                if let Some(p) = s.borrow_mut().project_mut() { p.answer(id, ans) }
+                schedule(&s);
+            })
         } else {
             let q = qh_thread::Ask { tool: ask.tool.clone(), detail: ask.detail(), warn: ask.warn.clone(), always: ask.always.clone(), guarded: ask.guard };
             let s = st.clone();

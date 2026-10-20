@@ -1266,7 +1266,8 @@ fn msg_id(s: &State) -> u64 {
 }
 
 /// Seal `text` for `to` alone and publish it with our next write.
-fn dm_locked(s: &mut State, to: &str, text: &str) -> Result<(), String> {
+/// Returns the line as it goes over the direct line (`quick_send`).
+fn dm_locked(s: &mut State, to: &str, text: &str) -> Result<Value, String> {
     let to = to.trim_start_matches('@');
     let secret = s.secret.clone().ok_or("team mode is off")?;
     let p = s.peers.get(to).filter(|p| p.joined && !p.pub_key.is_empty()).ok_or_else(|| format!("no teammate {to}"))?;
@@ -1279,7 +1280,7 @@ fn dm_locked(s: &mut State, to: &str, text: &str) -> Result<(), String> {
     push_msg(s, Msg { ts, chan: format!("@{to}"), from: me, text: text.into(), id });
     s.dirty = true;
     save_private(s);
-    Ok(())
+    Ok(json!({"chan": "dm", "to": [to], "id": id, "ts": ts, "box": sealed}))
 }
 
 /// Make a group of us and `logins`: a fresh key, sealed for each of them alone.
@@ -1310,7 +1311,7 @@ fn group_locked(s: &mut State, name: &str, logins: &[String]) -> Result<String, 
     Ok(format!("group {name}: {} · only its members can read it", members.join(", ")))
 }
 
-fn group_send_locked(s: &mut State, gid: &str, text: &str) -> Result<(), String> {
+fn group_send_locked(s: &mut State, gid: &str, text: &str) -> Result<Value, String> {
     let g = s.groups.get(gid).ok_or("no such group")?;
     if !g.members.contains(&s.me) { return Err("you're not in that group".into()) }
     let sealed = tc::seal(&g.key, &format!("gmsg:{}:{gid}:{}", s.repo, s.me), text.as_bytes());
@@ -1319,20 +1320,23 @@ fn group_send_locked(s: &mut State, gid: &str, text: &str) -> Result<(), String>
     let n = s.my_gmsgs.len();
     if n > 100 { s.my_gmsgs.drain(..n - 100); }
     let me = s.me.clone();
+    let to: Vec<String> = s.groups.get(gid).map(|g| g.members.iter().filter(|m| **m != me).cloned().collect()).unwrap_or_default();
     push_msg(s, Msg { ts, chan: format!("+{gid}"), from: me, text: text.into(), id });
     s.dirty = true;
     save_private(s);
-    Ok(())
+    Ok(json!({"chan": "g", "to": to, "g": gid, "id": id, "ts": ts, "box": sealed}))
 }
 
 /// `/dm <login> <text>`: a private message, readable only by the two of you.
 pub fn dm_send(to: &str, text: &str) -> Result<String, String> {
     let to = to.trim_start_matches('@').to_string();
-    cur(|s| {
-        dm_locked(s, &to, text)?;
+    let (repo, quick, msg) = cur(|s| {
+        let quick = dm_locked(s, &to, text)?;
         let online = s.peers.get(&to).is_some_and(|p| p.online);
-        Ok(format!("→ @{to} (private){}", if online { "" } else { ": they're offline; it reaches them when they're back" }))
-    }).ok_or("team mode is off".to_string())?
+        Ok::<_, String>((s.repo.clone(), quick, format!("→ @{to} (private){}", if online { "" } else { ": they're offline; it reaches them when they're back" })))
+    }).ok_or("team mode is off".to_string())??;
+    quick_send(&repo, &quick);
+    Ok(msg)
 }
 
 /// `/team group <name> <login>…`
@@ -1411,7 +1415,9 @@ pub fn channel_send(chan: &str, text: &str) -> Result<String, String> {
     if chan == "#team" { return chat_send(text).map(|_| String::new()) }
     if let Some(login) = chan.strip_prefix('@') { return dm_send(login, text) }
     let gid = chan.strip_prefix('+').ok_or("no such channel")?.to_string();
-    cur(|s| group_send_locked(s, &gid, text).map(|_| String::new())).ok_or("team mode is off".to_string())?
+    let (repo, quick) = cur(|s| group_send_locked(s, &gid, text).map(|q| (s.repo.clone(), q))).ok_or("team mode is off".to_string())??;
+    quick_send(&repo, &quick);
+    Ok(String::new())
 }
 
 static ALERTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
@@ -1477,8 +1483,10 @@ fn take_in(repo: &str, me: &String, key: Option<Key>, mut p: Peer, hooks: &Hooks
     fresh.sort();
     let seen_before = s.chat_seen.contains_key(login);
     for (id, ts, text) in fresh {
-        if !s.chat.iter().any(|(t, f, x)| t == ts && f == login && x == text) {
-            s.chat.push((*ts, login.clone(), text.clone()));
+        // already here over the direct line (the same id), or the same line from an older copy
+        let quick = !s.msg_ids.insert((format!("chat:{login}"), *id));
+        if !quick && !s.chat.iter().any(|(t, f, x)| t == ts && f == login && x == text) {
+            insert_chat(s, *ts, login, text);
             if seen_before {
                 s.unread += 1;
                 *new_chat = true;
@@ -1675,21 +1683,37 @@ pub fn send_from(to: &str, session: &str, text: &str, from_session: &str) -> Res
 
 /// Say something in the team chat (to people, not agents: nothing runs).
 pub fn chat_send(text: &str) -> Result<(), String> {
-    let repo = cur(|s| {
-        let ts = now();
-        let id = ts * 1000 + (s.my_chat.len() as u64 % 1000);
-        s.my_chat.push(json!({"id": id, "ts": ts, "text": text}));
-        let n = s.my_chat.len();
-        if n > 30 { s.my_chat.drain(..n - 30); }
-        s.chat.push((ts, s.me.clone(), text.to_string()));
-        s.dirty = true;
-        s.repo.clone()
+    let (repo, quick) = cur(|s| {
+        let quick = chat_locked(s, text);
+        (s.repo.clone(), quick)
     }).ok_or("team mode is off")?;
+    quick_send(&repo, &quick);
     with(&repo, |s| {
         let keep: Vec<_> = s.chat.iter().rev().take(300).rev().cloned().collect();
         save_json("team-chat", &repo, &json!(keep));
     });
     Ok(())
+}
+
+/// Add our line to the team chat and publish it; returns it as it goes over the direct line.
+/// Ids only grow (also within one second), so a teammate can tell every line apart.
+fn chat_locked(s: &mut State, text: &str) -> Value {
+    let ts = now();
+    let last = s.my_chat.iter().filter_map(|m| m["id"].as_u64()).max().unwrap_or(0);
+    let id = (ts * 1000).max(last + 1);
+    s.my_chat.push(json!({"id": id, "ts": ts, "text": text}));
+    let n = s.my_chat.len();
+    if n > 30 { s.my_chat.drain(..n - 30); }
+    let me = s.me.clone();
+    insert_chat(s, ts, &me, text);
+    s.dirty = true;
+    json!({"chan": "#team", "id": id, "ts": ts, "text": text})
+}
+
+/// A team chat line in time order (a late line from the board slots in where it belongs).
+fn insert_chat(s: &mut State, ts: u64, from: &str, text: &str) {
+    let at = s.chat.iter().rposition(|(t, _, _)| *t <= ts).map_or(0, |i| i + 1);
+    s.chat.insert(at, (ts, from.to_string(), text.to_string()));
 }
 
 /// Unread lines in every channel: the team chat, DMs and groups.
@@ -2888,6 +2912,8 @@ fn pulse(repo: &str) -> u64 {
         seen.sort();
         seen.hash(&mut h);
         (s.my_notes.len(), s.my_chat.len(), s.waiting.len(), s.promises.len()).hash(&mut h);
+        // the lists are capped, so their lengths stop moving: the newest ids do
+        [&s.my_chat, &s.my_dms, &s.my_gmsgs].map(|l| l.last().and_then(|m| m["id"].as_u64())).hash(&mut h);
         s.claims.values().map(|c| c.values().map(|f| f.len()).sum::<usize>()).sum::<usize>().hash(&mut h);
         h.finish()
     }).unwrap_or(0)
@@ -2927,6 +2953,7 @@ fn take_live(repo: &str, root: &Path, from: &str, bytes: &[u8], hooks: &Hooks) {
     match v["kind"].as_str() {
         Some("file") => return take_file_req(repo, root, from, &v),
         Some("file_re") => return take_file_reply(repo, from, &v),
+        Some("msg") => return take_quick_msg(repo, from, &v),
         _ => {}
     }
     let login = v["login"].as_str().unwrap_or("").to_string();
@@ -2947,6 +2974,71 @@ fn take_live(repo: &str, root: &Path, from: &str, bytes: &[u8], hooks: &Hooks) {
     take_in(repo, &me, key, p, hooks, &mut new_chat);
     if new_chat { save_chat(repo) }
     save_seen(repo);
+}
+
+// ---- messages over the direct line first ----
+//
+// A #team line, DM or group line also goes straight to every teammate on the line (~1s instead of
+// a board write every 10s and a poll every 3s). The board still carries it, as the fallback for
+// whoever isn't on the line and as history; the receiving side tells copies apart by the sender's
+// message id, so a line shows once whichever way it came first.
+
+/// Send one of our new lines to the teammates it's for who are on the line now. Only on a line
+/// that's already running: sending never starts one.
+fn quick_send(repo: &str, body: &Value) {
+    let Some(Some(l)) = LINK.get() else { return };
+    let to: Option<Vec<String>> = body["to"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect());
+    let Some((me, Some(key), keys)) = with(repo, |s| (s.me.clone(), s.key, s.peers.values()
+        .filter(|p| p.joined && !p.pub_key.is_empty() && to.as_ref().is_none_or(|t| t.contains(&p.login)))
+        .map(|p| p.pub_key.clone()).collect::<Vec<_>>())) else { return };
+    let lines = LINES.lock().unwrap().clone().unwrap_or_default();
+    let mut body = body.clone();
+    if let Some(o) = body.as_object_mut() { o.remove("to"); }
+    let bytes = file_msg(repo, &me, &key, "msg", &body);
+    for k in keys.iter().filter(|k| lines.contains_key(*k)) {
+        l.send(k, &bytes);
+    }
+}
+
+/// A line straight off the direct line: only from a member, on their own member key.
+fn take_quick_msg(repo: &str, from: &str, v: &Value) {
+    let login = v["login"].as_str().unwrap_or("").to_string();
+    let Some(Some(key)) = with(repo, |s| s.peers.get(&login).filter(|p| p.pub_key == from && p.joined && login != s.me).and(s.key)) else { return };
+    let Some(body) = open_file_msg(&key, v) else { return };
+    let chat = body["chan"] == "#team";
+    if with(repo, |s| take_quick(s, &login, &body)) == Some(true) {
+        bump();
+        if chat { save_chat(repo) }
+    }
+}
+
+/// Take in one line that came over the direct line; false when we already have it (or it's bad).
+/// A team line marks its id as had, so the same line in their next folder isn't shown again; it
+/// doesn't move the "taken up to" mark, so an older line that went by git only still comes in.
+fn take_quick(s: &mut State, login: &str, body: &Value) -> bool {
+    let (Some(id), ts) = (body["id"].as_u64(), body["ts"].as_u64().unwrap_or_else(now)) else { return false };
+    match body["chan"].as_str() {
+        Some("#team") => {
+            let text = body["text"].as_str().unwrap_or("").to_string();
+            if id <= s.chat_seen.get(login).copied().unwrap_or(0) || !s.msg_ids.insert((format!("chat:{login}"), id)) { return false }
+            insert_chat(s, ts, login, &text);
+            s.unread += 1;
+            if pings(&text, &s.me.clone()) {
+                if !s.pinged.iter().any(|c| c == "#team") { s.pinged.push("#team".into()) }
+                alert(format!("qh: {login} mentioned you: {}", clip_to(&text, 80)));
+            }
+            true
+        }
+        Some(c @ ("dm" | "g")) => {
+            // the same path as their folder's boxes: a peer copy with just this one line
+            let Some(old) = s.peers.get(login) else { return false };
+            let mut p = Peer { login: login.into(), pub_key: old.pub_key.clone(), joined: old.joined, ..Default::default() };
+            let b = body["box"].as_str().unwrap_or("").to_string();
+            if c == "dm" { p.dms = vec![(id, ts, b)] } else { p.gmsgs = vec![(id, ts, body["g"].as_str().unwrap_or("").into(), b)] }
+            take_private(s, login, &p)
+        }
+        _ => false,
+    }
 }
 
 // ---- a teammate's working copy, read over the line ----
@@ -3769,5 +3861,69 @@ mod tests {
         assert!(!pings("@teams", "bob"));
         assert!(!pings("no mention", "bob"));
         assert!(!pings("@", "bob"));
+    }
+
+    #[test]
+    fn a_line_over_the_direct_line_and_then_the_board_shows_once_in_order() {
+        let repo = "t/quick-chat";
+        let mut st = state("alice");
+        st.repo = repo.into();
+        st.chat_seen.insert("bob".into(), 0); // bob's folder was read before: new lines count as unread
+        STATES.lock().unwrap().get_or_insert_with(HashMap::new).insert(repo.into(), st);
+        // bob's third line comes over the line first, twice (a resend)
+        let third = json!({"chan": "#team", "id": 3000, "ts": 30, "text": "third"});
+        assert_eq!(with(repo, |s| take_quick(s, "bob", &third)), Some(true));
+        assert_eq!(with(repo, |s| take_quick(s, "bob", &third)), Some(false), "the same id again: dropped");
+        // then his folder from the board, with all three
+        let mut bob = peer("bob", &["main"], true);
+        bob.chat = vec![(1000, 10, "first".into()), (2000, 20, "second".into()), (3000, 30, "third".into())];
+        let mut nc = false;
+        take_in(repo, &"alice".to_string(), None, bob.clone(), &quiet(), &mut nc);
+        let (chat, unread) = with(repo, |s| (s.chat.iter().map(|(_, _, t)| t.clone()).collect::<Vec<_>>(), s.unread)).unwrap();
+        assert_eq!(chat, ["first", "second", "third"], "the late board lines slot in before the quick one");
+        assert_eq!(unread, 3);
+        // the same folder again, and the quick copy once more: nothing new
+        take_in(repo, &"alice".to_string(), None, bob, &quiet(), &mut nc);
+        assert_eq!(with(repo, |s| take_quick(s, "bob", &third)), Some(false), "taken from the board already");
+        let older = json!({"chan": "#team", "id": 2000, "ts": 20, "text": "second"});
+        assert_eq!(with(repo, |s| take_quick(s, "bob", &older)), Some(false));
+        assert_eq!(with(repo, |s| (s.chat.len(), s.unread)).unwrap(), (3, 3));
+        STATES.lock().unwrap().as_mut().unwrap().remove(repo);
+    }
+
+    #[test]
+    fn our_chat_ids_only_grow() {
+        let mut s = state("alice");
+        let ids: Vec<u64> = (0..5).map(|i| chat_locked(&mut s, &format!("line {i}"))["id"].as_u64().unwrap()).collect();
+        assert!(ids.windows(2).all(|w| w[1] > w[0]), "{ids:?}");
+        assert_eq!(s.chat.len(), 5);
+        assert!(s.dirty, "the board still gets it");
+    }
+
+    #[test]
+    fn a_dm_over_the_direct_line_is_not_taken_twice_from_the_board() {
+        let ((a, a_pub), (b, b_pub), (c, c_pub)) = (member("alice"), member("bob"), member("carol"));
+        let mut alice = keyed("alice", &a, &[("bob", &b_pub), ("carol", &c_pub)]);
+        let quick = dm_locked(&mut alice, "bob", "the key is in the vault").unwrap();
+        assert_eq!(quick["to"], json!(["bob"]), "a DM goes over the line to bob alone");
+        assert!(!quick.to_string().contains("vault"), "sealed for bob, also on the line");
+        let mut bob = keyed("bob", &b, &[("alice", &a_pub), ("carol", &c_pub)]);
+        assert!(take_quick(&mut bob, "alice", &quick));
+        assert!(!take_quick(&mut bob, "alice", &quick));
+        assert!(!take_private(&mut bob, "alice", &published(&alice, &a_pub)), "the board copy is the same line");
+        assert_eq!(bob.msgs.len(), 1);
+        assert_eq!(bob.chan_unread.get("@alice"), Some(&1));
+        // carol can't open it, whichever way it came
+        let mut carol = keyed("carol", &c, &[("alice", &a_pub), ("bob", &b_pub)]);
+        assert!(!take_quick(&mut carol, "alice", &quick));
+        // a group line: to its members, once
+        group_locked(&mut alice, "core", &["bob".into()]).unwrap();
+        let gid = alice.groups.keys().next().unwrap().clone();
+        assert!(take_private(&mut bob, "alice", &published(&alice, &a_pub)), "bob learns the group from the board");
+        let g = group_send_locked(&mut alice, &gid, "standup?").unwrap();
+        assert_eq!(g["to"], json!(["bob"]));
+        assert!(take_quick(&mut bob, "alice", &g));
+        assert!(!take_private(&mut bob, "alice", &published(&alice, &a_pub)));
+        assert_eq!(bob.msgs.iter().filter(|m| m.text == "standup?").count(), 1);
     }
 }

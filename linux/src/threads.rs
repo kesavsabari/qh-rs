@@ -116,6 +116,8 @@ pub fn on_event(st: &Shared, path: &str, e: &Value, stack: &gtk::Stack) {
                     let t = with(&k, |v| { flush(v); v.thread.clone() }).unwrap();
                     match ty {
                         "diff" => t.push_diff(&s("path"), e["added"].as_u64().unwrap_or(0) as u32, e["removed"].as_u64().unwrap_or(0) as u32),
+                        // the user bubble already says "+ N image(s)"; only serve's warning variant adds anything
+                        "notice" if is_image_note(&s("message")) => {}
                         "notice" => t.push_notice(&s("message")),
                         "compact" => t.push_notice(e["message"].as_str().unwrap_or("compacted the conversation")),
                         "error" => t.push_error(e["message"].as_str().unwrap_or("error")),
@@ -135,4 +137,9 @@ pub fn on_event(st: &Shared, path: &str, e: &Value, stack: &gtk::Stack) {
         }
         _ => {}
     }
+}
+
+/// serve's plain "+ 1 image" / "+ 2 images" note for a prompt's attachments.
+fn is_image_note(m: &str) -> bool {
+    m.strip_prefix("+ ").and_then(|r| r.split_once(' ')).is_some_and(|(n, w)| n.parse::<u32>().is_ok() && (w == "image" || w == "images"))
 }

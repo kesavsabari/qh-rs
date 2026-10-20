@@ -1,6 +1,6 @@
 //! The scrolling conversation: user bubbles, streamed replies, quiet tool lines, file cards.
 
-use crate::markdown::{render_with, Links};
+use crate::markdown::{render_with, settled, Links};
 use crate::{appear, label};
 use gtk::glib;
 use gtk::prelude::*;
@@ -111,11 +111,13 @@ impl Thread {
     }
 
     pub fn push_reply(&self) -> ReplyHandle {
-        let slot = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        // the same gap render_with puts between blocks, for the finished-block pieces
+        let slot = gtk::Box::new(gtk::Orientation::Vertical, 10);
         self.push(&slot);
         ReplyHandle(Rc::new(Reply {
             slot,
             text: RefCell::new(String::new()),
+            done: Cell::new(0),
             pending: Cell::new(false),
             links: self.0.links.borrow().clone(),
         }))
@@ -218,6 +220,8 @@ impl Thread {
 struct Reply {
     slot: gtk::Box,
     text: RefCell<String>,
+    /// Bytes of `text` already drawn as finished blocks; only the rest is redrawn.
+    done: Cell<usize>,
     pending: Cell<bool>,
     links: Links,
 }
@@ -237,6 +241,8 @@ impl ReplyHandle {
     /// Replace the whole text (redrawn now).
     pub fn set_text(&self, text: &str) {
         *self.0.text.borrow_mut() = text.to_string();
+        while let Some(c) = self.0.slot.first_child() { self.0.slot.remove(&c) }
+        self.0.done.set(0);
         redraw(&self.0);
     }
     /// Draw whatever is buffered now (call at end of stream).
@@ -248,12 +254,24 @@ impl ReplyHandle {
     }
 }
 
+/// Finished blocks are drawn once and kept; only the open tail is rebuilt, so a long
+/// reply streams at the same cost per redraw as a short one.
 fn redraw(r: &Reply) {
     r.pending.set(false);
-    if let Some(c) = r.slot.first_child() {
-        r.slot.remove(&c);
+    let text = r.text.borrow();
+    let rest = &text[r.done.get()..];
+    if let Some(c) = r.slot.last_child() {
+        r.slot.remove(&c); // the old tail (or nothing yet)
     }
-    r.slot.append(&render_with(&r.text.borrow(), &r.links));
+    let cut = settled(rest);
+    if cut > 0 {
+        r.slot.append(&render_with(&rest[..cut], &r.links));
+        r.done.set(r.done.get() + cut);
+    }
+    let tail = &text[r.done.get()..];
+    let w = render_with(tail, &r.links);
+    w.set_visible(!tail.trim().is_empty()); // no stray gap under the last finished block
+    r.slot.append(&w);
 }
 
 fn out_box(text: &str) -> gtk::ScrolledWindow {

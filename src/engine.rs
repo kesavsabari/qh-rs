@@ -644,6 +644,7 @@ fn call_locked(hub: &Arc<Hub>, m: &Arc<Member>, over: Option<(&str, &str)>, msgs
                 m.thinking.store(thinking, Relaxed);
                 lock(&m.turn).streamed += 1;
                 if !thinking {
+                    session::partial_add(&lock(&m.session), text);
                     hub.emit(&m.name, Event::Token(text.to_string()));
                 }
             }
@@ -653,6 +654,7 @@ fn call_locked(hub: &Arc<Hub>, m: &Arc<Member>, over: Option<(&str, &str)>, msgs
         // providers (the ChatGPT plan) only send their reasoning summary after it's done
         if !quiet { m.thinking.store(!think.is_empty(), Relaxed) }
         let r = backend::chat(&prov, &model, msgs, schemas, &think, ctx, &cfg.keep_alive, &mut on);
+        if !quiet { session::partial_clear(&lock(&m.session)) }
         m.thinking.store(false, Relaxed);
         match r {
             // a server that is loading, overloaded or briefly down: retry, but only before any

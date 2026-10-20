@@ -244,6 +244,7 @@ pub struct Review {
     pub session: String,
     pub to: String,    // login/session
     pub files: Vec<String>,
+    pub head: String,  // the commit asked about: a retried push of it reuses this review
     pub answer: Option<String>,
     pub ts: u64,
     pub gave_up: bool, // the push stopped waiting: a later answer goes to the session as a message
@@ -375,13 +376,22 @@ pub fn request(session: &str, cwd: &Path) -> Result<(Vec<u64>, String), String> 
         .or_else(|| github_author(&repo, sha, email).and_then(|l| members.iter().find(|m| m.eq_ignore_ascii_case(&l)).cloned()));
     let by = owners(&hunks, &rules, &blame, &who, &members, &me);
     if by.is_empty() { return Err("nothing to review: the changed code is yours, or nobody in the team owns it".into()) }
+    let head = git(&root, &["rev-parse", "HEAD"]).unwrap_or_default().trim().to_string();
     let (mut ids, mut asked) = (vec![], vec![]);
     for (owner, hs) in &by {
         let mut files: Vec<String> = hs.iter().map(|h| h.file.clone()).collect();
         files.dedup();
+        // a push retried after a failure (or a second /review-request) asks nobody twice
+        let seen = REVIEWS.lock().unwrap().iter().rev().find(|r| r.repo == repo && r.head == head && !head.is_empty()
+            && r.to.split('/').next() == Some(owner.as_str()) && now().saturating_sub(r.ts) < 3600).map(|r| (r.id, r.to.clone()));
+        if let Some((id, to)) = seen {
+            ids.push(id);
+            asked.push(format!("{to} ({}, already asked about this commit)", files.join(", ")));
+            continue;
+        }
         match crate::team::ask_review(&repo, session, owner, &request_text(&me, hs)) {
             Ok((id, to, online)) => {
-                track(Review { id, repo: repo.clone(), session: session.into(), to: to.clone(), files: files.clone(), answer: None, ts: now(), gave_up: false });
+                track(Review { id, repo: repo.clone(), session: session.into(), to: to.clone(), files: files.clone(), head: head.clone(), answer: None, ts: now(), gave_up: false });
                 event(REVIEWS.lock().unwrap().last().unwrap());
                 ids.push(id);
                 asked.push(format!("{to} ({}){}", files.join(", "), if online { "" } else { ", offline" }));
@@ -422,7 +432,7 @@ pub fn summary(got: &[(String, Option<String>)]) -> String {
 /// For team.rs's tests: a review in flight, as `request` tracks it.
 #[cfg(test)]
 pub fn tests_track(id: u64, repo: &str) {
-    track(Review { id, repo: repo.into(), session: "main".into(), to: String::new(), files: vec![], answer: None, ts: now(), gave_up: false });
+    track(Review { id, repo: repo.into(), session: "main".into(), to: String::new(), files: vec![], head: String::new(), answer: None, ts: now(), gave_up: false });
 }
 
 #[cfg(test)]
@@ -574,7 +584,7 @@ new file mode 100644
         // one answered in time, one not: the wait ends at the timeout and marks it given up
         let (a, b) = (900_001, 900_002);
         for id in [a, b] {
-            track(Review { id, repo: "t/rv".into(), session: "main".into(), to: format!("x/{id}"), files: vec![], answer: None, ts: now(), gave_up: false });
+            track(Review { id, repo: "t/rv".into(), session: "main".into(), to: format!("x/{id}"), files: vec![], head: String::new(), answer: None, ts: now(), gave_up: false });
         }
         let t = std::thread::spawn(move || { std::thread::sleep(Duration::from_millis(100)); answered(a, "bob/main", "APPROVE") });
         let t0 = Instant::now();
@@ -591,7 +601,7 @@ new file mode 100644
         // all answered: no waiting at all; stop() ends it early too
         let t0 = Instant::now();
         wait_for(&[a], Duration::from_secs(5), &|| false);
-        track(Review { id: 900_003, repo: "t/rv".into(), session: "main".into(), to: "y".into(), files: vec![], answer: None, ts: now(), gave_up: false });
+        track(Review { id: 900_003, repo: "t/rv".into(), session: "main".into(), to: "y".into(), files: vec![], head: String::new(), answer: None, ts: now(), gave_up: false });
         wait_for(&[900_003], Duration::from_secs(5), &|| true);
         assert!(t0.elapsed() < Duration::from_secs(1));
         let ev = take_events();

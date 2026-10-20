@@ -4,6 +4,10 @@
 //!   QH_APP_INLINE=instruction (+ QH_APP_INLINE_LINES=a-b)   an inline edit on the open file
 //!   QH_APP_PAGE=review|checkpoints|memory|activity|tasks|settings|team|palette|code (QH_APP_PAGE_DELAY)
 //!   QH_APP_ANSWER=yes|no|always (QH_APP_ANSWER_DELAY)   answer the open ask like Ctrl+Enter / Ctrl+Backspace
+//!   QH_APP_TYPE=secs:text;…   put text in the composer (drives the / and @ popups)
+//!   QH_APP_IMAGE=path   attach it the way a pasted texture is (decoded, saved as PNG) at 2 s
+//!   QH_APP_SUBMIT=secs:text   type text and press send
+//!   QH_APP_CMD=secs:type:json;…   send a serve command for the current project (the Review/Checkpoints buttons' calls)
 //!   QH_APP_MODE=ask|auto-edit|auto|plan   at 2 s
 //!   QH_APP_SEQ=secs:page:out.png;…   several pages, each snapshotted 2 s after it shows
 //!   QH_APP_RESUME=1   resume the newest saved session at 2 s
@@ -86,6 +90,30 @@ pub fn run(st: &Shared, peek_snap: bool) {
         let s = st.clone();
         later(2, move || if let Some(p) = s.borrow().project() {
             if let Some(x) = p.sessions.first() { p.send(serde_json::json!({"type": "resume", "id": x.id})) }
+        });
+    }
+    for step in env("QH_APP_TYPE").unwrap_or_default().split(';').filter(|x| !x.is_empty()) {
+        let Some((t, text)) = step.split_once(':') else { continue };
+        let (Ok(t), text) = (t.parse::<u32>(), text.to_string()) else { continue };
+        later(t, move || if let Some(u) = ui::ui() { u.composer.set_text(&text) });
+    }
+    if let Some(path) = env("QH_APP_IMAGE") {
+        later(2, move || match gtk::gdk::Texture::from_filename(&path) {
+            Ok(t) => if let Some(u) = ui::ui() { u.composer.add_image("pasted.png".into(), &t.save_to_png_bytes()) },
+            Err(e) => eprintln!("qh-app: image {path}: {e}"),
+        });
+    }
+    if let Some((t, text)) = env("QH_APP_SUBMIT").as_deref().and_then(|v| v.split_once(':')).and_then(|(t, x)| Some((t.parse::<u32>().ok()?, x.to_string()))) {
+        let s = st.clone();
+        later(t, move || if let Some(u) = ui::ui() { u.composer.set_text(&text); u.composer.submit(&s) });
+    }
+    for step in env("QH_APP_CMD").unwrap_or_default().split(';').filter(|x| !x.is_empty()) {
+        let mut it = step.splitn(3, ':');
+        let (Some(Ok(t)), Some(ty), Some(js)) = (it.next().map(|t| t.parse::<u32>()), it.next(), it.next()) else { continue };
+        let (s, ty, js) = (st.clone(), ty.to_string(), js.to_string());
+        later(t, move || {
+            let v: serde_json::Value = serde_json::from_str(&js).unwrap_or_default();
+            if let Some(p) = s.borrow().project() { eprintln!("qh-app: cmd {ty} {v}"); p.cmd(&ty, v) }
         });
     }
     if let Some(mode) = env("QH_APP_MODE") {

@@ -210,7 +210,7 @@ impl Composer {
         self.text.grab_focus();
     }
 
-    fn submit(&self, st: &Shared) {
+    pub fn submit(&self, st: &Shared) {
         let t = self.text();
         let images: Vec<String> = self.attached.borrow().iter().map(|a| a.1.clone()).collect();
         if t.trim().is_empty() && images.is_empty() { return }
@@ -252,6 +252,7 @@ impl Composer {
         }
         // a lone exact match is nothing to suggest
         if items.len() == 1 && text.ends_with(items[0].0.trim_end()) && items[0].0.starts_with('/') && text == items[0].0.trim_end() { items.clear() }
+        if std::env::var_os("QH_APP_DEBUG").is_some() { eprintln!("suggest {text:?}: {:?}", items.iter().map(|i| &i.1).collect::<Vec<_>>()) }
         *self.items.borrow_mut() = items;
         self.sel.set(0);
         self.draw_sugg();
@@ -301,7 +302,7 @@ impl Composer {
 
     // MARK: images: picked or pasted, sent as base64 of the file bytes in the prompt's "images"
 
-    fn add_image(&self, name: String, bytes: &[u8]) {
+    pub fn add_image(&self, name: String, bytes: &[u8]) {
         self.attached.borrow_mut().push((name, glib::base64_encode(bytes).to_string()));
         self.draw_chips();
     }

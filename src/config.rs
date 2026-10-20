@@ -60,6 +60,8 @@ pub struct Config {
     pub team_share_files: bool,
     /// look for a newer qh once a day (`update_check = "off"` or false stops it)
     pub update_check: bool,
+    /// `memory = false`: no saved memories in the prompt and no remember/forget/recall tools
+    pub memory: bool,
     /// the safety guard and the OS sandbox for commands (`[sandbox] mode = "off"` turns both off)
     pub sandbox: bool,
     /// `[sandbox] writable`: more folders the model may write without asking
@@ -223,6 +225,7 @@ pub fn load_defaults() -> Config {
         verify: String::new(),
         team_share_files: true,
         update_check: true,
+        memory: true,
         notify: "auto".into(),
         lsp: "auto".into(),
         lsp_wait_ms: 3000,
@@ -314,6 +317,7 @@ pub fn load() -> Config {
         }
         if let Some(v) = t.get("lsp_wait_ms").and_then(|v| v.as_integer()) { c.lsp_wait_ms = v.clamp(0, 30_000) as u64 }
         if let Some(v) = t.get("mouse").and_then(|v| v.as_bool()) { c.mouse = v }
+        if let Some(v) = t.get("memory").and_then(|v| v.as_bool()) { c.memory = v }
         if let Some(v) = t.get("browser_headless").and_then(|v| v.as_bool()) { c.browser_headless = v }
         if let Some(a) = t.get("browser_allow_hosts").and_then(|v| v.as_array()) {
             c.browser_allow_hosts = a.iter().filter_map(|v| v.as_str().map(String::from)).collect();

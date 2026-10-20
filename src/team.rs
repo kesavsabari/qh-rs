@@ -95,6 +95,7 @@ pub struct Peer {
     anchor: String,                         // the commit GitHub vouches for their keys on
     signed: bool,                           // the folder's signature checks out against `sign`
     qh: String,                             // the qh version they run (empty before 0.1.4)
+    team_notes: String,                     // their copy of the team notes (see team_notes)
 }
 
 /// A member's keys as we know them: (member key, signing key, GitHub confirmed them).
@@ -635,6 +636,7 @@ fn parse_data(p: &mut Peer, d: &Value) {
     }
     p.link = d["link"].as_array().into_iter().flatten().filter_map(|a| a.as_str().map(String::from)).collect();
     p.link_ms = d["link_ms"].as_u64().unwrap_or(0);
+    p.team_notes = d["team_notes"].as_str().unwrap_or("").to_string();
 }
 
 fn per_repo(dir: &str, repo: &str) -> PathBuf {
@@ -832,6 +834,7 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks) -> Result<String, Strin
                     d["groups"] = Value::from(s.my_groups.clone());
                     d["gmsgs"] = Value::from(s.my_gmsgs.clone());
                     d["notes"] = Value::from(s.my_notes.clone());
+                    d["team_notes"] = json!(std::fs::read_to_string(team_notes_file(&s.repo)).unwrap_or_default());
                     d["claims"] = json!(s.claims);
                     d["uses"] = json!(s.uses);
                     d["promises"] = promises_json(&s.promises);
@@ -2200,6 +2203,44 @@ static REPO_OF: Mutex<Option<HashMap<PathBuf, Option<(PathBuf, String)>>>> = Mut
 fn repo_of(cwd: &Path) -> Option<(PathBuf, String)> {
     let mut c = REPO_OF.lock().unwrap();
     c.get_or_insert_with(HashMap::new).entry(cwd.to_path_buf()).or_insert_with(|| github_repo(cwd)).clone()
+}
+
+/// The team's notes (`.qh/team-notes.md` on the board): every member publishes the copy they
+/// hold, sealed with the rest of their folder; the notes are those copies merged line by line.
+/// Additions only, each approved by the person whose agent proposed it.
+fn team_notes_file(repo: &str) -> PathBuf {
+    per_repo("team-notes", repo).join("team-notes.md")
+}
+
+/// Copies merged: every line once, in the order first seen.
+pub fn merge_notes(copies: &[&str]) -> String {
+    let mut seen = std::collections::HashSet::new();
+    let lines: Vec<&str> = copies.iter().flat_map(|c| c.lines()).map(str::trim_end).filter(|l| !l.trim().is_empty() && seen.insert(*l)).collect();
+    if lines.is_empty() { String::new() } else { lines.join("\n") + "\n" }
+}
+
+/// This team project's notes, for a session's prompt; None when it isn't connected.
+pub fn team_notes(cwd: &Path) -> Option<String> {
+    let (_, repo) = repo_of(cwd)?;
+    let mine = std::fs::read_to_string(team_notes_file(&repo)).unwrap_or_default();
+    let theirs = with(&repo, |s| s.peers.values().filter(|p| p.joined && !s.removed.contains(&p.login))
+        .map(|p| p.team_notes.clone()).collect::<Vec<_>>())?;
+    let mut all = vec![mine.as_str()];
+    all.extend(theirs.iter().map(String::as_str));
+    Some(merge_notes(&all))
+}
+
+/// Add an approved note: merged into our copy, published with our next folder.
+pub fn add_team_note(cwd: &Path, text: &str) -> Result<PathBuf, String> {
+    let (_, repo) = repo_of(cwd).ok_or("not a team project")?;
+    let who = me().unwrap_or_default();
+    let line = format!("- {} {who}: {}", crate::memory::today(), text.replace('\n', " "));
+    let now = team_notes(cwd).unwrap_or_default();
+    let f = team_notes_file(&repo);
+    std::fs::create_dir_all(f.parent().unwrap_or(Path::new("."))).map_err(|e| e.to_string())?;
+    std::fs::write(&f, merge_notes(&[&now, &line])).map_err(|e| e.to_string())?;
+    with(&repo, |s| s.dirty = true);
+    Ok(f)
 }
 
 fn push_note(repo: &str, text: &str, file: &str, names: &[String]) {

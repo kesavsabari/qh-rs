@@ -51,6 +51,7 @@ const HELP: &str = "/new <name> [profile]  new session (Ctrl+N: instant, auto-na
 /anyway                this tab was paused because a teammate is changing the same function: go ahead anyway
 /answers [auto|ask|off] whether teammates' agents may ask yours (answered from a read-only copy, 20 an hour)
 /promise [fn what]     make a teammate's last answer (or your own words) a checked promise: edits that break it are held
+/memory [open|edit|forget <name>]  what qh remembers about you and this project (memory = false turns it off)
 /tier                  how the context window was sized to your GPU
 /mode [ask|auto-edit|auto|plan] (Shift+Tab)  /role [text]  /think  /tokens  /compact  /clear  /profile [name]
 /docs (guide in your browser)  /update (newest qh)  /undo  /diff  /ask-other [model] [question]  /allow [pattern]  /sandbox  /tasks [stop <id>]  /sessions  /commands (your own /name prompts)  /mcp (servers)
@@ -59,7 +60,8 @@ Shift+←/→ (or Alt+←/→, Alt+1..9) switch tabs · Shift+↑/↓ or PgUp/Pg
 use crate::tools::DANGER;
 
 /// What the `/` autocomplete offers; custom commands are added from .qh/commands.
-const COMMANDS: [(&str, &str); 44] = [
+const COMMANDS: [(&str, &str); 45] = [
+    ("/memory", "what qh remembers: list, open, edit, forget"),
     ("/model", "pick this tab's model"), ("/provider", "connect providers: sign in, keys"),
     ("/new", "new session tab"), ("/worktree", "this tab in its own git worktree"),
     ("/merge", "merge this worktree tab back (diff first)"), ("/merge --discard", "remove this worktree and its branch"),
@@ -458,6 +460,28 @@ pub fn run(hub: Arc<Hub>, tx: Sender<Ui>, rx: Receiver<Ui>) -> std::io::Result<(
                 Err(()) => break,
             }
         }
+        if app.outside.as_ref().is_some_and(|s| s.first().is_some_and(|k| k == "edit")) {
+            // /memory edit: the user's editor on one memory file, then back
+            let path = std::path::PathBuf::from(app.outside.take().and_then(|mut s| s.pop()).unwrap_or_default());
+            KEYS_PAUSED.store(true, std::sync::atomic::Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            let _ = execute!(std::io::stdout(), event::DisableBracketedPaste, event::DisableMouseCapture, event::DisableFocusChange);
+            ratatui::restore();
+            let editor = std::env::var("VISUAL").or_else(|_| std::env::var("EDITOR")).unwrap_or_else(|_| if cfg!(windows) { "notepad".into() } else { "vi".into() });
+            let mut words = editor.split_whitespace();
+            let ran = std::process::Command::new(words.next().unwrap_or("vi")).args(words).arg(&path).status();
+            term = ratatui::init();
+            KEYS_PAUSED.store(false, std::sync::atomic::Ordering::SeqCst);
+            let _ = execute!(std::io::stdout(), event::EnableBracketedPaste, event::EnableFocusChange);
+            if app.hub.cfg.mouse { let _ = execute!(std::io::stdout(), event::EnableMouseCapture); }
+            let _ = term.clear();
+            if let Some(d) = path.parent() { crate::memory::reindex(d) }
+            let a = app.active.clone();
+            match ran {
+                Ok(_) => app.note(&a, format!("saved {}", path.display())),
+                Err(e) => app.err(&a, format!("couldn't run {editor}: {e}")),
+            }
+        }
         if let Some(mut step) = app.outside.take() {
             let kind = if step.is_empty() { String::new() } else { step.remove(0) };
             // hand the terminal to the guided team setup, then take it back
@@ -846,6 +870,10 @@ impl App {
                 }
             }
             Event::Log(s) => self.log_line(s),
+            Event::Remembered { action, scope, name: what, .. } => {
+                let verb = match action.as_str() { "forgot" => "forgot", "proposed" => "proposed to the team", "declined" => "team note declined", _ => "remembered" };
+                self.note(&name, format!("{verb}: {what} ({scope}) · /memory"))
+            }
             Event::Changed => {}
         }
     }
@@ -1609,6 +1637,30 @@ impl App {
                 let msg = format!("auto-approve: {}", if s.allow.is_empty() { "none".into() } else { s.allow.join(", ") });
                 drop(s);
                 self.note(&a, msg);
+            }
+            "/memory" => {
+                if !self.hub.cfg.memory {
+                    return self.note(&a, "memory is off (memory = false in config.toml)");
+                }
+                let team = crate::team::running_here(&m.root).then(|| crate::team::team_notes(&m.root)).flatten();
+                let (sub, rest) = arg.split_once(' ').map(|(x, y)| (x, y.trim())).unwrap_or((arg, ""));
+                match sub {
+                    "" | "list" => self.note(&a, crate::memory::overview(&m.root, team.as_deref())),
+                    "open" | "edit" | "forget" => {
+                        let Some(mem) = crate::memory::locate(&m.root, rest) else {
+                            return self.err(&a, format!("no memory named {rest:?}; /memory lists them"));
+                        };
+                        match sub {
+                            "open" => self.note(&a, format!("{}\n{}", mem.file.display(), std::fs::read_to_string(&mem.file).unwrap_or_default())),
+                            "edit" => self.outside = Some(vec!["edit".into(), mem.file.to_string_lossy().into()]),
+                            _ => match crate::memory::forget(mem.file.parent().unwrap_or(std::path::Path::new(".")), &mem.name) {
+                                Ok(_) => self.note(&a, format!("forgot: {}", mem.name)),
+                                Err(e) => self.err(&a, e),
+                            },
+                        }
+                    }
+                    _ => self.err(&a, "usage: /memory [open|edit|forget <name>]"),
+                }
             }
             "/tasks" => {
                 let d = match arg.strip_prefix("stop").map(str::trim) {
@@ -3062,6 +3114,7 @@ fn draw_confirm(f: &mut Frame, c: &Confirm, queued: usize) {
              body.lines().take(200).enumerate().map(|(i, l)| Line::raw(format!("{:>4} {l}", i + 1))).collect(), exists)
         }
         "rename_symbol" => (format!("{} → {} across the project", s("old"), s("new")), vec![], false),
+        "team_note" => ("add to the team notes?".into(), vec![Line::styled(s("text"), Style::new().fg(Color::Yellow))], false),
         "network" => (format!("{}:{}", s("host"), a["port"]), vec![Line::raw("a sandboxed command is connecting to a host that isn't on the allowlist")], true),
         _ => (clip(&a.to_string(), 80), vec![Line::raw(a.to_string())], false),
     };
@@ -3241,7 +3294,9 @@ impl Remote {
         if let Some(name) = &app.secret {
             out.push(json!({"type": "secret", "tab": app.active, "provider": name}));
         }
-        if let Some(step) = app.outside.take() {
+        if let Some(step) = app.outside.take().filter(|s| s.first().is_some_and(|k| k == "edit")) {
+            out.push(json!({"type": "notice", "tab": app.active, "message": format!("memory file: {}", step.last().cloned().unwrap_or_default())}));
+        } else if let Some(step) = app.outside.take() {
             out.push(json!({"type": "notice", "tab": app.active,
                 "message": format!("this step needs a terminal for now: run `qh team {}` in Terminal", step.join(" "))}));
         }

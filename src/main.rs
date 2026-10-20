@@ -13,6 +13,7 @@ mod map;
 mod oauth;
 mod platform;
 mod mcp;
+mod memory;
 mod notify;
 mod hooks;
 mod hub;

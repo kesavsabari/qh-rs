@@ -160,6 +160,7 @@ pub struct PlanCard {
     root: gtk::Box,
     list: gtk::Box,
     count: gtk::Label,
+    chev: gtk::Label,
 }
 
 impl PlanCard {
@@ -175,6 +176,7 @@ impl PlanCard {
         head.append(&count);
         let chev = label("▾", &["qh-faint"]);
         head.append(&chev);
+        let chev_ = chev.clone();
         let btn = gtk::Button::new();
         btn.add_css_class("qh-tool-head");
         btn.set_child(Some(&head));
@@ -190,7 +192,7 @@ impl PlanCard {
             rev.set_reveal_child(open);
             chev.set_text(if open { "▾" } else { "▸" });
         });
-        let p = PlanCard { root, list, count };
+        let p = PlanCard { root, list, count, chev: chev_ };
         p.set_steps(steps);
         p
     }
@@ -220,6 +222,9 @@ impl PlanCard {
         }
         let done = steps.iter().filter(|s| s.1 == Step::Done).count();
         self.count.set_text(&format!("{done}/{}", steps.len()));
+        // a plan written as prose has no steps: no "0/0" and nothing to fold
+        self.count.set_visible(!steps.is_empty());
+        self.chev.set_visible(!steps.is_empty());
     }
 
     /// Add Approve plus an edits entry; `on_approve` gets the entry text ("" for none).

@@ -61,7 +61,7 @@ pub fn register_fonts(dir: &std::path::Path) -> usize {
 
 /// Fade and slide a freshly added widget in (180 ms). libadwaita skips the animation when
 /// gtk-enable-animations is off.
-pub(crate) fn appear(w: &impl IsA<gtk::Widget>) {
+pub fn appear(w: &impl IsA<gtk::Widget>) {
     let w = w.as_ref().clone();
     let base = w.margin_top();
     w.set_opacity(0.0);

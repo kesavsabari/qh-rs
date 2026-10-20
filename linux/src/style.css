@@ -125,3 +125,14 @@ button.qh-btn { color: var(--qh-ink); }
 button.qh-btn.qh-btn-ink, button.qh-btn.qh-btn-ink label, button.qh-btn.qh-ink-btn, button.qh-btn.qh-ink-btn label { color: var(--qh-card); }
 button.qh-btn.qh-btn-card { border: 1px solid var(--qh-line); }
 .inline-palette { border: 1px solid var(--qh-line); box-shadow: 0 12px 40px alpha(black, 0.18); }
+
+/* motion: hover fades, the working pulse, the thinking row (GTK skips all of it when animations are off) */
+button, .row, .tab, .seg, .sugg-row, button.metab, button.plain { transition: background-color 120ms ease-out, color 120ms ease-out, box-shadow 120ms ease-out; }
+.seg { transition-duration: 200ms; }
+@keyframes qh-pulse { from { opacity: 1; } to { opacity: 0.3; } }
+@keyframes qh-shimmer { 0% { color: var(--qh-soft); } 50% { color: var(--qh-ink); } 100% { color: var(--qh-soft); } }
+.tdot { min-width: 6px; min-height: 6px; border-radius: 99px; background: alpha(var(--qh-faint), 0.5); }
+.tdot.working { background: var(--qh-accent); animation: qh-pulse 700ms ease-in-out infinite alternate; }
+.tdot.asking { background: var(--qh-accent); }
+.think-dot { min-width: 9px; min-height: 9px; border-radius: 2px; background: var(--qh-accent); animation: qh-pulse 800ms ease-in-out infinite alternate; }
+.think { font-size: 13px; animation: qh-shimmer 1600ms linear infinite; }

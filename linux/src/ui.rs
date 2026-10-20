@@ -40,6 +40,8 @@ pub struct Ui {
     status: gtk::Label,
     pub pages: pages::Pages,
     asks: gtk::Box,
+    thinking: gtk::Revealer,
+    think_secs: gtk::Label,
     pub composer: Composer,
     pub palette: qh_desktop::Palette,
     overlay: gtk::Overlay,
@@ -57,6 +59,9 @@ thread_local! {
     pub static SETUP_DIRTY: Cell<bool> = const { Cell::new(true) };
     static SIGS: RefCell<HashMap<&'static str, String>> = RefCell::new(HashMap::new());
     static TEAM_TICKS: Cell<u32> = const { Cell::new(0) };
+    /// when each "path|tab" last heard from serve: the thinking row shows after 2 s of quiet
+    static HEARD: RefCell<HashMap<String, std::time::Instant>> = RefCell::new(HashMap::new());
+    static ASK_SHOWN: Cell<u64> = const { Cell::new(0) };
 }
 
 pub fn ui() -> Option<Rc<Ui>> { UI.with(|u| u.borrow().clone()) }
@@ -159,6 +164,7 @@ pub fn install(app: &adw::Application, st: &Shared, rx: async_channel::Receiver<
 /// After the model took an event: the live thread, the code view's inline edit, notifications.
 fn post(st: &Shared, path: &str, v: &serde_json::Value) {
     let Some(u) = ui() else { return };
+    heard(path, v["tab"].as_str().unwrap_or("main"));
     threads::on_event(st, path, v, &u.threads);
     let ty = v["type"].as_str().unwrap_or("");
     let current = st.borrow().current.as_deref() == Some(path);
@@ -330,6 +336,23 @@ fn build(app: &adw::Application, st: &Shared) {
     stack.add_named(&pages.team_page, Some("team"));
     card.append(&stack);
 
+    // "Thinking" while a turn has been quiet for 2 s: a pulsing square, the word shimmering, the seconds
+    let think = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    think.set_margin_start(24); think.set_margin_end(24); think.set_margin_bottom(6);
+    let sq = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    sq.add_css_class("think-dot"); sq.set_valign(gtk::Align::Center);
+    think.append(&sq);
+    think.append(&label("Thinking", &["think"]));
+    let think_secs = label("", &["mono", "faint", "small"]);
+    think.append(&think_secs);
+    let thinking = gtk::Revealer::builder().transition_type(gtk::RevealerTransitionType::Crossfade).transition_duration(200)
+        .child(&adw::Clamp::builder().maximum_size(760).child(&think).build()).build();
+    card.append(&thinking);
+    {
+        let s = st.clone();
+        glib::timeout_add_seconds_local(1, move || { tick_thinking(&s); glib::ControlFlow::Continue });
+    }
+
     let asks = gtk::Box::new(gtk::Orientation::Vertical, 8);
     asks.set_margin_start(24); asks.set_margin_end(24);
     let asks_clamp = adw::Clamp::builder().maximum_size(760).child(&asks).build();
@@ -412,7 +435,7 @@ fn build(app: &adw::Application, st: &Shared) {
     };
 
     let u = Ui { window, sidebar, tiles, side, side_bottom, dots, rail, tabs, tab_right, switch, stack, work, threads, tree, code, review,
-        checkpoints, empty, status, pages, asks, composer, palette, overlay, notifier, tray: RefCell::new(tray), tray_last: Cell::new((u32::MAX, 0)),
+        checkpoints, empty, status, pages, asks, thinking, think_secs, composer, palette, overlay, notifier, tray: RefCell::new(tray), tray_last: Cell::new((u32::MAX, 0)),
         notified: RefCell::new(HashSet::new()), peek: RefCell::new(None) };
     UI.with(|x| *x.borrow_mut() = Some(Rc::new(u)));
 }
@@ -594,6 +617,32 @@ fn on_notification(st: &Shared, key: &str, ans: &str) {
     schedule(st);
 }
 
+fn fade_in(w: &impl IsA<gtk::Widget>, ms: u32) {
+    let w = w.as_ref().clone();
+    w.set_opacity(0.0);
+    let ww = w.clone();
+    let a = adw::TimedAnimation::new(&w, 0.0, 1.0, ms, adw::CallbackAnimationTarget::new(move |v| ww.set_opacity(v)));
+    a.set_easing(adw::Easing::EaseOutCubic);
+    a.play();
+}
+
+fn heard(path: &str, tab: &str) {
+    HEARD.with(|h| h.borrow_mut().insert(format!("{path}|{tab}"), std::time::Instant::now()));
+}
+
+fn tick_thinking(st: &Shared) {
+    let Some(u) = ui() else { return };
+    let quiet = st.try_borrow().ok().and_then(|a| {
+        if a.team || a.settings { return None }
+        let p = a.project()?;
+        let t = p.current().filter(|t| t.status == "working" && p.page.is_none())?;
+        let key = format!("{}|{}", p.path, t.name);
+        HEARD.with(|h| h.borrow().get(&key).map(|i| i.elapsed().as_secs()))
+    }).filter(|q| *q >= 2);
+    if let Some(q) = quiet { u.think_secs.set_text(&format!("{q}s")) }
+    if u.thinking.reveals_child() != quiet.is_some() { u.thinking.set_reveal_child(quiet.is_some()) }
+}
+
 /// Send what the composer (or peek) holds: to the team channel in the team space, else a prompt.
 pub fn prompt(st: &Shared, text: &str, images: Vec<String>) {
     let Some(u) = ui() else { return };
@@ -607,6 +656,7 @@ pub fn prompt(st: &Shared, text: &str, images: Vec<String>) {
         }
     };
     if let Some((path, tab, (shown, user))) = shown {
+        heard(&path, &tab);
         threads::push_user(st, &path, &tab, &shown, user, &u.threads);
     }
     schedule(st);
@@ -633,6 +683,8 @@ fn render(st: &Shared) {
         u.sidebar.set_width_request(if compact { 56 } else { 260 });
         if compact { u.sidebar.add_css_class("compact") } else { u.sidebar.remove_css_class("compact") }
         dirty("sidebar");
+        // the rail and the full sidebar cross-fade (not on the first frame)
+        if u.window.is_mapped() { fade_in(&u.sidebar, 200) }
     }
     for w in [u.tiles.parent().unwrap(), u.side.parent().and_then(|p| p.parent()).unwrap(), u.side_bottom.clone().upcast()] { w.set_visible(!compact) }
     u.rail.set_visible(compact);
@@ -759,6 +811,8 @@ fn render_asks(st: &Shared, p: &model::Project, u: &Ui) {
             })
         };
         u.asks.append(card.widget());
+        // a new ask rises in; re-rendering the same one (a plan update) doesn't replay it
+        if ASK_SHOWN.with(|x| x.replace(id)) != id { qh_thread::appear(card.widget()) }
         if mine.len() > 1 { u.asks.append(&label(&format!("+ {} more waiting", mine.len() - 1), &["faint", "small"])) }
     }
     if !plan.0.is_empty() || plan.1 {
@@ -990,7 +1044,7 @@ fn render_tabs(st: &Shared, a: &App, u: &Ui) {
         u.switch.set_layout(match p.layout.as_str() { "split" => Layout::Split, "code" => Layout::Code, _ => Layout::Chat });
     }
     let sig = format!("{}|{}|{:?}", a.team, a.settings, p.map(|p| (p.path.clone(), p.active.clone(), p.page.clone(),
-        p.tabs.iter().map(|t| format!("{}:{}", t.name, t.label())).collect::<Vec<_>>())));
+        p.tabs.iter().map(|t| format!("{}:{}:{}:{}", t.name, t.label(), t.status, p.asks.iter().any(|a| a.tab == t.name))).collect::<Vec<_>>())));
     if !changed("tabs", sig) { return }
     clear(&u.tabs);
     if a.settings { return }
@@ -1000,7 +1054,19 @@ fn render_tabs(st: &Shared, a: &App, u: &Ui) {
     }
     let Some(p) = p else { return };
     for t in &p.tabs {
-        let b = gtk::Button::with_label(t.label());
+        let b = gtk::Button::new();
+        let h = gtk::Box::new(gtk::Orientation::Horizontal, 7);
+        let asking = p.asks.iter().any(|a| a.tab == t.name);
+        if asking || t.status == "working" {
+            let d = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+            d.add_css_class("tdot");
+            d.add_css_class(if asking { "asking" } else { "working" });
+            d.set_valign(gtk::Align::Center);
+            d.set_tooltip_text(Some(if asking { "waiting for you" } else { "working" }));
+            h.append(&d);
+        }
+        h.append(&gtk::Label::new(Some(t.label())));
+        b.set_child(Some(&h));
         b.add_css_class("tab");
         if t.name == p.active && p.page.is_none() { b.add_css_class("on") }
         b.set_tooltip_text(Some("Middle-click to close"));

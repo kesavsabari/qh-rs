@@ -221,8 +221,11 @@ pub fn request_text(me: &str, hunks: &[Hunk]) -> String {
     }
     if cut > 0 { body.push_str(&format!("({cut} more diff lines left out: ask for them with read_team_file)\n")) }
     format!("[review request] {me} is about to push changes to code you own ({}). Review the diff below. \
-Start your reply with APPROVE (fine to push) or CHANGES (what must change first), then short, concrete comments \
-(file:line, what and why). Only judge what's in the diff against what you know of this code.\n\n```diff\n{body}```",
+Start your reply with APPROVE (fine to push), CHANGES (what must change first), or HANDOFF when it needs \
+your person to decide: say why. Prefer HANDOFF over CHANGES when the diff is a product, pricing, policy or design \
+decision that isn't wrong as code (only a person can say whether it's intended), or when it's too big or unclear \
+to judge from the diff. Then \
+short, concrete comments (file:line, what and why). Only judge what's in the diff against what you know of this code.\n\n```diff\n{body}```",
             files.join(", "))
 }
 
@@ -232,6 +235,7 @@ pub fn verdict(answer: &str) -> &'static str {
     if a.starts_with("(NOT ANSWERED") || a.starts_with("(COULDN'T") { "none" }
     else if a.starts_with("APPROVE") || a.starts_with("LGTM") { "approve" }
     else if a.starts_with("CHANGES") || a.starts_with("REQUEST CHANGES") { "changes" }
+    else if a.starts_with("HANDOFF") || a.starts_with("HAND OFF") { "handoff" }
     else { "comments" }
 }
 
@@ -403,16 +407,54 @@ pub fn request(session: &str, cwd: &Path) -> Result<(Vec<u64>, String), String> 
     Ok((ids, format!("asked for review: {}", asked.join("; "))))
 }
 
+/// What came back before a push: the text for the agent, and who held it.
+pub struct Outcome {
+    pub text: String,
+    /// (login/session, answer) of reviewers who asked for changes
+    pub changes: Vec<(String, String)>,
+    /// (login/session, answer) of reviewers who handed it to their person
+    pub handoff: Vec<(String, String)>,
+    pub files: Vec<String>,
+    /// the commit reviewed
+    pub head: String,
+}
+
+/// Commits the user chose to push anyway: a retried push of one doesn't ask again.
+static PUSH_ANYWAY: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+pub fn push_anyway(head: &str) {
+    if !head.is_empty() { PUSH_ANYWAY.lock().unwrap().push(head.to_string()) }
+}
+
+pub fn pushed_anyway(head: &str) -> bool {
+    !head.is_empty() && PUSH_ANYWAY.lock().unwrap().iter().any(|h| h == head)
+}
+
 /// Before the agent's `git push`: ask, wait up to `review_wait`, and say what came back. None
-/// when reviews are off or there's nothing to ask; the push goes ahead either way.
-pub fn before_push(session: &str, cwd: &Path, cfg: &crate::config::Config, notice: &dyn Fn(String), stop: &dyn Fn() -> bool) -> Option<String> {
+/// when reviews are off or there's nothing to ask. CHANGES or HANDOFF holds the push (engine.rs).
+pub fn before_push(session: &str, cwd: &Path, cfg: &crate::config::Config, notice: &dyn Fn(String), stop: &dyn Fn() -> bool) -> Option<Outcome> {
     if !cfg.review { return None }
     let (ids, line) = request(session, cwd).ok()?;
     notice(format!("{line} · waiting up to {}s before pushing", cfg.review_wait));
     let got = wait_for(&ids, Duration::from_secs(cfg.review_wait), stop);
-    let out = summary(&got);
-    notice(out.lines().next().unwrap_or("").to_string());
-    Some(out)
+    let text = summary(&got);
+    notice(text.lines().next().unwrap_or("").to_string());
+    let pick = |v: &str| got.iter().filter_map(|(t, a)| a.as_ref().filter(|a| verdict(a) == v).map(|a| (t.clone(), a.clone()))).collect();
+    let (files, head) = {
+        let v = REVIEWS.lock().unwrap();
+        let mut f: Vec<String> = v.iter().filter(|r| ids.contains(&r.id)).flat_map(|r| r.files.clone()).collect();
+        f.sort();
+        f.dedup();
+        (f, v.iter().find(|r| ids.contains(&r.id)).map(|r| r.head.clone()).unwrap_or_default())
+    };
+    Some(Outcome { text, changes: pick("changes"), handoff: pick("handoff"), files, head })
+}
+
+/// The private message that hands a held push to the owner themselves, in team chat.
+pub fn handoff_text(me: &str, files: &[String], answer: &str) -> String {
+    let a: String = answer.trim().chars().take(600).collect();
+    format!("[review] {me} wants to push changes to {} and needs you to decide. Your agent said: {a}\nReply here to talk it through.",
+            if files.is_empty() { "your code".to_string() } else { files.join(", ") })
 }
 
 /// What the reviews said, for the agent and the user.
@@ -424,9 +466,7 @@ pub fn summary(got: &[(String, Option<String>)]) -> String {
             None => out.push(format!("review from {to}: no answer yet; the push went ahead (their answer will still come)")),
         }
     }
-    let changes = got.iter().any(|(_, a)| a.as_deref().map(verdict) == Some("changes"));
-    format!("[review] {}{}", out.join("\n\n"),
-            if changes { "\n\nA reviewer asked for changes: tell the user, and fix them in a follow-up commit if they agree." } else { "" })
+    format!("[review] {}", out.join("\n\n"))
 }
 
 /// For team.rs's tests: a review in flight, as `request` tracks it.
@@ -580,6 +620,9 @@ new file mode 100644
         assert_eq!(verdict("APPROVE. Looks right."), "approve");
         assert_eq!(verdict("**CHANGES**: the lock"), "changes");
         assert_eq!(verdict("Two notes: …"), "comments");
+        assert_eq!(verdict("HANDOFF: this changes pricing policy, dave should decide"), "handoff");
+        let h = handoff_text("erin", &["shop.py".into()], "HANDOFF: pricing call");
+        assert!(h.contains("erin wants to push changes to shop.py") && h.contains("pricing call") && h.contains("Reply here"));
         assert_eq!(verdict("(not answered: they have you as view only.)"), "none");
         // one answered in time, one not: the wait ends at the timeout and marks it given up
         let (a, b) = (900_001, 900_002);

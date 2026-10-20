@@ -863,7 +863,7 @@ impl App {
             Event::Done { .. } => self.view(&name).streaming = false,
             Event::Confirm { tool, args, reply, cwd, warn, guard } => {
                 let rules = self.hub.get(&name).map(|m| lock(&m.set).allow.clone()).unwrap_or_default();
-                let rule = if tool == "budget" { "budget".to_string() } else if guard && tool != "network" { String::new() } else { suggest_rule(&tool, &args, &rules) };
+                let rule = if tool == "budget" { "budget".to_string() } else if tool == "review_hold" { "handoff".to_string() } else if guard && tool != "network" { String::new() } else { suggest_rule(&tool, &args, &rules) };
                 self.confirms.push_back(Confirm { session: name, tool, args, rule, reply, cwd, warn });
             }
             Event::Added => {
@@ -905,7 +905,8 @@ impl App {
         if let Some(c) = self.confirms.front() {
             let ans = match k.code {
                 KeyCode::Char('y') | KeyCode::Enter => Some(Answer::Yes),
-                KeyCode::Char('a') if !c.rule.is_empty() => Some(Answer::Always(c.rule.clone())),
+                KeyCode::Char('a') if !c.rule.is_empty() && c.tool != "review_hold" => Some(Answer::Always(c.rule.clone())),
+                KeyCode::Char('h') if c.tool == "review_hold" => Some(Answer::Always(c.rule.clone())),
                 KeyCode::Char('n') | KeyCode::Esc => Some(Answer::No),
                 _ => None,
             };
@@ -3130,6 +3131,8 @@ fn draw_confirm(f: &mut Frame, c: &Confirm, queued: usize) {
              body.lines().take(200).enumerate().map(|(i, l)| Line::raw(format!("{:>4} {l}", i + 1))).collect(), exists)
         }
         "rename_symbol" => (format!("{} → {} across the project", s("old"), s("new")), vec![], false),
+        "review_hold" => (format!("{} asked for changes: push anyway?", s("owners")),
+            s("text").lines().map(|l| Line::raw(l.to_string())).collect(), true),
         "team_note" => ("add to the team notes?".into(), vec![Line::styled(s("text"), Style::new().fg(Color::Yellow))], false),
         "network" => (format!("{}:{}", s("host"), a["port"]), vec![Line::raw("a sandboxed command is connecting to a host that isn't on the allowlist")], true),
         _ => (clip(&a.to_string(), 80), vec![Line::raw(a.to_string())], false),
@@ -3145,10 +3148,11 @@ fn draw_confirm(f: &mut Frame, c: &Confirm, queued: usize) {
     }
     head.push(Line::raw(""));
     let mut foot = vec![Line::raw("")];
-    if !c.rule.is_empty() {
+    if !c.rule.is_empty() && c.tool != "review_hold" {
         foot.push(Line::from(vec![Span::styled("always = auto-approve ", Style::new().fg(DIM)), Span::styled(c.rule.clone(), Style::new().add_modifier(Modifier::BOLD))]));
     }
-    let keys = if c.rule.is_empty() { "[y] allow   [n] deny" } else { "[y] allow   [a] always   [n] deny" };
+    let keys = if c.tool == "review_hold" { "[y] push anyway   [h] hand to them in team chat   [n] hold and fix".to_string() }
+        else if c.rule.is_empty() { "[y] allow   [n] deny".to_string() } else { "[y] allow   [a] always   [n] deny".to_string() };
     foot.push(Line::styled(keys, Style::new().add_modifier(Modifier::BOLD)));
     let fixed: u16 = head.iter().chain(&foot).map(|l| rows(l)).sum::<u16>() + 2;
     let budget = area.height.saturating_sub(5).saturating_sub(fixed);

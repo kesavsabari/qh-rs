@@ -848,6 +848,39 @@ fn memory_tool(hub: &Arc<Hub>, m: &Arc<Member>, name: &str, args: &Value) -> Str
 }
 
 /// Ask the user before a note goes to the whole team; `add` publishes it on the board.
+/// A reviewer asked for changes or handed it to their person: the push doesn't run unless the
+/// user says so. Some(result for the agent) when it's held.
+fn hold_push(hub: &Arc<Hub>, m: &Arc<Member>, r: &crate::review::Outcome) -> Option<String> {
+    let me = crate::team::me().unwrap_or_default();
+    let login = |to: &str| to.split('/').next().unwrap_or(to).to_string();
+    let hand = |list: &[(String, String)]| -> Vec<String> {
+        list.iter().map(|(to, a)| match crate::team::dm_send(&login(to), &crate::review::handoff_text(&me, &r.files, a)) {
+            Ok(_) => format!("@{}", login(to)),
+            Err(e) => format!("@{} (couldn't message: {e})", login(to)),
+        }).collect()
+    };
+    if !r.handoff.is_empty() {
+        let who = hand(&r.handoff).join(", ");
+        hub.emit(&m.name, Event::Notice(format!("push held: handed to {who} in team chat")));
+        return Some(format!("{}\n\nPush NOT run: the reviewer handed this to their person, and {who} got a private message in team chat. \
+Tell the user to talk it through with them there; push again only once the user says so.", r.text));
+    }
+    if r.changes.is_empty() || crate::review::pushed_anyway(&r.head) { return None }
+    let owners: Vec<String> = r.changes.iter().map(|(t, _)| login(t)).collect();
+    let comments: String = r.changes.iter().map(|(t, a)| format!("{t}: {}", a.trim())).collect::<Vec<_>>().join("\n\n");
+    let args = json!({"owners": owners.join(", "), "text": comments.chars().take(2000).collect::<String>()});
+    match hub.ask(m, "review_hold", &args, Some("a reviewer asked for changes before this push")) {
+        crate::hub::Answer::Yes => { crate::review::push_anyway(&r.head); None }
+        crate::hub::Answer::Always(_) => {
+            let who = hand(&r.changes).join(", ");
+            hub.emit(&m.name, Event::Notice(format!("push held: handed to {who} in team chat")));
+            Some(format!("{}\n\nPush NOT run: the user handed this to {who} in team chat. Wait for the user before pushing again.", r.text))
+        }
+        crate::hub::Answer::No => Some(format!("{}\n\nPush NOT run: a reviewer asked for changes and the user held the push. \
+Make the changes they asked for (or tell the user why not), commit, and push again.", r.text)),
+    }
+}
+
 fn propose_team_note(hub: &Arc<Hub>, m: &Arc<Member>, text: &str, add: impl FnOnce(&str) -> Result<PathBuf, String>) -> String {
     let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if text.is_empty() {
@@ -968,6 +1001,10 @@ relevant files first, then call ask_model again with the code, error or plan pas
     let review = if name == "bash" && crate::review::is_push(args["cmd"].as_str().unwrap_or("")) && crate::team::running_here(&cwd) {
         crate::review::before_push(&m.name, &cwd, &hub.cfg, &|t| hub.emit(&m.name, Event::Notice(t)), &|| m.cancel.load(Relaxed))
     } else { None };
+    if let Some(held) = review.as_ref().and_then(|r| hold_push(hub, m, r)) {
+        return held;
+    }
+    let review = review.map(|r| r.text);
     let (turn, prompt) = { // which user message this turn answers, so the app can rewind to before it
         let msgs = lock(&m.msgs);
         let users: Vec<&Value> = msgs.iter().filter(|x| x["role"] == "user").collect();

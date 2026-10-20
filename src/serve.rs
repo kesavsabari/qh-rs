@@ -146,7 +146,7 @@ fn pump(hub: Arc<Hub>, st: Arc<State>, rx: Receiver<crate::ui::Ui>) {
             Event::Confirm { tool, args, reply, cwd, warn, guard } => {
                 let id = st.next.fetch_add(1, Relaxed);
                 let rules = hub.get(&tab).map(|m| lock(&m.set).allow.clone()).unwrap_or_default();
-                let rule = if tool == "budget" { "budget".to_string() } else if guard && tool != "network" { String::new() } else { crate::ui::suggest_rule(&tool, &args, &rules) };
+                let rule = if tool == "budget" { "budget".to_string() } else if tool == "review_hold" { "handoff".to_string() } else if guard && tool != "network" { String::new() } else { crate::ui::suggest_rule(&tool, &args, &rules) };
                 lock(&st.confirms).insert(id, (rule.clone(), reply));
                 st.broadcast(&json!({"type": "confirm", "tab": tab, "id": id, "tool": tool, "args": args,
                     "cwd": cwd, "warn": warn, "guard": guard, "always": rule}));

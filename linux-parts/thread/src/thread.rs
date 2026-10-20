@@ -14,6 +14,12 @@ struct Inner {
     stuck: Cell<bool>,
     links: RefCell<Links>,
     on_review: RefCell<Option<Rc<dyn Fn(&str)>>>,
+    /// While `prepend` runs: push() inserts after this (None: at the very top) instead of appending.
+    before: RefCell<Option<Option<gtk::Widget>>>,
+    /// Distance from the content's end to the view's top, held while prepended rows lay out.
+    hold: Cell<Option<f64>>,
+    on_older: RefCell<Option<Rc<dyn Fn()>>>,
+    asking: Cell<bool>,
 }
 
 /// The thread. `widget()` is a ScrolledWindow; keep the handle (it is cheap to clone).
@@ -46,6 +52,10 @@ impl Thread {
             stuck: Cell::new(true),
             links: RefCell::new(Links::default()),
             on_review: RefCell::new(None),
+            before: RefCell::new(None),
+            hold: Cell::new(None),
+            on_older: RefCell::new(None),
+            asking: Cell::new(false),
         }));
         // stick to the bottom while the user is there; scrolling up frees it
         let adj = t.0.scroller.vadjustment();
@@ -53,14 +63,18 @@ impl Thread {
         adj.connect_value_changed(move |a| {
             if let Some(i) = w.upgrade() {
                 i.stuck.set(a.value() + a.page_size() >= a.upper() - 24.0);
+                older(&i, a);
             }
         });
         let w = Rc::downgrade(&t.0);
         adj.connect_notify_local(Some("upper"), move |a, _| {
             if let Some(i) = w.upgrade() {
-                if i.stuck.get() {
+                if let Some(d) = i.hold.get() {
+                    a.set_value(a.upper() - d); // older rows grew the top: keep the view where it was
+                } else if i.stuck.get() {
                     a.set_value(a.upper() - a.page_size());
                 }
+                older(&i, a); // a short page can't be scrolled: fill until it can
             }
         });
         t
@@ -80,6 +94,25 @@ impl Thread {
         *self.0.on_review.borrow_mut() = Some(Rc::new(f));
     }
 
+    /// Called (from idle) when the view nears the top; it adds older rows with `prepend`.
+    pub fn set_on_older(&self, f: impl Fn() + 'static) {
+        *self.0.on_older.borrow_mut() = Some(Rc::new(f));
+    }
+
+    /// Every push_* inside `f` lands above what's shown, in order, with no entrance and no jump.
+    pub fn prepend(&self, f: impl FnOnce()) {
+        let a = self.0.scroller.vadjustment();
+        self.0.hold.set(Some(a.upper() - a.value()));
+        *self.0.before.borrow_mut() = Some(None);
+        f();
+        *self.0.before.borrow_mut() = None;
+        // layout settles within a frame or two; then scrolling is the user's again
+        let w = Rc::downgrade(&self.0);
+        glib::timeout_add_local_once(Duration::from_millis(250), move || {
+            if let Some(i) = w.upgrade() { i.hold.set(None) }
+        });
+    }
+
     pub fn is_at_bottom(&self) -> bool {
         self.0.stuck.get()
     }
@@ -91,6 +124,13 @@ impl Thread {
     }
 
     fn push(&self, w: &impl IsA<gtk::Widget>) {
+        let mut before = self.0.before.borrow_mut();
+        if let Some(after) = before.as_mut() {
+            self.0.items.insert_child_after(w, after.as_ref());
+            *after = Some(w.clone().upcast());
+            return;
+        }
+        drop(before);
         self.0.items.append(w);
         appear(w);
     }
@@ -106,8 +146,9 @@ impl Thread {
         l.set_margin_start(80);
         l.set_max_width_chars(60);
         row.append(&l);
+        let older = self.0.before.borrow().is_some();
         self.push(&row);
-        self.scroll_to_bottom();
+        if !older { self.scroll_to_bottom() }
     }
 
     pub fn push_reply(&self) -> ReplyHandle {
@@ -215,6 +256,17 @@ impl Thread {
         }
         self.0.stuck.set(true);
     }
+}
+
+/// Near the top: ask once for the next older page (from idle, never inside a scroll signal).
+fn older(i: &Rc<Inner>, a: &gtk::Adjustment) {
+    if a.value() >= 400.0 || i.hold.get().is_some() || i.asking.replace(true) { return }
+    let Some(f) = i.on_older.borrow().clone() else { i.asking.set(false); return };
+    let w = Rc::downgrade(i);
+    glib::idle_add_local_once(move || {
+        f();
+        if let Some(i) = w.upgrade() { i.asking.set(false) }
+    });
 }
 
 struct Reply {

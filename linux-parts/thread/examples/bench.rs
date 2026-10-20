@@ -42,6 +42,30 @@ fn main() {
             }
         }
         eprintln!("stream {} chars: {n} redraws, avg {:.1} ms render + {:.1} ms layout, worst {:.1} ms (budget 16.7)", big.len(), redraw / n as f64, layout / n as f64, worst);
+        // paged history (what the app does now): 40 items at open, 40 more per scroll-up
+        let t2 = Thread::new();
+        let sw = t2.widget().clone();
+        let lay2 = |sw: &gtk::ScrolledWindow| { let _ = sw.measure(gtk::Orientation::Vertical, 900); sw.allocate(900, 800, -1, None); };
+        let page = |th: &Thread, n: usize, from: usize| for i in from..from + n / 5 {
+            th.push_user(&format!("question {i}"));
+            for n in ["read", "bash", "edit"] { th.push_tool(n, "src/relay.rs").finish(true, "ok", ""); }
+            th.push_reply().set_text(REPLY);
+        };
+        let t = Instant::now();
+        page(&t2, 40, 92);
+        lay2(&sw);
+        eprintln!("paged open (40 of 500): {:.0} ms build+layout", t.elapsed().as_secs_f64() * 1e3);
+        let a = sw.vadjustment();
+        a.set_value(300.0);
+        let mark = t2.widget().first_child().unwrap(); // viewport
+        let probe = |sw: &gtk::ScrolledWindow| { let _ = sw; a.upper() - a.value() };
+        let before = probe(&sw);
+        let t = Instant::now();
+        t2.prepend(|| page(&t2, 20, 88));
+        lay2(&sw);
+        let after = probe(&sw);
+        let _ = mark;
+        eprintln!("prepend 20: {:.0} ms; distance from view top to end {before:.0} -> {after:.0} px (same = no jump), upper {:.0}", t.elapsed().as_secs_f64() * 1e3, a.upper());
         let rss = std::fs::read_to_string("/proc/self/status").unwrap().lines().find(|l| l.starts_with("VmRSS")).unwrap().to_string();
         eprintln!("{rss}");
         let a = app.clone();

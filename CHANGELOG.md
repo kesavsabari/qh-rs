@@ -2,6 +2,30 @@
 
 Each version starts with a one-line summary; the website shows it once the version is no longer recent.
 
+## 0.2.2 — 2026-10-20
+
+Checks its own work; spend caps; cheaper long sessions; qh serve for the desktop apps.
+
+- **Auto-verify.** After a turn that edited files, qh runs the project's check (`cargo check`,
+  `npm run typecheck`/`build`/`test`, `pytest` or `go build`, found from the project) and shows
+  pass or fail with the tail of the output; a failure can be handed back to the agent to fix. Set
+  `verify = "your command"`, `"test"` (include tests) or `"off"` in config.toml.
+- **Spend caps.** `budget_session` and `budget_day` (USD, 0 = off): at the cap qh pauses and asks
+  before spending more. Plus an activity timeline per session.
+- **Prompt caching** for Anthropic and OpenRouter, and cache keys for OpenAI and ChatGPT: long
+  sessions resend far less. Adaptive thinking for new Claude models, kept across tool turns.
+- **ChatGPT plan limits** fall back to `fallback_model` instead of retrying.
+- **Sessions:** short 2-5 word titles (old ones get one in the background), delete a saved
+  session, checkpoints tagged by message with rewind of files or files and chat.
+- **No model set up:** qh starts setup instead of retrying a local model that isn't there, and
+  keeps the rest of config.toml.
+- **Browser:** `/allow localhost:3000` lets the session's browser open an address you allow; a
+  refused local URL says why and what to do.
+- **VS Code:** qh inside the extension sees the open file, selection, tabs and problems.
+- **`qh serve`** (the core the desktop apps attach to): runs on Windows too, plan checklist and
+  approval, project memory, inline edits, team state pushed as it changes, and a prompt or rewind
+  sent right after a turn is no longer refused as busy.
+
 ## 0.2.1 — 2026-10-13
 
 A Windows sandbox; auto mode by default; a second opinion from another model.

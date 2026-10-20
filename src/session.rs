@@ -45,6 +45,30 @@ pub fn append(path: &Path, msg: &Value) {
     }
 }
 
+/// Replies streaming right now, per transcript: what a kill would otherwise lose.
+static PARTIAL: std::sync::Mutex<Vec<(PathBuf, String)>> = std::sync::Mutex::new(Vec::new());
+
+pub fn partial_add(path: &Path, text: &str) {
+    let mut p = PARTIAL.lock().unwrap_or_else(|e| e.into_inner());
+    match p.iter_mut().find(|(q, _)| q == path) {
+        Some((_, s)) => s.push_str(text),
+        None => p.push((path.to_path_buf(), text.to_string())),
+    }
+}
+
+/// The reply finished (or failed): the transcript gets it the normal way.
+pub fn partial_clear(path: &Path) {
+    PARTIAL.lock().unwrap_or_else(|e| e.into_inner()).retain(|(q, _)| q != path);
+}
+
+/// On a kill: every reply still streaming goes to the end of its transcript, marked cut off.
+pub fn save_partials() {
+    let p = std::mem::take(&mut *PARTIAL.lock().unwrap_or_else(|e| e.into_inner()));
+    for (path, text) in p.into_iter().filter(|(_, t)| !t.trim().is_empty()) {
+        append(&path, &serde_json::json!({"role": "assistant", "content": format!("{text}\n\n[cut off: qh was closed mid-reply]")}));
+    }
+}
+
 pub fn load(path: &Path) -> Vec<Value> {
     std::fs::read_to_string(path).unwrap_or_default().lines()
         .filter_map(|l| serde_json::from_str(l).ok()).collect()
@@ -205,6 +229,28 @@ pub fn past(dir: &Path, cwd: &Path, a: &Value, current: &Path) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_kill_keeps_the_reply_streaming() {
+        let d = std::env::temp_dir().join(format!("qh-partial-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let (a, b) = (d.join("a.jsonl"), d.join("b.jsonl"));
+        save(&a, &[json!({"role": "user", "content": "explain"})]);
+        save(&b, &[json!({"role": "user", "content": "done one"})]);
+        partial_add(&a, "Half of ");
+        partial_add(&a, "an answer");
+        partial_add(&b, "finished");
+        partial_clear(&b); // completed normally: saved by the turn, not here
+        save_partials();
+        let msgs = load(&a);
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[1]["role"], "assistant");
+        assert!(msgs[1]["content"].as_str().unwrap().starts_with("Half of an answer\n\n[cut off"), "{msgs:?}");
+        assert_eq!(load(&b).len(), 1);
+        save_partials(); // nothing left: a second signal adds nothing
+        assert_eq!(load(&a).len(), 2);
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     #[test]
     fn past_lists_searches_and_reads_only_this_folder() {

@@ -121,6 +121,22 @@ fn verify(hub: &Arc<Hub>, m: &Arc<Member>) {
     hub.emit(&m.name, Event::Verify { cmd, ok, secs: start.elapsed().as_secs_f64(), tail });
 }
 
+/// Saved memory into the system prompt, once per session (on its first turn, when the model's
+/// window is known: 200k and up gets every file, smaller ones the index).
+fn with_memory(hub: &Arc<Hub>, m: &Arc<Member>) {
+    if !hub.cfg.memory || lock(&m.msgs).first().and_then(|x| x["content"].as_str()).is_none_or(|s| s.contains(crate::memory::MARK)) {
+        return;
+    }
+    let ctx = hub.ctx_for(m, true).0;
+    let team = crate::team::running_here(&m.root).then(|| crate::team::team_notes(&m.root)).flatten();
+    let block = crate::memory::prompt_block(&m.root, ctx, team.as_deref());
+    let mut msgs = lock(&m.msgs);
+    if let Some(first) = msgs.first_mut().filter(|x| x["role"] == "system") {
+        first["content"] = format!("{}{block}", first["content"].as_str().unwrap_or("")).into();
+    }
+    m.touched(&msgs);
+}
+
 fn turn(hub: &Arc<Hub>, m: &Arc<Member>, user: &str) -> Result<(String, bool), Error> {
     let mut edited = false;
     let mut errors = 0;
@@ -132,6 +148,7 @@ fn turn(hub: &Arc<Hub>, m: &Arc<Member>, user: &str) -> Result<(String, bool), E
     let mut repeats: std::collections::HashMap<u64, u32> = Default::default();
     let mut circling: Option<String> = None;
     let mut budget_ok = false; // "yes" to a budget ask covers the rest of this turn
+    with_memory(hub, m);
     loop {
         compact(hub, m, false)?;
         // what teammates' agents just changed, before this session builds on stale ideas
@@ -627,6 +644,7 @@ fn call_locked(hub: &Arc<Hub>, m: &Arc<Member>, over: Option<(&str, &str)>, msgs
                 m.thinking.store(thinking, Relaxed);
                 lock(&m.turn).streamed += 1;
                 if !thinking {
+                    session::partial_add(&lock(&m.session), text);
                     hub.emit(&m.name, Event::Token(text.to_string()));
                 }
             }
@@ -636,6 +654,7 @@ fn call_locked(hub: &Arc<Hub>, m: &Arc<Member>, over: Option<(&str, &str)>, msgs
         // providers (the ChatGPT plan) only send their reasoning summary after it's done
         if !quiet { m.thinking.store(!think.is_empty(), Relaxed) }
         let r = backend::chat(&prov, &model, msgs, schemas, &think, ctx, &cfg.keep_alive, &mut on);
+        if !quiet { session::partial_clear(&lock(&m.session)) }
         m.thinking.store(false, Relaxed);
         match r {
             // a server that is loading, overloaded or briefly down: retry, but only before any
@@ -805,6 +824,50 @@ fn todo(session: &str, a: &Value) -> String {
     format!("todo saved ({left} open):\n{text}")
 }
 
+/// remember / forget / recall. Scope "team" proposes a note to the team: a person approves it.
+fn memory_tool(hub: &Arc<Hub>, m: &Arc<Member>, name: &str, args: &Value) -> String {
+    if !hub.cfg.memory {
+        return "error: memory is off (memory = false in config)".into();
+    }
+    if name == "remember" && args["scope"].as_str().is_some_and(|s| s.trim().eq_ignore_ascii_case("team")) {
+        let cwd = m.cwd();
+        if !crate::team::running_here(&cwd) {
+            return "error: this project isn't connected to a team; use scope project or user".into();
+        }
+        return propose_team_note(hub, m, args["fact"].as_str().unwrap_or(""), |t| crate::team::add_team_note(&cwd, t));
+    }
+    match crate::memory::call(&m.root, name, args) {
+        Ok(d) => {
+            if d.action != "read" {
+                hub.emit(&m.name, Event::Remembered { action: d.action.into(), scope: d.scope, name: d.name, path: d.path });
+            }
+            d.text
+        }
+        Err(e) => format!("error: {e}"),
+    }
+}
+
+/// Ask the user before a note goes to the whole team; `add` publishes it on the board.
+fn propose_team_note(hub: &Arc<Hub>, m: &Arc<Member>, text: &str, add: impl FnOnce(&str) -> Result<PathBuf, String>) -> String {
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.is_empty() {
+        return "error: the note is empty".into();
+    }
+    let ev = |action: &str, path: PathBuf| Event::Remembered { action: action.into(), scope: "team".into(), name: text.chars().take(80).collect(), path };
+    hub.emit(&m.name, ev("proposed", PathBuf::new()));
+    if !hub.confirm(m, "team_note", &json!({"text": text}), Some("adds a note every teammate's agent reads at the start of a session")) {
+        hub.emit(&m.name, ev("declined", PathBuf::new()));
+        return "declined by the user: the note was not added to the team notes. Keep it as a project memory if it still matters.".into();
+    }
+    match add(&text) {
+        Ok(p) => {
+            hub.emit(&m.name, ev("saved", p));
+            "approved: added to the team notes; teammates' agents read it from their next session".into()
+        }
+        Err(e) => format!("error: {e}"),
+    }
+}
+
 fn dispatch(hub: &Arc<Hub>, m: &Arc<Member>, name: &str, args: &Value) -> String {
     let Some(schema) = lock(&m.set).tools.iter().find(|t| t["function"]["name"] == name).cloned() else {
         let names: Vec<String> = lock(&m.set).tools.iter()
@@ -860,12 +923,15 @@ relevant files first, then call ask_model again with the code, error or plan pas
     if name == "fetch" && !hub.cfg.fetch_model.is_empty() {
         return fetch(hub, m, args["goal"].as_str().unwrap_or(""));
     }
-    if hub.mode_name() == "plan" && (tools::risky(name, &args, &hub.cfg) || matches!(name, "remember" | "send_message" | "spawn")) {
+    if hub.mode_name() == "plan" && (tools::risky(name, &args, &hub.cfg) || matches!(name, "remember" | "forget" | "send_message" | "spawn")) {
         return "error: plan mode is read-only. Finish exploring, then reply with a numbered plan; the user switches mode (Shift+Tab) to let you carry it out.".into();
     }
     let input = json!({"event": "pre_tool", "tool": name, "args": args, "session": m.name, "cwd": m.cwd()});
     if let hooks::Outcome::Block(why) = hooks::fire(&hub.cfg.hooks, "pre_tool", name, &input, &m.cwd()) {
         return format!("error: blocked by a hook: {why}");
+    }
+    if matches!(name, "remember" | "forget" | "recall") {
+        return memory_tool(hub, m, name, &args);
     }
     let mut cwd = m.cwd();
     if let Some(err) = hub.claim_file(&m.name, name, &args, &cwd) {
@@ -1156,5 +1222,115 @@ mod fallback_tests {
         assert_eq!(next_fallback(&l, "", "c"), None);
         assert_eq!(next_fallback(&["a".to_string(), "b".to_string()], "", "a"), Some("b"));
         assert_eq!(next_fallback(&[], "", "a"), None);
+    }
+}
+
+#[cfg(test)]
+mod memory_tests {
+    use super::*;
+    use serde_json::json;
+    use std::sync::atomic::AtomicBool;
+
+    struct Env(PathBuf);
+    impl Drop for Env {
+        fn drop(&mut self) {
+            std::env::remove_var("QH_CONFIG");
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn setup(tag: &str) -> Env {
+        let root = crate::sandbox::canon(&std::env::temp_dir()).join(format!("qh-memory-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("proj")).unwrap();
+        std::env::set_var("QH_STATE_DIR", root.join("state"));
+        std::env::set_var("QH_CONFIG", root.join("cfg/config.toml"));
+        Env(root)
+    }
+
+    fn sys(m: &Member) -> String {
+        lock(&m.msgs)[0]["content"].as_str().unwrap_or("").to_string()
+    }
+
+    #[test]
+    fn remember_saves_tells_the_ui_and_reaches_the_next_session() {
+        let _env = lock(&crate::hub::tests::ENV);
+        let e = setup("on");
+        let events = Arc::new(Mutex::new(vec![]));
+        let seen = events.clone();
+        let emit: crate::hub::Emit = Box::new(move |_, ev| if let Event::Remembered { action, scope, name, .. } = ev {
+            lock(&seen).push(format!("{action} {scope} {name}"));
+        });
+        let hub = Hub::new(crate::config::load_defaults(), Some(format!("mem-{}", std::process::id())), emit, true);
+        let m = hub.add("a", None, "", "", None, false, Some(e.0.join("proj"))).unwrap();
+        let out = dispatch(&hub, &m, "remember", &json!({"fact": "deploys need the VPN (2026-10-20): the API is internal-only",
+            "name": "Deploy needs VPN", "description": "deploys need the VPN", "type": "gotcha"}));
+        assert!(out.starts_with("saved \"Deploy needs VPN\" (project memory"), "{out}");
+        dispatch(&hub, &m, "remember", &json!({"fact": "prefers short answers", "scope": "user", "name": "Style"}));
+        assert_eq!(*lock(&events), vec!["saved project Deploy needs VPN", "saved user Style"]);
+        assert!(crate::memory::project_dir(&m.root).join("deploy-needs-vpn.md").exists());
+        assert!(e.0.join("cfg/memory/MEMORY.md").exists(), "user memory sits in the config folder");
+        assert!(!m.root.join("NOTES.md").exists(), "nothing is written into the project");
+        // the next session starts with the index, once
+        let b = hub.add("b", None, "", "", None, false, Some(e.0.join("proj"))).unwrap();
+        with_memory(&hub, &b);
+        with_memory(&hub, &b);
+        let s = sys(&b);
+        assert_eq!(s.matches(crate::memory::MARK).count(), 1);
+        assert!(s.contains("[Deploy needs VPN](deploy-needs-vpn.md) — deploys need the VPN") && s.contains("[Style](style.md)"), "{s}");
+        let r = dispatch(&hub, &b, "recall", &json!({"name": "deploy needs vpn"}));
+        assert!(r.contains("the API is internal-only"), "{r}");
+        dispatch(&hub, &b, "forget", &json!({"name": "Style", "scope": "user"}));
+        assert_eq!(lock(&events).last().unwrap(), "forgot user Style");
+        assert!(dispatch(&hub, &b, "remember", &json!({"fact": "x", "scope": "team"})).starts_with("error: this project isn't connected"));
+    }
+
+    #[test]
+    fn memory_off_means_no_tools_and_no_prompt_block() {
+        let _env = lock(&crate::hub::tests::ENV);
+        let e = setup("off");
+        crate::memory::save(&crate::memory::global_dir(), "Who", "", "", "Kesav", &[]).unwrap();
+        let mut cfg = crate::config::load_defaults();
+        cfg.memory = false;
+        let hub = Hub::new(cfg, Some(format!("memoff-{}", std::process::id())), Box::new(|_, _| {}), true);
+        let m = hub.add("a", None, "", "", None, false, Some(e.0.join("proj"))).unwrap();
+        let names: Vec<String> = lock(&m.set).tools.iter().filter_map(|t| t["function"]["name"].as_str().map(String::from)).collect();
+        assert!(!names.iter().any(|n| matches!(n.as_str(), "remember" | "forget" | "recall")), "{names:?}");
+        assert!(dispatch(&hub, &m, "remember", &json!({"fact": "x"})).starts_with("error: unknown tool"));
+        with_memory(&hub, &m);
+        assert!(!sys(&m).contains(crate::memory::MARK));
+        assert!(memory_tool(&hub, &m, "remember", &json!({"fact": "x"})).starts_with("error: memory is off"));
+    }
+
+    #[test]
+    fn team_notes_are_added_only_when_a_person_approves() {
+        let _env = lock(&crate::hub::tests::ENV);
+        let e = setup("team");
+        let yes = Arc::new(AtomicBool::new(false));
+        let (events, seen, y) = (Arc::new(Mutex::new(vec![])), Arc::new(Mutex::new(vec![])), yes.clone());
+        let (ev2, seen2) = (events.clone(), seen.clone());
+        let emit: crate::hub::Emit = Box::new(move |_, ev| match ev {
+            Event::Confirm { tool, reply, guard, .. } => {
+                lock(&seen2).push((tool, guard));
+                let _ = reply.send(if y.load(Relaxed) { crate::hub::Answer::Yes } else { crate::hub::Answer::No });
+            }
+            Event::Remembered { action, scope, .. } => lock(&ev2).push(format!("{action} {scope}")),
+            _ => {}
+        });
+        // -y and auto mode don't approve it: a person does
+        let hub = Hub::new(crate::config::load_defaults(), Some(format!("memteam-{}", std::process::id())), emit, true);
+        hub.set_mode("auto");
+        let m = hub.add("a", None, "", "", None, false, Some(e.0.join("proj"))).unwrap();
+        let file = e.0.join("team-notes.md");
+        let add = |t: &str| { std::fs::write(&file, format!("- {t}\n")).unwrap(); Ok(file.clone()) };
+        let out = propose_team_note(&hub, &m, "staging deploys  go through CI", add);
+        assert!(out.starts_with("declined") && !file.exists(), "{out}");
+        yes.store(true, Relaxed);
+        let out = propose_team_note(&hub, &m, "staging deploys  go through CI", add);
+        assert!(out.starts_with("approved"), "{out}");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "- staging deploys go through CI\n");
+        assert_eq!(*lock(&seen), vec![("team_note".to_string(), true), ("team_note".to_string(), true)]);
+        assert_eq!(*lock(&events), vec!["proposed team", "declined team", "proposed team", "saved team"]);
+        assert!(propose_team_note(&hub, &m, "  ", add).starts_with("error"));
     }
 }

@@ -49,6 +49,8 @@ pub enum Event {
     /// (network asks excepted: those may add a `net:` rule)
     Confirm { tool: String, args: Value, reply: Sender<Answer>, cwd: PathBuf, warn: String, guard: bool },
     Added,
+    /// a memory saved, replaced, forgotten, or a team note proposed / approved / declined
+    Remembered { action: String, scope: String, name: String, path: PathBuf },
     Log(String),
     Changed,
 }

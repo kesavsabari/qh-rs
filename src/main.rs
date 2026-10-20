@@ -13,6 +13,7 @@ mod map;
 mod oauth;
 mod platform;
 mod mcp;
+mod memory;
 mod notify;
 mod hooks;
 mod hub;
@@ -298,6 +299,8 @@ fn main() {
             }
         }
     }
+    // killed (SIGTERM, a closed window): the reply being streamed is saved too, not just what came before
+    platform::on_kill(if args.print.is_empty() && !args.serve { killed_tui } else { killed });
     if !args.print.is_empty() {
         let opts = Headless { stats: args.stats.as_deref(), json: args.json, max_turns: args.max_turns };
         let code = headless(&hub, &args.print, rx, &opts);
@@ -327,6 +330,16 @@ struct Headless<'a> {
     stats: Option<&'a str>,
     json: bool,
     max_turns: Option<usize>,
+}
+
+fn killed() {
+    session::save_partials();
+    bg::kill_all();
+}
+
+fn killed_tui() {
+    killed();
+    ratatui::restore();
 }
 
 /// Run each prompt as a turn of "main", printing replies to stdout and tool

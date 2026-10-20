@@ -188,13 +188,18 @@ fn approve_text(edits: &str) -> String {
     if e.is_empty() { "Go ahead with the plan.".into() } else { format!("Go ahead with the plan, with these changes:\n{e}") }
 }
 
-/// NOTES.md (what `remember` writes) and the read-only instruction file qh loads, for a project.
+/// The project's NOTES.md (yours to edit), the read-only instruction file qh loads, and the
+/// memories `remember` saved (user and project scope; see memory.rs).
 fn memory_json(root: &Path) -> Value {
     let path = root.join("NOTES.md");
     let text = std::fs::read_to_string(&path).unwrap_or_default();
     let instr: Vec<Value> = crate::prompt::instructions(root).into_iter()
         .map(|(p, t)| json!({"path": p, "text": t, "readonly": true})).collect();
-    json!({"type": "memory", "path": path, "text": text, "instructions": instr})
+    let mems: Vec<Value> = [("user", crate::memory::global_dir()), ("project", crate::memory::project_dir(root))].iter()
+        .flat_map(|(scope, d)| crate::memory::list(d).into_iter().map(move |m| json!({"scope": scope, "name": m.name,
+            "description": m.description, "type": m.kind, "updated": m.updated, "path": m.file, "text": m.body})))
+        .collect();
+    json!({"type": "memory", "path": path, "text": text, "instructions": instr, "memories": mems})
 }
 
 /// Overwrite the project's NOTES.md atomically (temp file + rename, both inside the root).

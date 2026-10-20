@@ -287,18 +287,6 @@ pub fn preview(cwd: &Path, name: &str, a: &Value) -> Vec<(PathBuf, String)> {
     }
 }
 
-fn remember(cwd: &Path, a: &Value) -> Result<String, String> {
-    use std::io::Write;
-    let (path, fact) = (cwd.join("NOTES.md"), sa(a, "fact").trim());
-    let norm = |s: &str| s.trim_start_matches("- ").trim().to_lowercase();
-    if std::fs::read_to_string(&path).unwrap_or_default().lines().any(|l| norm(l) == norm(fact)) {
-        return Ok(format!("already in {}", path.display()));
-    }
-    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&path).map_err(|e| e.to_string())?;
-    writeln!(f, "- {fact}").map_err(|e| e.to_string())?;
-    Ok(format!("saved to {}", path.display()))
-}
-
 const SKIP_DIRS: [&str; 7] = [".git", ".venv", "venv", "node_modules", "__pycache__", "dist", "build"];
 
 pub fn source_files(cwd: &Path, root: &str) -> Vec<(PathBuf, String)> {
@@ -738,6 +726,7 @@ pub fn schema(name: &str, desc: &str, props: &[(&str, &str)], required: &[&str])
 
 pub fn builtin_schema(name: &str) -> Option<Value> {
     Some(match name {
+        "remember" | "forget" | "recall" => return crate::memory::schemas().into_iter().find(|s| s["function"]["name"] == name),
         "skill" => schema(name, "Load a skill's instructions by name (listed under Skills in the system prompt).", &[("name", "string")], &["name"]),
         "todo" => json!({"type": "function", "function": {"name": "todo",
             "description": "Keep a checklist for multi-step work. Send the whole list each time; status is pending, doing or done.",
@@ -750,7 +739,6 @@ pub fn builtin_schema(name: &str) -> Option<Value> {
         "goto_definition" => schema(name, "Where a symbol is defined, via the language server (rust-analyzer, typescript-language-server, pyright/pylsp, gopls). line and col are 1-based and must be on the name.", &[("path", "string"), ("line", "integer"), ("col", "integer")], &["path", "line", "col"]),
         "hover" => schema(name, "Type and docs of the symbol at a position, via the language server. line and col are 1-based.", &[("path", "string"), ("line", "integer"), ("col", "integer")], &["path", "line", "col"]),
         "rename_symbol" => schema(name, "Rename a name everywhere in the project (whole word).", &[("old", "string"), ("new", "string"), ("path", "string")], &["old", "new"]),
-        "remember" => schema(name, "Save a lasting project fact to NOTES.md for future sessions.", &[("fact", "string")], &["fact"]),
         "bash" => {
             let what = if crate::platform::shell() == crate::platform::Shell::PowerShell { "Run a PowerShell command (Windows)." } else { "Run a shell command." };
             let sandbox = if !crate::sandbox::enabled(crate::config::load_cached()) || crate::sandbox::unavailable().is_some() { "" } else {
@@ -818,7 +806,9 @@ pub fn build(profile: &str, cfg: &Config) -> Vec<Value> {
         if *n == "*browser" && !crate::tier::Limits::for_ctx(cfg.ctx).browser && profile != "browser" {
             continue;
         }
-        if *n == "*browser" {
+        if *n == "remember" {
+            if cfg.memory { out.extend(crate::memory::schemas()) }
+        } else if *n == "*browser" {
             out.extend(browser::schemas());
         } else if *n == "*webhooks" {
             for h in &cfg.webhooks {
@@ -897,7 +887,7 @@ pub fn call(name: &str, a: &Value, cfg: &Config, cwd: &mut PathBuf, lim: &crate:
         "find_references" => find_references(cwd, a),
         "rename_symbol" => rename_symbol(cwd, a),
         "goto_definition" | "hover" => crate::lsp::tool(name, cwd, a),
-        "remember" => remember(cwd, a),
+        "remember" | "forget" | "recall" if cfg.memory => crate::memory::call(&sb.root, name, a).map(|d| d.text),
         "bash" => bash(cwd, a, cfg, sb),
         "grep" => grep(cwd, a),
         "past_sessions" => Ok(crate::session::past(&crate::session::dir(), &sb.root, a, Path::new(""))),
@@ -1014,12 +1004,4 @@ mod cwd_tests {
         assert!(bash(&mut d, &json!({"cmd": "false"})).unwrap().starts_with("exit 1"));
     }
 
-    #[test]
-    fn notes_go_to_the_session_folder_once() {
-        let d = tmp("notes");
-        remember(&d, &json!({"fact": "uses axum"})).unwrap();
-        let r = remember(&d, &json!({"fact": "Uses axum"})).unwrap();
-        assert!(r.starts_with("already"));
-        assert_eq!(std::fs::read_to_string(d.join("NOTES.md")).unwrap().lines().count(), 1);
-    }
 }

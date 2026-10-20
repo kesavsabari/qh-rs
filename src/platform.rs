@@ -257,6 +257,52 @@ pub fn read_hidden() -> String {
 }
 
 /// Local time as YYYYMMDD-HHMMSS. `date` where it exists (it knows the time zone); UTC otherwise.
+/// Run `save` before the process dies to SIGTERM, SIGHUP or SIGINT (unix) or a closed console
+/// window, logoff or shutdown (Windows), then exit. A signal handler may only do async-signal-safe
+/// work, so it writes the signal to a pipe and a thread does the saving.
+#[cfg(unix)]
+pub fn on_kill(save: fn()) {
+    use std::sync::atomic::{AtomicI32, Ordering::SeqCst};
+    static FD: AtomicI32 = AtomicI32::new(-1);
+    extern "C" fn handler(sig: libc::c_int) {
+        let b = sig as u8;
+        // SAFETY: write is async-signal-safe; FD is the pipe's write end, or -1 (then it fails)
+        unsafe { libc::write(FD.load(SeqCst), &b as *const u8 as *const libc::c_void, 1) };
+    }
+    let mut p = [0 as libc::c_int; 2];
+    // SAFETY: plain syscalls on a local array; the handler is a valid extern "C" fn
+    if unsafe { libc::pipe(p.as_mut_ptr()) } != 0 { return }
+    FD.store(p[1], SeqCst);
+    for s in [libc::SIGTERM, libc::SIGHUP, libc::SIGINT] {
+        unsafe { libc::signal(s, handler as *const () as libc::sighandler_t) };
+    }
+    std::thread::spawn(move || {
+        let mut b = [0u8; 1];
+        // SAFETY: reading one byte into a local buffer from our own pipe
+        if unsafe { libc::read(p[0], b.as_mut_ptr() as *mut libc::c_void, 1) } == 1 {
+            save();
+            unsafe { libc::_exit(128 + b[0] as libc::c_int) };
+        }
+    });
+}
+
+#[cfg(windows)]
+pub fn on_kill(save: fn()) {
+    use std::sync::OnceLock;
+    use windows_sys::Win32::System::Console::{SetConsoleCtrlHandler, CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT};
+    static SAVE: OnceLock<fn()> = OnceLock::new();
+    unsafe extern "system" fn handler(kind: u32) -> i32 {
+        // Windows runs this on its own thread; returning lets the default handler end the process
+        if matches!(kind, CTRL_CLOSE_EVENT | CTRL_LOGOFF_EVENT | CTRL_SHUTDOWN_EVENT) {
+            if let Some(f) = SAVE.get() { f() }
+        }
+        0
+    }
+    let _ = SAVE.set(save);
+    // SAFETY: registers a valid handler for this process
+    unsafe { SetConsoleCtrlHandler(Some(handler), 1) };
+}
+
 pub fn stamp() -> String {
     if !cfg!(windows) {
         if let Ok(o) = Command::new("date").arg("+%Y%m%d-%H%M%S").output() {

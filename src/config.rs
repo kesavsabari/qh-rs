@@ -58,6 +58,11 @@ pub struct Config {
     /// `team_share_files = "auto" | "off"`: whether teammates' agents may read this machine's
     /// working copy of a team project over the line (read_team_file / list_team_files)
     pub team_share_files: bool,
+    /// `review = "auto" | "off"`: before the agent's `git push` in a team project, ask the owners'
+    /// agents to review the changes in their area
+    pub review: bool,
+    /// `review_wait`: seconds a push waits for those reviews before it goes ahead (0 = don't wait)
+    pub review_wait: u64,
     /// look for a newer qh once a day (`update_check = "off"` or false stops it)
     pub update_check: bool,
     /// the safety guard and the OS sandbox for commands (`[sandbox] mode = "off"` turns both off)
@@ -179,7 +184,7 @@ pub fn dump() -> serde_json::Value {
         "path": config_file(), "model": c.model, "fallback_model": c.fallback_model, "ask_model": c.ask_model,
         "fetch_model": c.fetch_model, "cost_warn": c.cost_warn, "budget_session": c.budget_session, "budget_day": c.budget_day, "cloud_ctx": c.cloud_ctx, "ctx": c.ctx,
         "compact_at": c.compact_at, "mode": c.mode, "notify": c.notify, "update_check": c.update_check,
-        "relay": c.relay, "team_share_files": c.team_share_files, "sandbox": c.sandbox,
+        "relay": c.relay, "team_share_files": c.team_share_files, "review": c.review, "review_wait": c.review_wait, "sandbox": c.sandbox,
         "sandbox_write": c.sandbox_write, "sandbox_hosts": c.sandbox_hosts, "sandbox_network": c.sandbox_network,
         "lsp": c.lsp, "lsp_wait_ms": c.lsp_wait_ms, "openrouter_key": !c.openrouter_key.is_empty(),
         "providers": c.providers.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>(),
@@ -222,6 +227,8 @@ pub fn load_defaults() -> Config {
         relay: "default".into(),
         verify: String::new(),
         team_share_files: true,
+        review: true,
+        review_wait: 60,
         update_check: true,
         notify: "auto".into(),
         lsp: "auto".into(),
@@ -283,6 +290,12 @@ pub fn load() -> Config {
             Some(toml::Value::String(v)) => c.team_share_files = !matches!(v.to_lowercase().as_str(), "off" | "false" | "no"),
             _ => {}
         }
+        match t.get("review") {
+            Some(toml::Value::Boolean(b)) => c.review = *b,
+            Some(toml::Value::String(v)) => c.review = !matches!(v.to_lowercase().as_str(), "off" | "false" | "no"),
+            _ => {}
+        }
+        if let Some(v) = t.get("review_wait").and_then(|v| v.as_integer()) { c.review_wait = v.clamp(0, 3600) as u64 }
         match t.get("update_check") {
             Some(toml::Value::Boolean(b)) => c.update_check = *b,
             Some(toml::Value::String(v)) => c.update_check = !matches!(v.as_str(), "off" | "false" | "no"),

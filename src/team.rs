@@ -1532,11 +1532,21 @@ fn take_in(repo: &str, me: &String, key: Option<Key>, mut p: Peer, hooks: &Hooks
             let re = m["re"].as_u64().unwrap_or(0);
             let Some(i) = s.asked.iter().position(|a| a.id == re) else { continue };
             let q = s.asked.remove(i);
+            let from = format!("{login}/{}", m["from_session"].as_str().unwrap_or(""));
+            if let Some(late) = crate::review::answered(re, &from, &inc.text) {
+                // a review of what we pushed (or are about to): the team room and the pusher see it
+                let head = clip_to(&inc.text, 1500);
+                alert(format!("qh: review from {from}: {}", clip_to(&head, 80)));
+                say_locked(repo, s, hooks, format!("review from {from} ({}): {head}", crate::review::verdict(&inc.text)));
+                if late && !q.session.is_empty() {
+                    (hooks.answered)(&q.session, &format!("[team review from {from}] (it came after the push)\n\n{}", inc.text));
+                }
+                continue;
+            }
             // what the answer relied on is now something our code counts on: a contract
             let relied: Vec<String> = m["relied"].as_array().into_iter().flatten().filter_map(|n| n.as_str().map(String::from)).collect();
             let u = s.uses.entry(q.session.clone()).or_default();
             for n in &relied { u.insert(n.clone(), now()); }
-            let from = format!("{login}/{}", m["from_session"].as_str().unwrap_or(""));
             if !relied.is_empty() {
                 s.last_answer.insert(q.session.clone(), (from.clone(), relied.clone(), format!("Q: {} A: {}", q.q, inc.text)));
             }
@@ -2093,6 +2103,28 @@ pub fn ask_team(session: &str, cwd: &Path, question: &str, to: &str, deep: bool)
 Don't wait: carry on with your best guess, and if the answer says otherwise, fix what you built on it.",
                 if online { "" } else { "; they're offline, so it waits until they're back" })
     }).unwrap_or_else(|| "error: team mode is off for this project".into())
+}
+
+/// Ask `owner`'s agent to review a diff (review.rs builds the text): a question like ask_team's,
+/// to the session of theirs busiest with the code it names. Returns (id, "login/session", online).
+pub fn ask_review(repo: &str, session: &str, owner: &str, text: &str) -> Result<(u64, String, bool), String> {
+    with(repo, |s| {
+        if s.key.is_none() { return Err("you're not in the team yet".to_string()) }
+        let p = s.peers.get(owner).filter(|p| p.joined).ok_or_else(|| format!("{owner} isn't in the team"))?;
+        if p.roles.get(&s.me).is_some_and(|r| r == "viewer") { return Err(format!("{owner} has you as view only")) }
+        let online = p.online;
+        let mut sessions: Vec<(usize, String)> = p.sessions.iter().map(|(n, _, _)| (p.claims.get(n).map_or(0, |c| c.len()), n.clone())).collect();
+        sessions.sort_by_key(|(c, _)| std::cmp::Reverse(*c));
+        let sess = sessions.into_iter().next().map_or_else(|| "main".to_string(), |(_, n)| n);
+        s.next_id += 1;
+        let id = s.next_id;
+        s.outbox.push(json!({"id": id, "to": owner, "session": sess, "kind": "q", "from_session": session, "text": text, "ts": now()}));
+        s.asked.push(Asked { id, session: session.into(), to: format!("{owner}/{sess}"), q: format!("review: {}", clip_to(text, 200)), ts: now() });
+        if s.asked.len() > 30 { s.asked.remove(0); }
+        s.dirty = true;
+        log_to(repo, &format!("your {session} asked {owner}/{sess} to review the changes in their area{}", if online { "" } else { " (offline: it waits on the board)" }));
+        Ok((id, format!("{owner}/{sess}"), online))
+    }).ok_or("team mode is off for this project".to_string())?
 }
 
 /// The person (not an agent) asks a teammate's session a question from the map; the answer shows
@@ -3925,5 +3957,33 @@ mod tests {
         assert!(take_quick(&mut bob, "alice", &g));
         assert!(!take_private(&mut bob, "alice", &published(&alice, &a_pub)));
         assert_eq!(bob.msgs.iter().filter(|m| m.text == "standup?").count(), 1);
+    }
+
+    #[test]
+    fn a_review_request_goes_to_the_owners_busiest_session_and_its_answer_comes_back() {
+        let repo = "t/review";
+        let mut st = state("alice");
+        st.repo = repo.into();
+        st.key = Some([7u8; 32]);
+        let mut bob = peer("bob", &["main", "api"], false);
+        bob.claims.insert("api".into(), HashMap::from([("src/a.rs".to_string(), HashMap::new())]));
+        st.peers.insert("bob".into(), bob);
+        STATES.lock().unwrap().get_or_insert_with(HashMap::new).insert(repo.into(), st);
+        let (id, to, online) = ask_review(repo, "main", "bob", "[review request] …").unwrap();
+        assert_eq!((to.as_str(), online), ("bob/api", false), "offline: it waits on the board");
+        assert!(with(repo, |s| s.dirty && s.outbox.iter().any(|m| m["id"] == id && m["kind"] == "q")).unwrap());
+        assert!(ask_review(repo, "main", "nobody", "x").is_err());
+        // track it the way review::request does, then bob's answer arrives in his folder
+        let hooks = quiet();
+        crate::review::tests_track(id, repo);
+        let mut bob = peer("bob", &["main", "api"], true);
+        bob.outbox = vec![json!({"id": 50, "to": "alice", "session": "main", "kind": "a", "re": id, "from_session": "api", "text": "APPROVE: fine", "ts": now()})];
+        let mut nc = false;
+        take_in(repo, &"alice".to_string(), Some([7u8; 32]), bob, &hooks, &mut nc);
+        // the team room (activity) shows it
+        let said: Vec<String> = ACTIVITY.lock().unwrap().iter().filter(|(_, r, _)| r == repo).map(|(_, _, t)| t.clone()).collect();
+        assert!(said.iter().any(|t| t.starts_with("review from bob/api (approve): APPROVE: fine")), "{said:?}");
+        assert!(with(repo, |s| s.asked.is_empty()).unwrap());
+        STATES.lock().unwrap().as_mut().unwrap().remove(repo);
     }
 }

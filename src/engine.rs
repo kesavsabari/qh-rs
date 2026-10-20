@@ -898,6 +898,10 @@ relevant files first, then call ask_model again with the code, error or plan pas
         && !hub.confirm(m, name, &args, None) {
         return "denied by user".into();
     }
+    // a push in a team project: the owners of the changed code get to review it first (bounded wait)
+    let review = if name == "bash" && crate::review::is_push(args["cmd"].as_str().unwrap_or("")) && crate::team::running_here(&cwd) {
+        crate::review::before_push(&m.name, &cwd, &hub.cfg, &|t| hub.emit(&m.name, Event::Notice(t)), &|| m.cancel.load(Relaxed))
+    } else { None };
     let (turn, prompt) = { // which user message this turn answers, so the app can rewind to before it
         let msgs = lock(&m.msgs);
         let users: Vec<&Value> = msgs.iter().filter(|x| x["role"] == "user").collect();
@@ -936,6 +940,9 @@ relevant files first, then call ask_model again with the code, error or plan pas
     match hooks::fire(&hub.cfg.hooks, "post_tool", name, &input, &cwd) {
         hooks::Outcome::Pass(s) | hooks::Outcome::Block(s) if !s.is_empty() => out += &format!("\n[hook] {s}"),
         _ => {}
+    }
+    if let Some(r) = review {
+        out = format!("{r}\n\n{out}");
     }
     if name == "bash" {
         *lock(&m.cwd) = cwd; // a cd in the command moves this session only

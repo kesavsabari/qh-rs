@@ -51,6 +51,7 @@ const HELP: &str = "/new <name> [profile]  new session (Ctrl+N: instant, auto-na
 /anyway                this tab was paused because a teammate is changing the same function: go ahead anyway
 /answers [auto|ask|off] whether teammates' agents may ask yours (answered from a read-only copy, 20 an hour)
 /promise [fn what]     make a teammate's last answer (or your own words) a checked promise: edits that break it are held
+/review-request        ask the owners of the code you changed (git blame, CODEOWNERS) to have their agents review it
 /tier                  how the context window was sized to your GPU
 /mode [ask|auto-edit|auto|plan] (Shift+Tab)  /role [text]  /think  /tokens  /compact  /clear  /profile [name]
 /docs (guide in your browser)  /update (newest qh)  /undo  /diff  /ask-other [model] [question]  /allow [pattern]  /sandbox  /tasks [stop <id>]  /sessions  /commands (your own /name prompts)  /mcp (servers)
@@ -59,7 +60,7 @@ Shift+←/→ (or Alt+←/→, Alt+1..9) switch tabs · Shift+↑/↓ or PgUp/Pg
 use crate::tools::DANGER;
 
 /// What the `/` autocomplete offers; custom commands are added from .qh/commands.
-const COMMANDS: [(&str, &str); 44] = [
+const COMMANDS: [(&str, &str); 45] = [
     ("/model", "pick this tab's model"), ("/provider", "connect providers: sign in, keys"),
     ("/new", "new session tab"), ("/worktree", "this tab in its own git worktree"),
     ("/merge", "merge this worktree tab back (diff first)"), ("/merge --discard", "remove this worktree and its branch"),
@@ -78,6 +79,7 @@ const COMMANDS: [(&str, &str); 44] = [
     ("/answers", "may teammates' agents ask yours: auto · ask · off"),
     ("/dm", "private message to a teammate: /dm <login> <text>"),
     ("/promise", "hold teammates to their last answer: edits that break it are held"),
+    ("/review-request", "ask the owners' agents to review what you'd push (also done before the agent's git push)"),
     ("/cd", "same as /cwd"), ("/providers", "same as /provider"),
 ];
 
@@ -1703,6 +1705,20 @@ impl App {
                     let text = "The user says go ahead anyway: retry the edit you were paused on.";
                     self.view(&a).push(Item::User(text.into()));
                     self.hub.send(&a, text, "user", 0, None);
+                }
+            }
+            "/review-request" => {
+                // the owners' agents answer within a minute or so: wait off the UI thread, report as notes
+                let (hub, a2, cwd, wait) = (self.hub.clone(), a.clone(), m.cwd(), self.hub.cfg.review_wait.max(60));
+                match crate::review::request(&a, &cwd) {
+                    Err(e) => self.err(&a, e),
+                    Ok((ids, line)) => {
+                        self.note(&a, format!("{line} · their answers show here and in the team room"));
+                        std::thread::spawn(move || {
+                            let got = crate::review::wait_for(&ids, std::time::Duration::from_secs(wait), &|| false);
+                            hub.emit(&a2, Event::Notice(crate::review::summary(&got)));
+                        });
+                    }
                 }
             }
             "/promise" => match crate::team::promise(&a, arg) {

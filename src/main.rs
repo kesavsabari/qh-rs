@@ -25,6 +25,7 @@ mod prompt;
 mod providers;
 mod proxy;
 mod relay;
+mod review;
 mod route;
 mod sandbox;
 #[cfg(target_os = "linux")]

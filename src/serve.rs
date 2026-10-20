@@ -235,7 +235,7 @@ fn team_state(chan: Option<&str>) -> Value {
     crate::team::channel_read(chan);
     json!({"type": "team", "running": true, "me": crate::team::me(), "repo": crate::team::repo(),
            "status": crate::team::status_line(), "people": people, "channels": channels, "waiting": waiting,
-           "activity": activity, "chan": chan, "messages": msgs, "agents": agents, "team_push": true})
+           "activity": activity, "chan": chan, "messages": msgs, "agents": agents, "reviews": crate::review::list(), "team_push": true})
 }
 
 /// Debounce for pushed team updates: send when the generation moved and the last push is at
@@ -254,8 +254,10 @@ fn team_pusher(st: Arc<State>) {
         let g = crate::team::generation();
         if !push_due(seen, g, last.elapsed(), GAP) { continue }
         seen = g;
-        let Some(chan) = lock(&st.team_chan).clone() else { continue };
         if lock(&st.clients).is_empty() { continue }
+        // a review asked or answered: its own event, so an app can show it without the team room open
+        for e in crate::review::take_events() { st.broadcast(&e) }
+        let Some(chan) = lock(&st.team_chan).clone() else { continue };
         st.broadcast(&team_state(Some(&chan)));
         last = Instant::now();
     }

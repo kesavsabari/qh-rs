@@ -110,7 +110,7 @@ fn heading(t: &str) -> Option<(usize, &str)> {
     (1..=6).contains(&n).then(|| t[n..].strip_prefix(' ').map(|r| (n, r.trim()))).flatten()
 }
 
-fn list_item(t: &str) -> Option<(String, &str)> {
+pub(crate) fn list_item(t: &str) -> Option<(String, &str)> {
     for p in ["- ", "* ", "+ "] {
         if let Some(r) = t.strip_prefix(p) {
             return Some(("•".into(), r));
@@ -228,4 +228,37 @@ pub(crate) fn inline(s: &str, links: &Links) -> String {
         rest = &rest[c.len_utf8()..];
     }
     out
+}
+
+/// Where `md` can be cut so everything before it renders the same on its own: the end of the
+/// last blank line outside a code fence that isn't followed by more of a list. 0 for none.
+pub(crate) fn settled(md: &str) -> usize {
+    let (mut fence, mut cut, mut pos, mut blank_at) = (false, 0, 0, None);
+    for line in md.split_inclusive('\n') {
+        let t = line.trim_start();
+        if !line.ends_with('\n') { break } // the last, still-growing line
+        if t.starts_with("```") { fence = !fence }
+        if !fence {
+            if let Some(b) = blank_at.take() {
+                if !t.trim().is_empty() && list_item(t).is_none() && !line.starts_with("  ") { cut = b }
+            }
+            if t.trim().is_empty() { blank_at = Some(pos + line.len()) }
+        }
+        pos += line.len();
+    }
+    cut
+}
+
+#[cfg(test)]
+mod tests {
+    use super::settled;
+    #[test]
+    fn cuts_only_at_safe_blank_lines() {
+        assert_eq!(settled("one\n\ntwo"), 0); // "two" may still be part of anything
+        assert_eq!(settled("one\n\ntwo\n"), 5);
+        assert_eq!(settled("```\na\n\nb\n```\n\nnext\n"), 14);
+        assert_eq!(settled("- a\n\n- b\n"), 0); // a list keeps going
+        assert_eq!(settled("- a\n\n  more\n"), 0);
+        assert_eq!(settled("partial line"), 0);
+    }
 }

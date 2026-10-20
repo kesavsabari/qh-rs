@@ -122,6 +122,6 @@ paned > separator { background: var(--qh-line); min-width: 1px; }
 .tab { font-weight: 400; }
 .tab.on { font-weight: 500; }
 button.qh-btn { color: var(--qh-ink); }
-button.qh-btn.qh-btn-ink, button.qh-btn.qh-btn-ink label { color: var(--qh-card); }
+button.qh-btn.qh-btn-ink, button.qh-btn.qh-btn-ink label, button.qh-btn.qh-ink-btn, button.qh-btn.qh-ink-btn label { color: var(--qh-card); }
 button.qh-btn.qh-btn-card { border: 1px solid var(--qh-line); }
 .inline-palette { border: 1px solid var(--qh-line); box-shadow: 0 12px 40px alpha(black, 0.18); }

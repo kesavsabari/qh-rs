@@ -42,6 +42,11 @@ fn show(s: &Shared, page: &str) {
 pub fn run(st: &Shared, peek_snap: bool) {
     if let Some(c) = env("QH_APP_COMPACT") { st.borrow_mut().cfg.compact = Some(c == "1") }
     let snap_delay = secs("QH_APP_SNAPSHOT_DELAY", 6);
+    // off-screen (a hidden workspace) the frame clock is paused, so fade-in animations would sit at
+    // opacity 0 and live thread rows never show in a snapshot: turn animations off for test runs
+    if env("QH_APP_SNAPSHOT").is_some() || env("QH_APP_SEQ").is_some() {
+        if let Some(g) = gtk::Settings::default() { g.set_gtk_enable_animations(false) }
+    }
     if let Some(text) = env("QH_APP_PROMPT").map(|t| t.strip_prefix('@').and_then(|f| std::fs::read_to_string(f).ok()).unwrap_or(t)) {
         let s = st.clone();
         later(secs("QH_APP_PROMPT_DELAY", 3), move || ui::prompt(&s, &text, vec![]));

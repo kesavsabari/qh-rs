@@ -18,6 +18,7 @@ use std::rc::Rc;
 pub const APP_ID: &str = "dev.qh.App";
 
 fn main() -> glib::ExitCode {
+    renderer();
     let args: Vec<String> = std::env::args().collect();
     let peek = args.iter().any(|a| a == "--peek");
     let folder = args.iter().skip(1).find(|a| !a.starts_with("--"))
@@ -58,3 +59,12 @@ fn main() -> glib::ExitCode {
     app.run_with_args(&args[..1])
 }
 
+/// GSK_RENDERER, unless the user set one. Idle RSS on the empty main window (2026-10-20):
+/// ngl 245 MB, gl 171 MB, cairo 102 MB; this UI has no animation or 3D that needs the GPU.
+fn renderer() {
+    if std::env::var_os("GSK_RENDERER").is_none() {
+        std::env::set_var("GSK_RENDERER", RENDERER);
+    }
+}
+
+const RENDERER: &str = "cairo";

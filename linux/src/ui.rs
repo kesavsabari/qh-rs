@@ -52,6 +52,14 @@ pub struct Ui {
     peek: RefCell<Option<(gtk::Window, gtk::Entry, gtk::Label)>>,
 }
 
+/// Open the slide-in title bar (test runs, where there's no pointer).
+pub fn show_titlebar() {
+    if let Some(r) = ui().and_then(|u| u.overlay.child()).and_then(|c| c.first_child()).and_downcast::<gtk::Revealer>() { r.set_reveal_child(true) }
+}
+
+/// The slide-in title bar's height.
+const TITLEBAR: i32 = 34;
+
 thread_local! {
     static UI: RefCell<Option<Rc<Ui>>> = const { RefCell::new(None) };
     static SHARED: RefCell<Option<Shared>> = const { RefCell::new(None) };
@@ -364,12 +372,13 @@ fn build(app: &adw::Application, st: &Shared) {
     body.append(&sidebar);
     body.append(&card);
 
-    // window controls only near the top-right corner; Hyprland draws no decorations of its own
+    // window controls: a title bar that slides in from the top edge and pushes the app down
+    // (Hyprland draws no decorations of its own); it never covers the tab bar
     let controls = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    controls.set_margin_top(14); controls.set_margin_end(18);
+    controls.set_margin_end(12); controls.set_hexpand(true); controls.set_halign(gtk::Align::End);
     let wc = |icon: &str, tip: &str, f: Box<dyn Fn(&adw::ApplicationWindow)>| {
         let b = gtk::Button::from_icon_name(icon);
-        b.add_css_class("wctl"); b.set_tooltip_text(Some(tip));
+        b.add_css_class("wctl"); b.set_tooltip_text(Some(tip)); b.set_valign(gtk::Align::Center);
         let win = window.clone();
         b.connect_clicked(move |_| f(&win));
         controls.append(&b);
@@ -377,14 +386,23 @@ fn build(app: &adw::Application, st: &Shared) {
     wc("window-minimize-symbolic", "Minimize", Box::new(|w| w.minimize()));
     wc("window-maximize-symbolic", "Maximize", Box::new(|w| if w.is_maximized() { w.unmaximize() } else { w.maximize() }));
     wc("window-close-symbolic", "Close", Box::new(|w| w.close()));
-    let reveal = gtk::Revealer::builder().transition_type(gtk::RevealerTransitionType::Crossfade).transition_duration(120)
-        .child(&controls).halign(gtk::Align::End).valign(gtk::Align::Start).build();
+    let titlebar = gtk::WindowHandle::builder().child(&controls).height_request(TITLEBAR).build();
+    let reveal = gtk::Revealer::builder().transition_type(gtk::RevealerTransitionType::SlideDown).transition_duration(160)
+        .child(&titlebar).build();
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    root.append(&reveal);
+    body.set_vexpand(true);
+    root.append(&body);
     let overlay = gtk::Overlay::new();
-    overlay.set_child(Some(&body));
-    overlay.add_overlay(&reveal);
+    overlay.set_child(Some(&root));
+    // in at the top edge, out once the pointer is below the bar (a gap so it doesn't flicker)
     let motion = gtk::EventControllerMotion::new();
-    let (win, rv) = (window.clone(), reveal.clone());
-    motion.connect_motion(move |_, x, y| rv.set_reveal_child(y < 56.0 && x > win.width() as f64 - 170.0));
+    let rv = reveal.clone();
+    motion.connect_motion(move |_, _, y| {
+        let open = rv.reveals_child();
+        if !open && y < 6.0 { rv.set_reveal_child(true) }
+        else if open && y > TITLEBAR as f64 + 24.0 { rv.set_reveal_child(false) }
+    });
     let rv = reveal.clone();
     motion.connect_leave(move |_| rv.set_reveal_child(false));
     overlay.add_controller(motion);

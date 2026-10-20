@@ -2,7 +2,7 @@
 //!   QH_APP_PROMPT=text|@file   send a prompt 3 s in (QH_APP_PROMPT_DELAY)
 //!   QH_APP_LAYOUT=chat|split|code, QH_APP_OPEN=path[:line]   at 2 s
 //!   QH_APP_INLINE=instruction (+ QH_APP_INLINE_LINES=a-b)   an inline edit on the open file
-//!   QH_APP_PAGE=review|checkpoints|memory|activity|tasks|settings|team|palette|code (QH_APP_PAGE_DELAY)
+//!   QH_APP_PAGE=review|checkpoints|memory|activity|tasks|settings|team|palette|code|titlebar (QH_APP_PAGE_DELAY)
 //!   QH_APP_ANSWER=yes|no|always (QH_APP_ANSWER_DELAY)   answer the open ask like Ctrl+Enter / Ctrl+Backspace
 //!   QH_APP_TYPE=secs:text;…   put text in the composer (drives the / and @ popups)
 //!   QH_APP_IMAGE=path   attach it the way a pasted texture is (decoded, saved as PNG) at 2 s
@@ -35,6 +35,7 @@ fn show(s: &Shared, page: &str) {
         "settings" => { s.borrow_mut().settings = true; ui::dirty("settings") }
         "team" => { if let Some(app) = gtk::gio::Application::default() { app.activate_action("team", None) } }
         "personal" => { if let Some(app) = gtk::gio::Application::default() { app.activate_action("team", None) } }
+        "titlebar" => ui::show_titlebar(),
         "palette" => { ui::show_palette(s); ui::palette_inline(true) }
         "chat" | "split" | "code" => { s.borrow_mut().settings = false; if let Some(p) = s.borrow_mut().project_mut() { p.layout = page.into(); p.page = None } }
         "none" => { s.borrow_mut().settings = false; if let Some(p) = s.borrow_mut().project_mut() { p.page = None } }

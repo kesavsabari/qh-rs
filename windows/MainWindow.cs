@@ -83,7 +83,7 @@ sealed partial class MainWindow : Window
     }
 
     /// Caption (drag) = the top edge plus the card's tab-bar row; the tabs and the links on the right
-    /// stay clickable (passthrough). The caption buttons sit over the corner, hidden until hovered.
+    /// stay clickable (passthrough). The caption buttons get their own strip at the top, hidden until hovered.
     void DragRegions()
     {
         if (root.XamlRoot is not { } xr) return;
@@ -98,7 +98,7 @@ sealed partial class MainWindow : Window
         var cardTop = card.TransformToVisual(root).TransformPoint(new Windows.Foundation.Point(0, 0));
         src.SetRegionRects(NonClientRegionKind.Caption,
         [
-            new(0, 0, w, (int)(8 * scale)),
+            new(0, 0, w, (int)((captionsShown ? CaptionStrip : 8) * scale)),
             new((int)(cardTop.X * scale), (int)(cardTop.Y * scale), (int)(card.ActualWidth * scale), (int)(44 * scale)),
         ]);
         src.SetRegionRects(NonClientRegionKind.Passthrough, [R(tabBar, 2), R(tabRight, 2)]);
@@ -121,17 +121,22 @@ sealed partial class MainWindow : Window
         // poll the pointer: over the caption buttons the app gets no pointer events (that's non-client)
         var t = DispatcherQueue.CreateTimer();
         t.Interval = TimeSpan.FromMilliseconds(120);
-        t.Tick += (_, _) => SetCaptions(NearCorner());
+        t.Tick += (_, _) => SetCaptions(NearTop());
         t.Start();
     }
 
-    bool NearCorner()
+    /// The caption strip's height: the top row grows to it so the buttons never cover the tab bar.
+    const double CaptionStrip = 32;
+
+    /// In at the top edge; out once the pointer is well below the strip (no flicker at its edge).
+    bool NearTop()
     {
         if (!GetCursorPos(out var p)) return false;
         var pos = AppWindow.Position; var size = AppWindow.Size;
         int x = p.X - pos.X, y = p.Y - pos.Y;
         var scale = (Content?.XamlRoot?.RasterizationScale) ?? 1.0;
-        return y >= 0 && y < 56 * scale && x <= size.Width && x > size.Width - 200 * scale;
+        var reach = captionsShown ? CaptionStrip + 24 : 6;
+        return y >= 0 && y < reach * scale && x >= 0 && x <= size.Width;
     }
 
     void SetCaptions(bool show)
@@ -150,7 +155,9 @@ sealed partial class MainWindow : Window
         tb.ButtonHoverBackgroundColor = Theme.Hover.Color;
         tb.ButtonHoverForegroundColor = Theme.Ink.Color;
         tb.ButtonPressedBackgroundColor = Theme.Line.Color;
-        DragRegions();
+        // the strip pushes the sidebar and card down instead of floating over them
+        if (root.RowDefinitions.Count > 0) root.RowDefinitions[0].Height = new GridLength(show ? CaptionStrip : 8);
+        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, DragRegions);
     }
 
     [StructLayout(LayoutKind.Sequential)] struct POINT { public int X, Y; }

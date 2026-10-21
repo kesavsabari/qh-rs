@@ -901,7 +901,10 @@ struct PickerSheet: View {
             ScrollViewReader { sv in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
+                        // one view per row (header inside it): two sibling views per ForEach element made
+                        // the lazy stack reuse stale rows after filtering, labels under the wrong group
                         ForEach(Array(rows.enumerated()), id: \.element.id) { i, r in
+                          VStack(alignment: .leading, spacing: 0) {
                             if !r.group.isEmpty && (i == 0 || rows[i - 1].group != r.group) {
                                 Text(r.group).font(Theme.mono(11)).foregroundStyle(Theme.faint).padding(.top, 10).padding(.bottom, 3).padding(.horizontal, 8)
                             }
@@ -914,7 +917,8 @@ struct PickerSheet: View {
                             .background(RoundedRectangle(cornerRadius: 5).fill(i == sel ? Theme.hover : .clear))
                             .contentShape(Rectangle())
                             .hand().onTapGesture { project.choose(picker, r.value) }
-                            .id(i)
+                          }
+                          .id(i)
                         }
                     }
                 }

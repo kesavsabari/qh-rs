@@ -131,9 +131,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool { true }
 }
 
-/// Like Zen browser (and the Windows app): the traffic lights stay hidden until the pointer comes
-/// near the top-left corner, then fade in. A cheap 10 Hz check of the mouse, no tracking areas to
-/// keep in sync with window resizes.
+/// The traffic lights stay visible over the hidden title bar (he asked 2026-10-21; they used to hide
+/// until hover). Re-applied at 10 Hz because SwiftUI can reset them on window changes.
 @MainActor
 enum TrafficLights {
     private static var shown: [ObjectIdentifier: Bool] = [:]
@@ -141,12 +140,9 @@ enum TrafficLights {
     static func start() {
         Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
             MainActor.assumeIsolated {
-                let m = NSEvent.mouseLocation
+                _ = NSEvent.mouseLocation
                 for w in NSApp.windows where w.isVisible && w.styleMask.contains(.titled) && w.sheetParent == nil {
-                    let f = w.frame
-                    let near = m.x >= f.minX && m.x <= f.minX + 110 && m.y <= f.maxY && m.y >= f.maxY - 48
-                    // full screen: macOS shows them with the menu bar anyway
-                    set(w, near || w.styleMask.contains(.fullScreen))
+                    set(w, true)   // close / minimise / zoom always visible; the title bar stays hidden
                 }
             }
         }

@@ -164,12 +164,14 @@ struct ChatTabButton: View {
         HStack(spacing: 8) {
             StatusDot(status: tab.status, asking: project.asks.contains { $0.tab == tab.name })
             Text(tab.purpose.isEmpty ? tab.name : tab.purpose).font(Theme.sans(12.5)).foregroundStyle(on ? Theme.ink : Theme.soft).lineLimit(1)
-            if project.tabs.count > 1 {
-                Button { project.closeTab(tab.name) } label: {
-                    Text("×").font(Theme.mono(13)).foregroundStyle(Theme.faint).frame(width: 18, height: 18).contentShape(Rectangle())
-                }
-                .buttonStyle(.hand).help("Close tab (⌘W)")
+            Button {
+                // the last tab is swapped for a fresh one, so the chat area is never empty
+                if project.tabs.count == 1 { project.newTab() }
+                project.closeTab(tab.name)
+            } label: {
+                Text("×").font(Theme.mono(13)).foregroundStyle(Theme.faint).frame(width: 18, height: 18).contentShape(Rectangle())
             }
+            .buttonStyle(.hand).help("Close tab (⌘W)")
         }
         .padding(.leading, 12).padding(.trailing, 8)
         .frame(height: 28)

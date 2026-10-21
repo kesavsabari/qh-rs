@@ -145,8 +145,8 @@ struct SidebarView: View {
             }
             .padding(.horizontal, 14).padding(.vertical, 10)
         }
-        // just clear of the traffic lights (they only fade in on hover), not a whole title bar down
-        .padding(.top, 26)
+        // clear of the always-visible traffic lights, not a whole title bar down
+        .padding(.top, 34)
         .ignoresSafeArea(.container, edges: .top)
         .background(Theme.ground)
     }

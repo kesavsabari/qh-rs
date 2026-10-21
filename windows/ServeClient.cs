@@ -11,6 +11,9 @@ namespace Qh;
 /// to OnEvent on the UI thread. Views never touch this; Project turns the events into state.
 sealed class ServeClient(string path, string qh, DispatcherQueue ui)
 {
+    /// The `qh serve` protocol major this app speaks (src/serve.rs PROTOCOL, docs/serve-protocol.md).
+    public const int Protocol = 1;
+
     Process? proc;
     Socket? sock;
     readonly object writeLock = new();
@@ -25,9 +28,8 @@ sealed class ServeClient(string path, string qh, DispatcherQueue ui)
             var (where, token) = Launch();
             sock = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
             sock.Connect(new UnixDomainSocketEndPoint(where));
-            Send(new JsonObject { ["type"] = "hello", ["token"] = token });
-            ReadLoop();
-            Close("qh serve stopped");
+            Send(new JsonObject { ["type"] = "hello", ["token"] = token, ["protocol"] = Protocol });
+            Close(ReadLoop() ?? "qh serve stopped");
         }
         catch (Exception e) { Close(e.Message); }
     }) { IsBackground = true }.Start();
@@ -60,6 +62,12 @@ sealed class ServeClient(string path, string qh, DispatcherQueue ui)
             if (JsonNode.Parse(line) is not JsonObject j) continue;
             var type = (string?)j["type"];
             if (type is not ("listening" or "running")) continue;
+            // no protocol field = a qh from before 0.2.4, which speaks 1
+            if (j["protocol"] is JsonValue pv && pv.TryGetValue<int>(out var v) && v != Protocol)
+            {
+                if (type == "listening") try { p.Kill(); } catch { }
+                throw new Exception($"qh serve speaks protocol {v}, this app speaks {Protocol}; update {(v > Protocol ? "the app" : "qh")}");
+            }
             if (type == "listening") proc = p;
             var token = File.ReadAllText((string)j["token_file"]!).Trim();
             return ((string)j["socket"]!, token);
@@ -70,15 +78,19 @@ sealed class ServeClient(string path, string qh, DispatcherQueue ui)
         throw new Exception(msg.Length == 0 ? "qh serve didn't start" : msg);
     }
 
-    void ReadLoop()
+    /// Returns why it stopped when the server said so (a refused hello), else null.
+    string? ReadLoop()
     {
         using var r = new StreamReader(new NetworkStream(sock!, ownsSocket: false), Encoding.UTF8);
         while (r.ReadLine() is { } line)
         {
             JsonObject? j;
             try { j = JsonNode.Parse(line) as JsonObject; } catch { continue; }
-            if (j != null) ui.TryEnqueue(() => OnEvent?.Invoke(j));
+            if (j == null) continue;
+            if ((string?)j["type"] == "error" && (string?)j["code"] == "protocol") return (string?)j["message"] ?? "protocol mismatch";
+            ui.TryEnqueue(() => OnEvent?.Invoke(j));
         }
+        return null;
     }
 
     public void Send(JsonObject msg)

@@ -1,6 +1,7 @@
 //! `qh serve`: one core per project behind a user-only Unix socket, for the Mac app (and later
 //! VS Code and the TUI). JSON lines both ways. A client's first line is
-//! `{"type":"hello","token":"…"}`; it then gets a snapshot and every hub event, tagged with its tab.
+//! `{"type":"hello","token":"…","protocol":1}`; it then gets a snapshot and every hub event, tagged with its tab.
+//! The whole protocol, and its versioning rule, is docs/serve-protocol.md.
 //! Up: prompt, answer (to a confirm), stop, mode, model, new_tab, close_tab, files, plan,
 //! plan_approve, memory, memory_save, fix_verify, activity,
 //! inline_edit / inline_apply / inline_discard (Cmd+I: inline_delta then inline_result down).
@@ -26,6 +27,9 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
 pub const PROTOCOL: u32 = 1;
+/// Additions that old clients can ignore (new events, new optional fields) bump this; anything that
+/// breaks a client bumps PROTOCOL. docs/serve-protocol.md is the contract.
+pub const PROTOCOL_MINOR: u32 = 0;
 
 /// Where the socket and token for a project live: state_dir/serve/<sha256(path)[..16]>.{sock,token}.
 pub fn paths(project: &Path) -> (PathBuf, PathBuf) {
@@ -133,7 +137,7 @@ fn checkpoints_json(tab: &str, c: &crate::checkpoints::Checkpoints) -> Value {
 
 fn snapshot(hub: &Hub) -> Value {
     let tabs: Vec<Value> = hub.names().iter().map(|n| tab_json(hub, n, true)).collect();
-    json!({"type": "snapshot", "protocol": PROTOCOL, "version": crate::update::VERSION, "mode": hub.mode_name(),
+    json!({"type": "snapshot", "protocol": PROTOCOL, "protocol_minor": PROTOCOL_MINOR, "version": crate::update::VERSION, "mode": hub.mode_name(),
         "project": std::env::current_dir().unwrap_or_default(), "tabs": tabs,
         "needs_setup": crate::setup::no_model(&hub.cfg)})
 }
@@ -549,12 +553,27 @@ fn command(hub: &Arc<Hub>, st: &Arc<State>, v: &Value) -> Option<String> {
     None
 }
 
+/// The first line must be a hello with the token. A client that names its protocol major must match
+/// ours; one that names none (pre-0.2.4 apps) is let in. Err is the error line to send back.
+fn check_hello(hello: &Value, want: &str) -> Result<(), Value> {
+    if hello["type"] != "hello" || hello["token"].as_str() != Some(want) {
+        return Err(json!({"type": "error", "message": "bad hello or token"}));
+    }
+    match hello.get("protocol").map(|p| p.as_u64()) {
+        None => Ok(()),
+        Some(Some(p)) if p == PROTOCOL as u64 => Ok(()),
+        Some(p) => Err(json!({"type": "error", "re": "hello", "code": "protocol", "protocol": PROTOCOL,
+            "message": format!("this qh speaks serve protocol {PROTOCOL}, the app speaks {}; update {}",
+                p.map_or("?".to_string(), |p| p.to_string()), if p.unwrap_or(0) > PROTOCOL as u64 { "qh" } else { "the app" })})),
+    }
+}
+
 fn client(hub: Arc<Hub>, st: Arc<State>, s: UnixStream, want: Arc<String>) {
     let Ok(mut w) = s.try_clone() else { return };
     let mut lines = BufReader::new(s).lines();
     let hello: Value = lines.next().and_then(Result::ok).and_then(|l| serde_json::from_str(&l).ok()).unwrap_or_default();
-    if hello["type"] != "hello" || hello["token"].as_str() != Some(want.as_str()) {
-        let _ = writeln!(w, "{}", json!({"type": "error", "message": "bad hello or token"}));
+    if let Err(e) = check_hello(&hello, &want) {
+        let _ = writeln!(w, "{e}");
         return;
     }
     // snapshot and joining the broadcast list under one lock, so no event falls between them
@@ -641,7 +660,7 @@ pub fn run(hub: Arc<Hub>, rx: Receiver<crate::ui::Ui>) -> i32 {
     }
     if connect(&sock).is_ok() {
         // a client attaches to that one instead: same line shape as "listening"
-        println!("{}", json!({"type": "running", "socket": sock, "token_file": tok_path, "protocol": PROTOCOL}));
+        println!("{}", json!({"type": "running", "socket": sock, "token_file": tok_path, "protocol": PROTOCOL, "protocol_minor": PROTOCOL_MINOR}));
         return 0;
     }
     let _ = std::fs::remove_file(&sock); // stale, nobody answered
@@ -662,7 +681,7 @@ pub fn run(hub: Arc<Hub>, rx: Receiver<crate::ui::Ui>) -> i32 {
     #[cfg(unix)]
     let _ = std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600));
     // the app reads this line to know where to connect
-    println!("{}", json!({"type": "listening", "socket": sock, "token_file": tok_path, "protocol": PROTOCOL, "pid": std::process::id()}));
+    println!("{}", json!({"type": "listening", "socket": sock, "token_file": tok_path, "protocol": PROTOCOL, "protocol_minor": PROTOCOL_MINOR, "pid": std::process::id()}));
     let _ = std::io::stdout().flush();
     let st = Arc::new(State { clients: Mutex::new(vec![]), remote: Mutex::new(crate::ui::Remote::new(hub.clone())), confirms: Mutex::new(HashMap::new()),
         next: AtomicU64::new(1), team_chan: Mutex::new(None), inline: Mutex::new(HashMap::new()), failed: Mutex::new(HashMap::new()),
@@ -782,6 +801,22 @@ mod tests {
         assert_eq!(v["items"], serde_json::json!([{"text":"a","status":"done"},{"text":"b","status":"active"},{"text":"c","status":"pending"}]));
     }
     use super::*;
+
+    #[test]
+    fn hello_checks_token_and_protocol() {
+        let ok = |v: Value| check_hello(&v, "t").is_ok();
+        assert!(ok(json!({"type": "hello", "token": "t"})), "no protocol = old client, let in");
+        assert!(ok(json!({"type": "hello", "token": "t", "protocol": PROTOCOL, "protocol_minor": 99})));
+        assert!(!ok(json!({"type": "hello", "token": "x", "protocol": PROTOCOL})));
+        assert!(!ok(json!({"type": "prompt", "token": "t"})));
+        let e = check_hello(&json!({"type": "hello", "token": "t", "protocol": PROTOCOL + 1}), "t").unwrap_err();
+        assert_eq!(e["code"], "protocol");
+        assert_eq!(e["protocol"], PROTOCOL);
+        assert!(e["message"].as_str().unwrap().contains("update qh"));
+        let e = check_hello(&json!({"type": "hello", "token": "t", "protocol": 0}), "t").unwrap_err();
+        assert!(e["message"].as_str().unwrap().contains("update the app"));
+        assert!(check_hello(&json!({"type": "hello", "token": "t", "protocol": "1"}), "t").is_err());
+    }
 
     #[test]
     fn team_push_debounces() {

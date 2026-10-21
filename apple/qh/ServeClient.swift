@@ -4,6 +4,8 @@ import Foundation
 /// token, connects to its Unix socket, and hands every event line to `onEvent` on the main thread.
 /// Views never touch this; `Project` turns the events into state.
 final class ServeClient: @unchecked Sendable {
+    /// The `qh serve` protocol major this app speaks (src/serve.rs PROTOCOL, docs/serve-protocol.md).
+    static let protocolVersion = 1
     let path: String
     private let qh: String
     private var proc: Process?
@@ -23,9 +25,8 @@ final class ServeClient: @unchecked Sendable {
             do {
                 let (sock, token) = try launch()
                 try connect(sock)
-                send(["type": "hello", "token": token])
-                readLoop()
-                close("qh serve stopped")
+                send(["type": "hello", "token": token, "protocol": ServeClient.protocolVersion])
+                close(readLoop() ?? "qh serve stopped")
             } catch {
                 close("\(error.localizedDescription)")
             }
@@ -65,6 +66,12 @@ final class ServeClient: @unchecked Sendable {
                 if let j = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
                    let type = j["type"] as? String, type == "listening" || type == "running",
                    let sock = j["socket"] as? String, let tf = j["token_file"] as? String {
+                    // no protocol field = a qh from before 0.2.4, which speaks 1
+                    if let v = j["protocol"] as? Int, v != ServeClient.protocolVersion {
+                        if type == "listening" { p.terminate() }
+                        throw NSError(domain: "qh", code: 5, userInfo: [NSLocalizedDescriptionKey:
+                            "qh serve speaks protocol \(v), this app speaks \(ServeClient.protocolVersion); update \(v > ServeClient.protocolVersion ? "the app" : "qh")"])
+                    }
                     if type == "listening" { proc = p }
                     let token = try String(contentsOfFile: tf, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
                     return (sock, token)
@@ -95,17 +102,19 @@ final class ServeClient: @unchecked Sendable {
         guard r == 0 else { throw NSError(domain: "qh", code: 4, userInfo: [NSLocalizedDescriptionKey: "can't connect to qh serve"]) }
     }
 
-    private func readLoop() {
+    /// Returns why it stopped when the server said so (a refused hello), else nil.
+    private func readLoop() -> String? {
         var buf = Data()
         var chunk = [UInt8](repeating: 0, count: 65536)
         while true {
             let n = read(fd, &chunk, chunk.count)
-            if n <= 0 { return }
+            if n <= 0 { return nil }
             buf.append(contentsOf: chunk[0..<n])
             while let nl = buf.firstIndex(of: 0x0A) {
                 let line = buf[buf.startIndex..<nl]
                 buf = Data(buf[buf.index(after: nl)...])
                 guard let j = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { continue }
+                if j["type"] as? String == "error", j["code"] as? String == "protocol" { return j["message"] as? String ?? "protocol mismatch" }
                 let cb = onEvent
                 DispatchQueue.main.async { MainActor.assumeIsolated { cb?(j) } }
             }

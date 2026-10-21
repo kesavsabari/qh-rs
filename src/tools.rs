@@ -221,15 +221,27 @@ fn closest(text: &str, old: &str) -> Option<String> {
 }
 
 /// What edit_file makes of `text`: the new text plus a note on how it matched, or the message
-/// for the model when `old` doesn't match exactly once.
-fn edit_text(text: &str, old: &str, new: &str) -> Result<(String, String), String> {
-    let n = if old.is_empty() { 0 } else { text.matches(old).count() };
-    if n == 1 {
-        return Ok((text.replacen(old, new, 1), String::new()));
+/// for the model when `old` doesn't match exactly once. `pick` chooses among several exact
+/// matches: a 1-based occurrence, or the line a match starts on (or spans).
+fn edit_text(text: &str, old: &str, new: &str, pick: Pick) -> Result<(String, String), String> {
+    let all: Vec<usize> = if old.is_empty() { vec![] } else { text.match_indices(old).map(|(i, _)| i).collect() };
+    let line_of = |i: usize| text[..i].matches('\n').count() + 1;
+    let n = all.len();
+    if n == 1 || (n > 1 && (pick.occurrence.is_some() || pick.line.is_some())) {
+        let at = match (pick.occurrence, pick.line) {
+            (Some(k), _) => all.get(k.wrapping_sub(1)).copied()
+                .ok_or_else(|| format!("error: occurrence {k} out of range; old string found {n} times"))?,
+            (None, Some(l)) => all.iter().copied().find(|&i| (line_of(i)..=line_of(i) + old.matches('\n').count()).contains(&l))
+                .ok_or_else(|| format!("error: no match of old string on line {l}; found on lines {}",
+                                       all.iter().map(|&i| line_of(i).to_string()).collect::<Vec<_>>().join(", ")))?,
+            (None, None) => all[0],
+        };
+        let how = if n > 1 { format!(" (occurrence {} of {n}, line {})", all.iter().position(|&i| i == at).unwrap() + 1, line_of(at)) } else { String::new() };
+        return Ok((format!("{}{new}{}", &text[..at], &text[at + old.len()..]), how));
     }
     if n > 1 {
-        let at: Vec<String> = text.match_indices(old).take(5).map(|(i, _)| (text[..i].matches('\n').count() + 1).to_string()).collect();
-        return Err(format!("error: old string found {n} times (lines {}{}); include more surrounding lines so it is unique",
+        let at: Vec<String> = all.iter().take(5).map(|&i| line_of(i).to_string()).collect();
+        return Err(format!("error: old string found {n} times (lines {}{}); include more surrounding lines so it is unique, or pass occurrence (1-based) or line to pick one",
                            at.join(", "), if n > 5 { ", …" } else { "" }));
     }
     let Some((s, e, delta)) = fuzzy_span(text, old) else {
@@ -258,10 +270,24 @@ fn edit_text(text: &str, old: &str, new: &str) -> Result<(String, String), Strin
     Ok((out, format!(" (matched lines {}-{e} ignoring whitespace)", s + 1)))
 }
 
+/// Which of several exact matches edit_file should replace.
+#[derive(Clone, Copy, Default)]
+struct Pick {
+    occurrence: Option<usize>,
+    line: Option<usize>,
+}
+
+impl Pick {
+    fn from(a: &Value) -> Pick {
+        let u = |k: &str| a.get(k).and_then(|v| v.as_u64()).map(|n| n as usize);
+        Pick { occurrence: u("occurrence"), line: u("line") }
+    }
+}
+
 fn edit_file(cwd: &Path, a: &Value) -> Result<String, String> {
     let (path, old, new) = (&fix_path(cwd, sa(a, "path")), sa(a, "old"), sa(a, "new"));
     let text = std::fs::read_to_string(path).map_err(|e| ferr(cwd, sa(a, "path"), e))?;
-    match edit_text(&text, old, new) {
+    match edit_text(&text, old, new, Pick::from(a)) {
         Err(msg) => Ok(msg),
         Ok((out, how)) => {
             std::fs::write(path, out).map_err(|e| e.to_string())?;
@@ -277,7 +303,7 @@ pub fn preview(cwd: &Path, name: &str, a: &Value) -> Vec<(PathBuf, String)> {
     match name {
         "write_file" => vec![(path, sa(a, "content").to_string())],
         "edit_file" => std::fs::read_to_string(&path).ok()
-            .and_then(|text| edit_text(&text, sa(a, "old"), sa(a, "new")).ok()).map(|(t, _)| (path, t)).into_iter().collect(),
+            .and_then(|text| edit_text(&text, sa(a, "old"), sa(a, "new"), Pick::from(a)).ok()).map(|(t, _)| (path, t)).into_iter().collect(),
         "rename_symbol" => {
             let Ok(pat) = word(sa(a, "old")) else { return vec![] };
             source_files(cwd, sa(a, "path")).into_iter().filter(|(_, t)| pat.is_match(t))
@@ -493,13 +519,80 @@ fn grep(cwd: &Path, a: &Value) -> Result<String, String> {
     } else {
         source_files(cwd, path)
     };
-    let mut hits = vec![];
+    let (only, offset) = (a["only_matching"].as_bool().unwrap_or(false), ia(a, "offset", 0).max(0) as usize);
+    let budget = max_chars().saturating_sub(200).max(1000);
+    let (mut out, mut total, mut shown, mut next) = (String::new(), 0usize, 0usize, None);
     for (f, t) in &files {
         for (i, l) in t.lines().enumerate().filter(|(_, l)| pat.is_match(l)) {
-            hits.push(format!("{}:{}: {}", f.display(), i + 1, l.trim_end()));
+            total += 1;
+            if total <= offset || next.is_some() {
+                continue;
+            }
+            let body = if only {
+                pat.find_iter(l).map(|m| m.as_str()).collect::<Vec<_>>().join(" | ")
+            } else {
+                excerpt(l.trim_end(), &pat)
+            };
+            let hit = format!("{}:{}: {body}\n", f.display(), i + 1);
+            if !out.is_empty() && out.len() + hit.len() > budget {
+                next = Some(total - 1);
+                continue;
+            }
+            out.push_str(&hit);
+            shown += 1;
         }
     }
-    Ok(cap(if hits.is_empty() { "no matches".into() } else { hits.join("\n") }))
+    if total == 0 {
+        return Ok("no matches".into());
+    }
+    if total <= offset {
+        return Ok(format!("no matches past offset {offset} ({total} matching lines)"));
+    }
+    let out = out.trim_end().to_string();
+    Ok(match next {
+        Some(k) => format!("{out}\n…showed matching lines {}-{} of {total}; pass offset={k} for more", offset + 1, offset + shown),
+        None => cap(out),
+    })
+}
+
+/// A long line cut down to ~200 chars around each match, the cut parts marked with their size.
+fn excerpt(line: &str, pat: &Regex) -> String {
+    const WIDTH: usize = 200;
+    const MAX_SPANS: usize = 5;
+    if line.len() <= WIDTH {
+        return line.to_string();
+    }
+    let floor = |mut i: usize| { while !line.is_char_boundary(i) { i -= 1 } i };
+    let ceil = |mut i: usize| { while !line.is_char_boundary(i) { i += 1 } i };
+    let (mut spans, mut count): (Vec<(usize, usize)>, usize) = (vec![], 0);
+    for m in pat.find_iter(line) {
+        count += 1;
+        let side = WIDTH.saturating_sub(m.len()) / 2;
+        let s = floor(m.start().saturating_sub(side));
+        let e = ceil((m.end() + side).min(s + 2 * WIDTH).min(line.len()));
+        let full = spans.len() >= MAX_SPANS;
+        match spans.last_mut() {
+            Some(last) if s <= last.1 => last.1 = last.1.max(e),
+            _ if full => {}
+            _ => spans.push((s, e)),
+        }
+    }
+    let mut out = String::new();
+    let mut at = 0;
+    for &(s, e) in &spans {
+        if s > at {
+            out.push_str(&format!("…[{} chars]…", line[at..s].chars().count()));
+        }
+        out.push_str(&line[s..e]);
+        at = e;
+    }
+    if at < line.len() {
+        out.push_str(&format!("…[{} chars]…", line[at..].chars().count()));
+    }
+    if spans.len() == MAX_SPANS && count > MAX_SPANS {
+        out.push_str(&format!(" ({count} matches on this line; only_matching=true lists them)"));
+    }
+    out
 }
 
 /// Visible text of an HTML page: tags dropped, script/style/etc skipped.
@@ -736,7 +829,7 @@ teammates (online, role, sessions), files a teammate is editing now, and live gi
                 "items": {"type": "object", "properties": {"text": {"type": "string"}, "status": {"type": "string"}}}}}}}}),
         "read_file" => schema(name, "Read a file with line numbers. Files over 300 lines give an outline unless you pass start/end; long output is cut, and says so.", &[("path", "string"), ("start", "integer"), ("end", "integer")], &["path"]),
         "write_file" => schema(name, "Create or overwrite a file.", &[("path", "string"), ("content", "string")], &["path", "content"]),
-        "edit_file" => schema(name, "Replace one exact unique string in a file. Whitespace differences still match; if `old` isn't found exactly once, nothing changes and the error says why.", &[("path", "string"), ("old", "string"), ("new", "string")], &["path", "old", "new"]),
+        "edit_file" => schema(name, "Replace one exact unique string in a file. Whitespace differences still match; if `old` isn't found exactly once, nothing changes and the error says why. When it is found several times, pass occurrence (1-based) or line (where that match is) to pick one.", &[("path", "string"), ("old", "string"), ("new", "string"), ("occurrence", "integer"), ("line", "integer")], &["path", "old", "new"]),
         "find_references" => schema(name, "List every line using a name (whole word). Give a file path plus 1-based line and col on the name to ask the language server instead (exact, scope-aware).", &[("name", "string"), ("path", "string"), ("line", "integer"), ("col", "integer")], &["name"]),
         "goto_definition" => schema(name, "Where a symbol is defined, via the language server (rust-analyzer, typescript-language-server, pyright/pylsp, gopls). line and col are 1-based and must be on the name.", &[("path", "string"), ("line", "integer"), ("col", "integer")], &["path", "line", "col"]),
         "hover" => schema(name, "Type and docs of the symbol at a position, via the language server. line and col are 1-based.", &[("path", "string"), ("line", "integer"), ("col", "integer")], &["path", "line", "col"]),
@@ -760,7 +853,7 @@ read more with task_output, stop it with task_stop.{sandbox}"),
         "task_stop" => schema(name, "Stop a background task and everything it started.", &[("id", "string")], &["id"]),
         "past_sessions" => schema(name, "This folder's earlier sessions. No args: list them newest first (id, date, first message). \
 query: search their messages for text, with session ids. id: read that session's conversation (tool steps folded).", &[("query", "string"), ("id", "string")], &[]),
-        "grep" => schema(name, "Search files recursively for a regex. Long results are cut: narrow the pattern or path.", &[("pattern", "string"), ("path", "string")], &["pattern"]),
+        "grep" => schema(name, "Search files recursively for a regex. Long lines show only ~200 chars around each match. only_matching=true prints just the matched text. When results don't fit, the output ends with the offset to pass for the next page.", &[("pattern", "string"), ("path", "string"), ("only_matching", "boolean"), ("offset", "integer")], &["pattern"]),
         "web_fetch" => schema(name, "Fetch a URL as plain text (20 s at most; long pages are cut). It doesn't run JavaScript: use the browser tools for pages that need it.", &[("url", "string")], &["url"]),
         "web_search" => schema(name, "Search the web (DuckDuckGo) for numbered results: title, URL, snippet. max_results defaults to 8 (at most 20). \
 15 s at most; DuckDuckGo may rate-limit heavy use. Result pages aren't opened: web_fetch one to read it.", &[("query", "string"), ("max_results", "integer")], &["query"]),
@@ -960,14 +1053,52 @@ mod cwd_tests {
     fn failed_edits_point_at_the_right_lines() {
         let text = "fn main() {\n    let total = price * qty;\n    println!(\"{total}\");\n}\n";
         // a wrong variable name: not found, but the error shows lines 2-3 to copy
-        let e = edit_text(text, "    let total = price * quantity;\n    println!(\"{total}\");", "x").unwrap_err();
+        let e = edit_text(text, "    let total = price * quantity;\n    println!(\"{total}\");", "x", Pick::default()).unwrap_err();
         assert!(e.contains("    2|     let total = price * qty;") && e.contains("    3|"), "{e}");
         // nothing like it: the plain message
-        let e = edit_text(text, "class Foo:\n    pass", "x").unwrap_err();
+        let e = edit_text(text, "class Foo:\n    pass", "x", Pick::default()).unwrap_err();
         assert!(e.contains("read_file the exact lines") && !e.contains("|"), "{e}");
         // twice: says where
-        let e = edit_text("a = 1\nb = 2\na = 1\n", "a = 1", "a = 3").unwrap_err();
-        assert!(e.contains("2 times (lines 1, 3)"), "{e}");
+        let e = edit_text("a = 1\nb = 2\na = 1\n", "a = 1", "a = 3", Pick::default()).unwrap_err();
+        assert!(e.contains("2 times (lines 1, 3)") && e.contains("occurrence"), "{e}");
+    }
+
+    #[test]
+    fn edits_pick_one_of_several_matches() {
+        let text = "a = 1\nb = 2\na = 1\n";
+        let pick = |occurrence, line| Pick { occurrence, line };
+        let (out, how) = edit_text(text, "a = 1", "a = 3", pick(Some(2), None)).unwrap();
+        assert_eq!(out, "a = 1\nb = 2\na = 3\n");
+        assert!(how.contains("occurrence 2 of 2, line 3"), "{how}");
+        let (out, _) = edit_text(text, "a = 1", "a = 3", pick(None, Some(1))).unwrap();
+        assert_eq!(out, "a = 3\nb = 2\na = 1\n");
+        let e = edit_text(text, "a = 1", "x", pick(Some(3), None)).unwrap_err();
+        assert!(e.contains("occurrence 3 out of range"), "{e}");
+        let e = edit_text(text, "a = 1", "x", pick(None, Some(2))).unwrap_err();
+        assert!(e.contains("found on lines 1, 3"), "{e}");
+        // a unique match ignores the selector
+        assert_eq!(edit_text(text, "b = 2", "b = 4", pick(Some(1), None)).unwrap().0, "a = 1\nb = 4\na = 1\n");
+    }
+
+    #[test]
+    fn grep_excerpts_long_lines_and_pages() {
+        let cwd = std::env::temp_dir().join(format!("qh-grep-test-{}", std::process::id()));
+        std::fs::create_dir_all(&cwd).unwrap();
+        let min = format!("{}NEEDLE{}\n", "x".repeat(3000), "é".repeat(3000));
+        std::fs::write(cwd.join("min.html"), &min).unwrap();
+        let out = grep(&cwd, &json!({"pattern": "NEEDLE", "path": "min.html"})).unwrap();
+        assert!(out.contains("NEEDLE") && out.contains("…[2903 chars]…") && out.contains("chars]…") && out.len() < 600, "{out}");
+        let out = grep(&cwd, &json!({"pattern": "NEED[A-Z]+", "path": "min.html", "only_matching": true})).unwrap();
+        assert!(out.ends_with(":1: NEEDLE"), "{out}");
+        // many matching lines page with offset
+        let many: String = (0..2000).map(|i| format!("hit line number {i} padding padding padding\n")).collect();
+        std::fs::write(cwd.join("many.txt"), many).unwrap();
+        let out = grep(&cwd, &json!({"pattern": "hit", "path": "many.txt"})).unwrap();
+        let k: usize = out.rsplit("offset=").next().unwrap().split(' ').next().unwrap().parse().unwrap();
+        assert!(k > 0 && k < 2000, "{out}");
+        let out2 = grep(&cwd, &json!({"pattern": "hit", "path": "many.txt", "offset": k})).unwrap();
+        assert!(out2.contains(&format!("number {k} ")) && !out2.contains(&format!("number {} ", k - 1)), "{out2}");
+        let _ = std::fs::remove_dir_all(&cwd);
     }
 
     fn bash(cwd: &mut PathBuf, a: &Value) -> Result<String, String> {

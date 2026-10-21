@@ -278,6 +278,33 @@ session tests). Messages from other sessions start with [from <name>]. qh saves 
         }).collect()
     }
 
+    /// What /tokens shows: context used and left before compaction, this tab's and the session's spend.
+    pub fn tokens_text(&self, m: &Member) -> String {
+        let (t, r) = { let t = lock(&m.turn); (t.tokens, t.ratio) };
+        let now = crate::context::estimate(&lock(&m.msgs), r);
+        let (u, pct) = { let t = lock(&m.turn); (t.usage, t.plan_pct) };
+        let all = *lock(&self.spent);
+        let plan = pct.map(|p| format!("\nChatGPT plan: {p:.0}% of the current window used")).unwrap_or_default();
+        let (c, at) = self.ctx_for(m, false);
+        format!("last request {t}/{c} · now ≈{now} · compacts at {at} ({} left)\nthis tab: {}\nsession: {}{plan}",
+                at.saturating_sub(now), u.line(), all.line())
+    }
+
+    /// The qh_status tool: what the user's screen shows, compact and read-only.
+    pub fn status_text(&self, m: &Member) -> String {
+        let mut out = vec![format!("context: {}", self.tokens_text(m))];
+        out.push(crate::prompt::git_status(&m.cwd()).unwrap_or_else(|| "Git: not a repository.".into()));
+        if crate::team::running_here(&m.cwd()) {
+            let me = crate::team::me().unwrap_or_default();
+            let ppl: Vec<String> = crate::team::people().into_iter().map(|(login, _, state, sessions, role)| format!("{login} ({role}, {state}{})",
+                if sessions.is_empty() { String::new() } else { format!(", sessions {}", sessions.join(" ")) })).collect();
+            out.push(format!("team: you are {me}; {}", if ppl.is_empty() { "no teammates yet".into() } else { ppl.join("; ") }));
+            let ed = crate::team::editing();
+            out.push(if ed.is_empty() { "teammates editing: nothing right now".into() } else { format!("teammates editing: {}", ed.join("; ")) });
+        }
+        out.join("\n")
+    }
+
     /// System prompt plus the session's role, if it has one.
     pub fn system_msg(&self, name: &str, profile: &str, role: &str, cwd: &Path) -> String {
         let mut s = self.system_for(name, profile, cwd);

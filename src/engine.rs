@@ -150,6 +150,14 @@ fn turn(hub: &Arc<Hub>, m: &Arc<Member>, user: &str) -> Result<(String, bool), E
     let mut budget_ok = false; // "yes" to a budget ask covers the rest of this turn
     with_memory(hub, m);
     loop {
+        // the header's git line, read again: commits and edits since the last call make it stale
+        {
+            let mut msgs = lock(&m.msgs);
+            if let Some(fresh) = msgs.first().and_then(|s| s["content"].as_str()).and_then(|s| crate::prompt::refresh_git(s, &m.cwd())) {
+                msgs[0]["content"] = fresh.into();
+                m.touched(&msgs);
+            }
+        }
         compact(hub, m, false)?;
         // what teammates' agents just changed, before this session builds on stale ideas
         // the files this session has looked at or changed get full notes, others a headline
@@ -917,6 +925,9 @@ fn dispatch(hub: &Arc<Hub>, m: &Arc<Member>, name: &str, args: &Value) -> String
     }
     if name == "todo" {
         return todo(&m.name, &args);
+    }
+    if name == "qh_status" {
+        return hub.status_text(m);
     }
     if name == "tell_team" {
         let (to, text) = (args["to"].as_str().unwrap_or("").trim_start_matches('@'), args["text"].as_str().unwrap_or(""));

@@ -2679,6 +2679,27 @@ fn uses_view(u: Option<&HashMap<String, u64>>) -> Vec<String> {
     u.into_iter().flatten().filter(|(_, t)| now.saturating_sub(**t) < 3600).map(|(n, _)| n.clone()).collect()
 }
 
+/// What online teammates are editing right now (the state behind the conflict warnings):
+/// "rahul/api: server.js (handle, route)", most recent first.
+pub fn editing() -> Vec<String> {
+    cur(|s| editing_in(&s.peers)).unwrap_or_default()
+}
+
+fn editing_in(peers: &HashMap<String, Peer>) -> Vec<String> {
+    let now = now();
+    let mut v: Vec<(u64, String)> = vec![];
+    for p in peers.values().filter(|p| p.online) {
+        for (session, c) in &p.claims {
+            for (f, fns, ts) in claims_view(Some(c)).into_iter().filter(|x| now.saturating_sub(x.2) < CLAIM_HOT) {
+                let fns = if fns.is_empty() { String::new() } else { format!(" ({})", fns.join(", ")) };
+                v.push((ts, format!("{}/{session}: {f}{fns}", p.login)));
+            }
+        }
+    }
+    v.sort_by_key(|x| std::cmp::Reverse(x.0));
+    v.into_iter().map(|x| x.1).collect()
+}
+
 /// A session's claims as (file, functions, latest edit), most recent first.
 fn claims_view(c: Option<&Claims>) -> Vec<(String, Vec<String>, u64)> {
     let mut v: Vec<(String, Vec<String>, u64)> = c.into_iter().flatten().map(|(f, fns)| {
@@ -3398,6 +3419,21 @@ pub fn list_team_files(cwd: &Path, to: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn editing_lists_only_hot_claims_of_online_teammates() {
+        use std::collections::HashMap;
+        let t = super::now();
+        let claim = |f: &str, func: &str, ts: u64| -> super::Claims { HashMap::from([(f.to_string(), HashMap::from([(func.to_string(), ts)]))]) };
+        let peer = |login: &str, online: bool, c: super::Claims| super::Peer {
+            login: login.into(), online, claims: HashMap::from([("api".to_string(), c)]), ..Default::default() };
+        let peers = HashMap::from([
+            ("rahul".to_string(), peer("rahul", true, claim("server.js", "route", t))),
+            ("anu".to_string(), peer("anu", false, claim("db.js", "save", t))),
+            ("old".to_string(), peer("old", true, claim("x.js", "", t - super::CLAIM_HOT - 5))),
+        ]);
+        assert_eq!(super::editing_in(&peers), vec!["rahul/api: server.js (route)".to_string()]);
+    }
+
     #[test]
     fn a_team_in_the_background_shows_how_to_open_it() {
         assert_eq!(super::background_hint("", &["kesav/shop".into()]).as_deref(), Some("team shop · Ctrl+] to open"));

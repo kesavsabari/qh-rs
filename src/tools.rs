@@ -728,6 +728,8 @@ pub fn builtin_schema(name: &str) -> Option<Value> {
     Some(match name {
         "remember" | "forget" | "recall" => return crate::memory::schemas().into_iter().find(|s| s["function"]["name"] == name),
         "skill" => schema(name, "Load a skill's instructions by name (listed under Skills in the system prompt).", &[("name", "string")], &["name"]),
+        "qh_status" => schema(name, "Read-only status the user sees: context used and left before compaction, tokens and cost, \
+teammates (online, role, sessions), files a teammate is editing now, and live git (branch, uncommitted files, ahead/behind).", &[], &[]),
         "todo" => json!({"type": "function", "function": {"name": "todo",
             "description": "Keep a checklist for multi-step work. Send the whole list each time; status is pending, doing or done.",
             "parameters": {"type": "object", "required": ["items"], "properties": {"items": {"type": "array",
@@ -783,9 +785,9 @@ pub fn profile_tools(profile: &str) -> &'static [&'static str] {
     match profile {
         "general" => &["read_file", "bash", "task_output", "task_stop", "web_search", "web_fetch", "remember", "past_sessions", "skill", "*browser", "*webhooks"],
         "browser" => &["read_file", "write_file", "remember", "*browser"],
-        "all" => &["read_file", "write_file", "edit_file", "find_references", "goto_definition", "hover", "rename_symbol", "remember", "past_sessions", "todo", "skill",
+        "all" => &["read_file", "write_file", "edit_file", "find_references", "goto_definition", "hover", "rename_symbol", "remember", "past_sessions", "todo", "qh_status", "skill",
                    "bash", "task_output", "task_stop", "grep", "web_search", "web_fetch", "*browser", "*webhooks"],
-        _ => &["read_file", "write_file", "edit_file", "rename_symbol", "find_references", "goto_definition", "hover", "bash", "task_output", "task_stop", "grep", "web_search", "remember", "past_sessions", "todo", "skill", "*browser"],
+        _ => &["read_file", "write_file", "edit_file", "rename_symbol", "find_references", "goto_definition", "hover", "bash", "task_output", "task_stop", "grep", "web_search", "remember", "past_sessions", "todo", "qh_status", "skill", "*browser"],
     }
 }
 
@@ -919,6 +921,14 @@ mod url_tests {
 #[cfg(test)]
 mod cwd_tests {
     use super::*;
+
+    #[test]
+    fn qh_status_is_a_read_only_coding_tool() {
+        let cfg = crate::config::load_defaults();
+        assert!(builtin_schema("qh_status").is_some() && !risky("qh_status", &serde_json::json!({}), &cfg));
+        assert!(profile_tools("coding").contains(&"qh_status") && profile_tools("all").contains(&"qh_status"));
+        assert!(!crate::route::fetch_allowed("qh_status"));
+    }
 
     #[test]
     fn syntax_errors_name_the_line_and_leave_no_cache() {

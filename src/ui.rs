@@ -642,6 +642,7 @@ fn tool_title(tool: &str, a: &Value) -> String {
         "send_message" => format!("→ {}: {}", s("to"), one(s("text"), 90)),
         "tell_team" => format!("→ @{}: {}", s("to").trim_start_matches('@'), one(s("text"), 90)),
         "read_team_file" => format!("▤ @{}:{}", s("to").trim_start_matches('@'), s("path")),
+        "qh_status" => "· status".to_string(),
         "list_team_files" => format!("▤ @{} changed files", s("to").trim_start_matches('@')),
         "ask" => format!("? {}: {}", s("to"), one(s("question"), 90)),
         "spawn" => format!("+ spawn {}: {}", s("name"), one(s("task"), 80)),
@@ -1403,13 +1404,7 @@ impl App {
                 self.note(&a, msg);
             }
             "/tokens" => {
-                let (t, r) = { let t = lock(&m.turn); (t.tokens, t.ratio) };
-                let now = context::estimate(&lock(&m.msgs), r);
-                let (u, pct) = { let t = lock(&m.turn); (t.usage, t.plan_pct) };
-                let all = *lock(&self.hub.spent);
-                let plan = pct.map(|p| format!("\nChatGPT plan: {p:.0}% of the current window used")).unwrap_or_default();
-                self.note(&a, { let (c, at) = self.hub.ctx_for(&m, false);
-                    format!("last request {t}/{c} · now ≈{now} · compacts at {at}\nthis tab: {}\nsession: {}{plan}", u.line(), all.line()) });
+                self.note(&a, self.hub.tokens_text(&m));
             }
             "/ask-other" => {
                 let (model, q) = crate::route::parse_ask_other(arg);

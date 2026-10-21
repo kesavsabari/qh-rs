@@ -382,3 +382,38 @@ struct BudgetAsk: View {
         .padding(.horizontal, 24).padding(.bottom, 10)
     }
 }
+
+// MARK: review hold
+
+/// A teammate's agent asked for changes before a push: hold and fix, hand it to the owner in
+/// team chat, or push anyway (qh serve's no / always / yes).
+struct ReviewHoldAsk: View {
+    let ask: Ask
+    @ObservedObject var project: Project
+
+    var body: some View {
+        let owners = ask.args["owners"] as? String ?? "the owner"
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: "hand.raised").font(.system(size: 14)).foregroundStyle(Theme.accent)
+                Text("\(owners)'s agent asked for changes").font(Theme.sans(14, medium: true)).foregroundStyle(Theme.ink)
+                Text("push held").font(Theme.mono(12)).foregroundStyle(Theme.accent)
+            }
+            if let t = ask.args["text"] as? String, !t.isEmpty {
+                Text(t).font(Theme.sans(13)).foregroundStyle(Theme.soft).textSelection(.enabled)
+            }
+            HStack(spacing: 6) {
+                AskButton(title: "Hold and fix", key: "⌘⏎", fill: Theme.ink, text: Theme.card) { project.answer(ask, "no") }
+                    .keyboardShortcut(.return, modifiers: .command)
+                AskButton(title: "Hand to \(owners) in chat", key: "", fill: Theme.card, text: Theme.ink) { project.answer(ask, "always") }
+                AskButton(title: "Push anyway", key: "", fill: .clear, text: Theme.soft) { project.answer(ask, "yes") }
+                Spacer(minLength: 0)
+            }
+        }
+        .padding(14)
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Theme.tile))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(Theme.accent.opacity(0.5)))
+        .frame(maxWidth: 700)
+        .padding(.horizontal, 24).padding(.bottom, 10)
+    }
+}

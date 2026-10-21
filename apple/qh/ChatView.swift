@@ -55,7 +55,7 @@ extension ProjectView {
                     PlanCard(tab: tab, project: project)
                 }
                 ForEach(project.asks.filter { $0.tab == tab.name }) { a in
-                    Group { if a.tool == "budget" { BudgetAsk(ask: a, project: project) } else { AskCard(ask: a, project: project) } }
+                    Group { if a.tool == "budget" { BudgetAsk(ask: a, project: project) } else if a.tool == "review_hold" { ReviewHoldAsk(ask: a, project: project) } else { AskCard(ask: a, project: project) } }
                         .transition(reduceMotion ? .opacity : .move(edge: .bottom).combined(with: .opacity))
                 }
                 Composer(project: project, tab: tab)

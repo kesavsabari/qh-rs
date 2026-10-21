@@ -257,10 +257,7 @@ struct PersonalSidebar: View {
             if mine.isEmpty {
                 EmptyHint(icon: "folder", text: "Open a folder to start.", hint: "⌘O").padding(.horizontal, 8)
             } else {
-                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 3), spacing: 6) {
-                    ForEach(mine, id: \.self) { p in ProjectTile(path: p, on: cur?.path == p) }
-                }
-                .padding(.horizontal, 12).padding(.top, 4)
+                ProjectSwitcher(paths: mine, current: cur?.path).padding(.horizontal, 12).padding(.top, 4)
             }
             if let cur {
                 Row(selected: false, action: { cur.newTab() }) {
@@ -281,6 +278,61 @@ struct PersonalSidebar: View {
                 }
             }
             Spacer(minLength: 0)
+        }
+    }
+}
+
+/// Just the open project; hovering or clicking it drops down the list of the others.
+struct ProjectSwitcher: View {
+    @EnvironmentObject var ws: Workspace
+    let paths: [String]
+    let current: String?
+    @State private var open = false
+    @State private var over = false
+
+    var body: some View {
+        let name = current.map { ($0 as NSString).lastPathComponent } ?? "Projects"
+        Button { open.toggle() } label: {
+            HStack(spacing: 8) {
+                Text(name).font(Theme.sans(13, medium: true)).foregroundStyle(Theme.ink).lineLimit(1).truncationMode(.tail)
+                if let live = ws.projects.first(where: { $0.path == current }) { LiveDot(project: live) }
+                Spacer(minLength: 4)
+                Image(systemName: "chevron.down").font(.system(size: 10, weight: .semibold)).foregroundStyle(Theme.faint)
+            }
+            .padding(.horizontal, 12).frame(height: 36)
+            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(over || open ? Theme.hover : Theme.tile))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.hand)
+        .onHover { h in
+            withAnimation(.easeOut(duration: 0.12)) { over = h }
+            if h && paths.count > 1 { open = true }
+        }
+        .help(current.map(Workspace.short) ?? "")
+        .popover(isPresented: $open, arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(paths, id: \.self) { p in
+                    Row(selected: p == current, action: { open = false; ws.open(p) }) {
+                        HStack(spacing: 8) {
+                            Text((p as NSString).lastPathComponent).lineLimit(1)
+                            Spacer()
+                            if let live = ws.projects.first(where: { $0.path == p }) { LiveDot(project: live) }
+                        }
+                    }
+                    .help(ws.teamRepos[p] ?? Workspace.short(p))
+                    .contextMenu {
+                        Button("Show in Finder") { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: p) }
+                        if let live = ws.projects.first(where: { $0.path == p }) { Button("Stop qh here") { ws.close(live) } }
+                        Button("Remove from list") { ws.forget(p) }
+                    }
+                }
+                Divider().padding(.vertical, 4)
+                Row(selected: false, action: { open = false; ws.pick() }) {
+                    HStack(spacing: 8) { Image(systemName: "plus").font(.system(size: 11)); Text("Open folder…"); Spacer(); Text("⌘O").font(Theme.mono(11)) }
+                        .foregroundStyle(Theme.soft)
+                }
+            }
+            .padding(8).frame(width: 240)
         }
     }
 }
@@ -381,10 +433,7 @@ struct TeamSidebar: View {
         VStack(spacing: 0) {
             if let cur {
                 // team projects as Essentials tiles, like the personal space
-                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 3), spacing: 6) {
-                    ForEach(teams, id: \.self) { p in ProjectTile(path: p, on: p == cur).help(ws.teamRepos[p] ?? p) }
-                }
-                .padding(.horizontal, 12).padding(.top, 4).padding(.bottom, 6)
+                ProjectSwitcher(paths: teams, current: cur).padding(.horizontal, 12).padding(.top, 4).padding(.bottom, 6)
                 if let p = ws.projects.first(where: { $0.path == cur }) {
                     TeamNav(project: p)
                 } else {

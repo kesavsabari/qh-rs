@@ -426,7 +426,7 @@ pub fn run(hub: Arc<Hub>, tx: Sender<Ui>, rx: Receiver<Ui>) -> std::io::Result<(
     if done.is_empty() {
         if let Some(p) = recent_projects().into_iter().map(|(p, _)| p).find(|p| p.is_dir() && crate::team::enabled_for(p)) {
             let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-            match app.start_team_at(p.clone(), &active) {
+            match app.start_team_at(p.clone(), &active, true) {
                 Ok(_) => { app.last_team = p; app.note(&active, format!("team {name} · Ctrl+] to open")) }
                 Err(e) => app.err(&active, format!("team presence: {e}")),
             }
@@ -2532,11 +2532,11 @@ then it's `git push -u origin {branch}` and `gh pr create --fill`.");
 
     /// Connect the team of the project `tab` is in (its notes go to that tab).
     fn start_team_in(&self, tab: &str) -> Result<String, String> {
-        self.start_team_at(self.hub.get(tab).map(|m| m.cwd()).unwrap_or_default(), tab)
+        self.start_team_at(self.hub.get(tab).map(|m| m.cwd()).unwrap_or_default(), tab, false)
     }
 
     /// Connect the team of the project at `cwd`, which needn't have a tab open (its notes go to `tab`).
-    fn start_team_at(&self, cwd: std::path::PathBuf, tab: &str) -> Result<String, String> {
+    fn start_team_at(&self, cwd: std::path::PathBuf, tab: &str, background: bool) -> Result<String, String> {
         let (hub, a) = (self.hub.clone(), tab.to_string());
         let root = crate::team::github_repo(&cwd).map(|(r, _)| r).unwrap_or_else(|| cwd.clone());
         let summary = Box::new(move || {
@@ -2602,7 +2602,7 @@ then it's `git push -u origin {branch}` and `gh pr create --fill`.");
                 i.text.chars().filter(|c| !c.is_control()).take(200).collect::<String>())))),
             refresh: Box::new(move || h4.emit("", Event::Changed)),
         };
-        crate::team::start(&cwd, summary, hooks)
+        crate::team::start(&cwd, summary, hooks, background)
     }
 
     fn status_line(&self) -> String {

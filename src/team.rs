@@ -750,7 +750,7 @@ pub struct Hooks {
 }
 
 /// Connect this folder's project (or just show it, if it's already connected).
-pub fn start(cwd: &Path, summary: Summary, hooks: Hooks) -> Result<String, String> {
+pub fn start(cwd: &Path, summary: Summary, hooks: Hooks, background: bool) -> Result<String, String> {
     let (root, repo) = github_repo(cwd).ok_or("this folder's git remote isn't on GitHub (other hosts come later)")?;
     if running_for(&repo) {
         set_current(&repo);
@@ -770,6 +770,7 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks) -> Result<String, Strin
     let mine: Vec<&(u64, String, String)> = chat.iter().filter(|(_, f, _)| *f == me).collect();
     let my_chat: Vec<Value> = mine[mine.len().saturating_sub(30)..].iter().copied()
         .enumerate().map(|(i, (ts, _, t))| json!({"id": ts * 1000 + i as u64, "ts": ts, "text": t})).collect();
+    hold_connection(&repo, background)?;
     let (running, finished) = (std::sync::Arc::new(AtomicBool::new(true)), std::sync::Arc::new(AtomicBool::new(false)));
     STATES.lock().unwrap().get_or_insert_with(HashMap::new).insert(repo.clone(), State {
         repo: repo.clone(), me: me.clone(), peers: HashMap::new(), error: String::new(), key: load_key(&repo),
@@ -863,6 +864,11 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks) -> Result<String, Strin
             // read the board: one conditional request, a git fetch only when something changed
             if last_poll.elapsed() >= POLL {
                 last_poll = Instant::now();
+                if wanted_elsewhere(&repo2) {
+                    log_to(&repo2, "the qh opened in this project took over the team connection");
+                    running.store(false, Relaxed);
+                    break;
+                }
                 match api("GET", &format!("/repos/{repo2}/git/matching-refs/qh/peers/"), &tok, None, etag.as_deref()) {
                     Ok((200, tag, v)) => {
                         let changed = v.as_array().into_iter().flatten().any(|r| {
@@ -926,6 +932,7 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks) -> Result<String, Strin
         if let Some(m) = LIVE.lock().unwrap().as_mut() { m.remove(&repo2); }
         let (files, msg, _) = build("offline");
         let _ = publish(&root, &repo2, &me2, &tok, &files, &msg, &idc);
+        release(&repo2);
         finished.store(true, Relaxed);
     }).map_err(|e| e.to_string())?;
     remember(&repo, true);
@@ -2139,6 +2146,12 @@ Don't wait: carry on with your best guess, and if the answer says otherwise, fix
     }).unwrap_or_else(|| "error: team mode is off for this project".into())
 }
 
+/// Our review request `id` to `to` ("login/session") reached them, and they're still online.
+pub fn reviewing(id: u64, to: &str) -> bool {
+    let login = to.split('/').next().unwrap_or("");
+    cur(|s| s.peers.get(login).is_some_and(|p| p.online && p.acks.get(&s.me).copied().unwrap_or(0) >= id)).unwrap_or(false)
+}
+
 /// Ask `owner`'s agent to review a diff (review.rs builds the text): a question like ask_team's,
 /// to the session of theirs busiest with the code it names. Returns (id, "login/session", online).
 pub fn ask_review(repo: &str, session: &str, owner: &str, text: &str) -> Result<(u64, String, bool), String> {
@@ -2777,6 +2790,52 @@ pub fn transcript(login: &str, session: &str) -> Result<String, String> {
 }
 
 /// Disconnect the project on screen.
+/// One qh process per team repo holds its connection: two (a project's own window and another
+/// one keeping it in the background) would both take in and ack the same messages, each
+/// dropping answers to questions only the other asked, and keep replacing each other's line.
+static LOCKS: Mutex<Option<HashMap<String, std::fs::File>>> = Mutex::new(None);
+
+fn hold_connection(repo: &str, background: bool) -> Result<(), String> {
+    let path = per_repo("team-lock", repo);
+    let _ = std::fs::create_dir_all(path.parent().unwrap_or(&path));
+    let f = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&path).map_err(|e| e.to_string())?;
+    let want = per_repo("team-want", repo);
+    let _ = std::fs::create_dir_all(want.parent().unwrap_or(&want));
+    let t0 = Instant::now();
+    loop {
+        match f.try_lock() {
+            Ok(()) => break,
+            Err(std::fs::TryLockError::WouldBlock) => {
+                let held = std::fs::read_to_string(&path).unwrap_or_default();
+                let (pid, mode) = held.split_once(' ').unwrap_or((held.trim(), ""));
+                // a window opened in the project itself takes the team from one keeping it in the background
+                if background || mode.trim() != "background" || t0.elapsed() > Duration::from_secs(15) {
+                    let _ = std::fs::remove_file(&want);
+                    return Err(format!("team {repo} is connected in another qh (pid {pid}); close that one first"));
+                }
+                let _ = std::fs::write(&want, std::process::id().to_string());
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            Err(std::fs::TryLockError::Error(e)) => return Err(e.to_string()),
+        }
+    }
+    let _ = std::fs::remove_file(&want);
+    let _ = f.set_len(0);
+    let _ = (&f).write_all(format!("{} {}", std::process::id(), if background { "background" } else { "project" }).as_bytes());
+    LOCKS.lock().unwrap().get_or_insert_with(HashMap::new).insert(repo.to_string(), f);
+    Ok(())
+}
+
+fn release(repo: &str) {
+    if let Some(m) = LOCKS.lock().unwrap().as_mut() { m.remove(repo); }
+}
+
+/// We hold `repo` in the background and the qh opened in that project asked for it.
+fn wanted_elsewhere(repo: &str) -> bool {
+    let mine = std::fs::read_to_string(per_repo("team-lock", repo)).unwrap_or_default();
+    mine.ends_with(" background") && mine.starts_with(&format!("{} ", std::process::id())) && per_repo("team-want", repo).exists()
+}
+
 pub fn stop() {
     cur(|s| s.running.store(false, Relaxed));
 }
@@ -3459,6 +3518,22 @@ mod tests {
     }
 
     #[test]
+    fn one_qh_holds_a_team_and_the_projects_own_window_takes_it_from_a_background_one() {
+        let repo = format!("lock/t{}", std::process::id());
+        hold_connection(&repo, true).unwrap();
+        assert!(hold_connection(&repo, true).unwrap_err().contains("connected in another qh"), "a second background one stays out");
+        let r2 = repo.clone();
+        let fg = std::thread::spawn(move || hold_connection(&r2, false));
+        let t0 = Instant::now();
+        while !wanted_elsewhere(&repo) && t0.elapsed() < Duration::from_secs(5) { std::thread::sleep(Duration::from_millis(20)) }
+        assert!(wanted_elsewhere(&repo), "the background holder is asked to give it up");
+        release(&repo); // what its sync loop does when it sees that
+        fg.join().unwrap().unwrap();
+        assert!(!wanted_elsewhere(&repo) && std::fs::read_to_string(per_repo("team-lock", &repo)).unwrap().ends_with(" project"));
+        release(&repo);
+    }
+
+    #[test]
     fn auth_header_is_standard_base64() {
         assert_eq!(auth_env("abc")[2].1, "Authorization: Basic eC1hY2Nlc3MtdG9rZW46YWJj");
     }
@@ -4079,3 +4154,4 @@ mod tests {
         STATES.lock().unwrap().as_mut().unwrap().remove(repo);
     }
 }
+

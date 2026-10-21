@@ -220,6 +220,10 @@ final class Project: ObservableObject, Identifiable {
     }
     func loadTeam(_ chan: String) { client.send(["type": "team", "chan": chan]) }
     func teamSend(_ chan: String, _ text: String) { client.send(["type": "team_send", "chan": chan, "text": text]) }
+    func teamHold(_ h: TeamState.Hold, approve: Bool, note: String) {
+        client.send(["type": "team_hold", "from": h.from, "head": h.head, "approve": approve, "note": note])
+    }
+    func teamClear(_ chan: String) { client.send(["type": "team_clear", "chan": chan]) }
     func loadTasks() { client.send(["type": "tasks", "tab": current?.name ?? "main"]) }
     func fixVerify(_ tab: String) { client.send(["type": "fix_verify", "tab": tab]) }
     func approvePlan(_ tab: ChatTab, edits: String) {

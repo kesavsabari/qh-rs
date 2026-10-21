@@ -432,6 +432,8 @@ pub struct Outcome {
     pub files: Vec<String>,
     /// the commit reviewed
     pub head: String,
+    /// the change itself, cut short, for the owner's decision card
+    pub diff: String,
 }
 
 /// Commits the user chose to push anyway: a retried push of one doesn't ask again.
@@ -470,14 +472,115 @@ pub fn before_push(session: &str, cwd: &Path, cfg: &crate::config::Config, notic
         f.dedup();
         (f, v.iter().find(|r| ids.contains(&r.id)).map(|r| r.head.clone()).unwrap_or_default())
     };
-    Some(Outcome { text, changes: pick("changes"), handoff: pick("handoff"), files, head })
+    let diff = crate::team::github_repo(cwd).and_then(|(root, _)| {
+        let b = base(&root)?;
+        let mut a = vec!["diff", "--no-color", "--no-ext-diff", "-U1", b.as_str(), "HEAD", "--"];
+        a.extend(files.iter().map(|f| f.as_str()));
+        git(&root, &a)
+    }).map(|d| clip_diff(&d)).unwrap_or_default();
+    Some(Outcome { text, changes: pick("changes"), handoff: pick("handoff"), files, head, diff })
 }
 
-/// The private message that hands a held push to the owner themselves, in team chat.
-pub fn handoff_text(me: &str, files: &[String], answer: &str) -> String {
+/// The private message that hands a held push to the owner themselves, in team chat. Its last
+/// line tags it as a hold, so the owner's qh shows it as a card they can approve or send back.
+pub fn handoff_text(me: &str, files: &[String], answer: &str, diff: &str, head: &str, session: &str) -> String {
     let a: String = answer.trim().chars().take(600).collect();
-    format!("[review] {me} wants to push changes to {} and needs you to decide. Your agent said: {a}\nReply here to talk it through.",
+    let d = if diff.is_empty() { String::new() } else { format!("\n\n{diff}") };
+    format!("[review] {me} wants to push changes to {} and needs you to decide. Your agent said: {a}{d}\n{HOLD} {head} {session}",
             if files.is_empty() { "your code".to_string() } else { files.join(", ") })
+}
+
+/// The diff for a decision card: headers and changed lines only, at most 30 lines.
+fn clip_diff(d: &str) -> String {
+    let keep: Vec<&str> = d.lines().filter(|l| l.starts_with("@@") || l.starts_with("+++ ") ||
+        ((l.starts_with('+') || l.starts_with('-')) && !l.starts_with("--- ") && !l.starts_with("+++ "))).collect();
+    let mut out: Vec<String> = keep.iter().take(30).map(|l| l.chars().take(160).collect()).collect();
+    if keep.len() > 30 { out.push(format!("… {} more lines", keep.len() - 30)) }
+    out.join("\n")
+}
+
+// ---- the owner decides a handed-off push ----
+//
+// The hold goes out as a private message tagged `#qh-hold <commit> <session>`; the owner answers
+// with `#qh-decide <commit> approve|changes` (and a note). The pusher's qh only takes a decision
+// from someone the push was handed to, for a commit it's holding: DMs are sealed between the two
+// of them, so the sender is who they say.
+
+const HOLD: &str = "#qh-hold";
+const DECIDE: &str = "#qh-decide";
+
+#[derive(Debug, PartialEq)]
+pub enum Tag { Hold { head: String, session: String }, Decide { head: String, approve: bool, note: String } }
+
+pub fn tag(text: &str) -> Option<Tag> {
+    let last = text.trim_end().lines().last()?;
+    if let Some(r) = last.strip_prefix(HOLD) {
+        let mut w = r.split_whitespace();
+        return Some(Tag::Hold { head: w.next()?.into(), session: w.next().unwrap_or("").into() });
+    }
+    let first = text.lines().next()?;
+    let mut w = first.strip_prefix(DECIDE)?.split_whitespace();
+    let head = w.next()?.to_string();
+    let approve = match w.next()? { "approve" => true, "changes" => false, _ => return None };
+    Some(Tag::Decide { head, approve, note: text.lines().skip(1).collect::<Vec<_>>().join("\n").trim().to_string() })
+}
+
+/// The owner's answer to a hold.
+pub fn decision_text(head: &str, approve: bool, note: &str) -> String {
+    format!("{DECIDE} {head} {}\n{}", if approve { "approve" } else { "changes" }, note.trim())
+}
+
+/// A tagged message as people read it: the hold without its tag, a decision in words.
+pub fn shown(text: &str) -> String {
+    match tag(text) {
+        Some(Tag::Hold { .. }) => text.trim_end().rsplit_once('\n').map_or(text, |(a, _)| a).to_string(),
+        Some(Tag::Decide { head, approve, note }) => {
+            let c: String = head.chars().take(7).collect();
+            let n = if note.is_empty() { String::new() } else { format!(": {note}") };
+            if approve { format!("✓ approved the push ({c}){n}") } else { format!("↩ sent the push back for changes ({c}){n}") }
+        }
+        None => text.to_string(),
+    }
+}
+
+/// A push of ours waiting on its owner's decision.
+#[derive(Clone)]
+struct Held { head: String, session: String, owners: Vec<String> }
+
+static HELD: Mutex<Vec<Held>> = Mutex::new(Vec::new());
+static DECISIONS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+
+/// engine.rs handed `head` to `owners`: keep it until one of them decides.
+pub fn held(head: &str, session: &str, owners: &[String]) {
+    if head.is_empty() { return }
+    let mut v = HELD.lock().unwrap();
+    v.retain(|h| h.head != head);
+    v.push(Held { head: head.into(), session: session.into(), owners: owners.to_vec() });
+}
+
+/// A private message came in from `from` (team.rs calls this for each). A decision on a push we
+/// hold goes to the session that pushed, and an approval lets the retried push through.
+pub fn on_dm(from: &str, text: &str) {
+    let Some(Tag::Decide { head, approve, note }) = tag(text) else { return };
+    let h = {
+        let mut v = HELD.lock().unwrap();
+        let Some(i) = v.iter().position(|h| h.head == head && h.owners.iter().any(|o| o.eq_ignore_ascii_case(from))) else { return };
+        v.remove(i)
+    };
+    let n = if note.is_empty() { String::new() } else { format!("\n\nTheir note: {note}") };
+    let msg = if approve {
+        push_anyway(&head);
+        format!("[owner decision] {from} approved the held push.{n}\n\nPush it now (the same command); it won't be held again.")
+    } else {
+        format!("[owner decision] {from} sent the push back for changes.{n}\n\nMake the changes, commit, and push again.")
+    };
+    DECISIONS.lock().unwrap().push((h.session, msg));
+    crate::team::bump();
+}
+
+/// Decisions not yet handed to their sessions (team.rs's loop delivers them).
+pub fn take_decisions() -> Vec<(String, String)> {
+    std::mem::take(&mut *DECISIONS.lock().unwrap())
 }
 
 /// What the reviews said, for the agent and the user.
@@ -654,8 +757,10 @@ new file mode 100644
         assert_eq!(verdict("**CHANGES**: the lock"), "changes");
         assert_eq!(verdict("Two notes: …"), "comments");
         assert_eq!(verdict("HANDOFF: this changes pricing policy, dave should decide"), "handoff");
-        let h = handoff_text("erin", &["shop.py".into()], "HANDOFF: pricing call");
-        assert!(h.contains("erin wants to push changes to shop.py") && h.contains("pricing call") && h.contains("Reply here"));
+        let h = handoff_text("erin", &["shop.py".into()], "HANDOFF: pricing call", "@@ -1 +1 @@\n-a\n+b", "abc123", "main");
+        assert!(h.contains("erin wants to push changes to shop.py") && h.contains("pricing call") && h.contains("+b"));
+        assert_eq!(tag(&h), Some(Tag::Hold { head: "abc123".into(), session: "main".into() }));
+        assert!(!shown(&h).contains("#qh-hold") && shown(&h).contains("+b"));
         assert_eq!(verdict("(not answered: they have you as view only.)"), "none");
         // one answered in time, one not: the wait ends at the timeout and marks it given up
         let (a, b) = (900_001, 900_002);
@@ -682,5 +787,28 @@ new file mode 100644
         assert!(t0.elapsed() < Duration::from_secs(1));
         let ev = take_events();
         assert!(ev.iter().any(|e| e["type"] == "review" && e["status"] == "approve"), "{ev:?}");
+    }
+
+    #[test]
+    fn an_owner_decision_reaches_only_a_push_we_hold() {
+        let d = decision_text("feed01", true, "fine, ship it");
+        assert_eq!(tag(&d), Some(Tag::Decide { head: "feed01".into(), approve: true, note: "fine, ship it".into() }));
+        assert!(shown(&d).starts_with("✓ approved the push (feed01)"));
+        assert!(shown(&decision_text("feed01", false, "")).starts_with("↩ sent the push back"));
+        assert_eq!(tag("just chatting about #qh-decide"), None);
+        held("feed01", "s1", &["dave".into()]);
+        on_dm("mallory", &d); // not who it was handed to
+        on_dm("dave", &decision_text("other", true, ""));
+        assert!(!pushed_anyway("feed01") && take_decisions().iter().all(|(s, _)| s != "s1"));
+        on_dm("Dave", &d);
+        let got = take_decisions();
+        assert!(pushed_anyway("feed01") && got.iter().any(|(s, m)| s == "s1" && m.contains("approved") && m.contains("ship it")));
+        on_dm("dave", &d); // once only
+        assert!(take_decisions().iter().all(|(s, _)| s != "s1"));
+        held("feed02", "s2", &["dave".into()]);
+        on_dm("dave", &decision_text("feed02", false, "use / 100"));
+        assert!(!pushed_anyway("feed02") && take_decisions().iter().any(|(s, m)| s == "s2" && m.contains("use / 100")));
+        let c = clip_diff(&format!("diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n ctx\n{}", "+l\n".repeat(40)));
+        assert!(!c.contains("ctx") && !c.contains("--- a/x") && c.contains("@@") && c.ends_with("more lines"));
     }
 }

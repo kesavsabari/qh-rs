@@ -223,6 +223,7 @@ struct State {
     msgs: Vec<Msg>,                 // direct-message and group lines, oldest first
     msg_ids: std::collections::HashSet<(String, u64)>, // (sender, id) boxes already tried
     chan_unread: HashMap<String, usize>, // DM / group channel -> unread lines
+    cleared: HashMap<String, u64>,  // DM / group channel -> lines up to this time hidden (`x` in the chat)
     pinged: Vec<String>,            // channels with an unread @mention of us
     dirty: bool,                    // something to publish now (sent message, decision)
     running: std::sync::Arc<AtomicBool>,
@@ -788,7 +789,7 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks, background: bool) -> Re
         answers: std::fs::read_to_string(per_repo("team-answers", &repo)).ok().map(|s| s.trim().to_string())
             .filter(|s| ["auto", "ask", "off"].contains(&s.as_str())).unwrap_or_else(|| "auto".into()),
         secret: Some(secret.clone()), my_dms: vec![], my_groups: vec![], my_gmsgs: vec![], groups: HashMap::new(), msgs: vec![],
-        msg_ids: Default::default(), chan_unread: HashMap::new(), pinged: vec![],
+        msg_ids: Default::default(), chan_unread: HashMap::new(), cleared: HashMap::new(), pinged: vec![],
         dirty: true, running: running.clone(), finished: finished.clone(),
     });
     with(&repo, load_private);
@@ -928,6 +929,8 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks, background: bool) -> Re
                     Err(_) => std::thread::sleep(left),
                 }
             }
+            // an owner decided a push we handed them: tell the session that pushed
+            for (session, text) in crate::review::take_decisions() { (hooks.answered)(&session, &text) }
         }
         if let Some(m) = LIVE.lock().unwrap().as_mut() { m.remove(&repo2); }
         let (files, msg, _) = build("offline");
@@ -1167,7 +1170,8 @@ fn save_private(s: &State) {
     let msgs: Vec<Value> = s.msgs[keep..].iter().map(|m| json!([m.ts, m.chan, m.from, m.text, m.id])).collect();
     let groups: serde_json::Map<String, Value> = s.groups.iter().map(|(id, g)| (id.clone(), json!({
         "name": g.name, "members": g.members, "owner": g.owner, "key": crate::oauth::b64url(&g.key)}))).collect();
-    save_json("team-private", &s.repo, &json!({"msgs": msgs, "groups": groups, "dms": s.my_dms, "my_groups": s.my_groups, "gmsgs": s.my_gmsgs}));
+    save_json("team-private", &s.repo, &json!({"msgs": msgs, "groups": groups, "dms": s.my_dms, "my_groups": s.my_groups, "gmsgs": s.my_gmsgs,
+        "cleared": s.cleared}));
 }
 
 fn load_private(s: &mut State) {
@@ -1184,6 +1188,7 @@ fn load_private(s: &mut State) {
     s.my_dms = v["dms"].as_array().cloned().unwrap_or_default();
     s.my_groups = v["my_groups"].as_array().cloned().unwrap_or_default();
     s.my_gmsgs = v["gmsgs"].as_array().cloned().unwrap_or_default();
+    s.cleared = v["cleared"].as_object().into_iter().flatten().filter_map(|(k, t)| Some((k.clone(), t.as_u64()?))).collect();
 }
 
 /// Whether `text` mentions `me`: `@me` or `@team`, as a word of its own (an email address like
@@ -1214,6 +1219,8 @@ fn clip_to(s: &str, n: usize) -> String {
 /// Add a line to a private channel (once); a teammate's line counts as unread, and as a ping when it mentions us.
 fn push_msg(s: &mut State, mut m: Msg) -> bool {
     if s.msgs.iter().any(|x| x.from == m.from && x.id == m.id && x.chan == m.chan) { return false }
+    // a thread you cleared: what was in it doesn't come back from their folder
+    if s.cleared.get(&m.chan).is_some_and(|&t| m.ts <= t) { return false }
     m.text = m.text.chars().filter(|c| !c.is_control() || *c == '\n').collect();
     if m.from != s.me {
         *s.chan_unread.entry(m.chan.clone()).or_default() += 1;
@@ -1254,7 +1261,8 @@ fn take_private(s: &mut State, login: &str, p: &Peer) -> bool {
         let Some(text) = tc::open_from(&secret, &p.pub_key, &repo, "dm", login, &me, b).and_then(|x| String::from_utf8(x).ok()) else { continue };
         if push_msg(s, Msg { ts: *ts, chan: format!("@{login}"), from: login.into(), text: text.clone(), id: *id }) {
             new = true;
-            alert(format!("qh: {login} (private): {}", clip_to(&text, 80)));
+            crate::review::on_dm(login, &text);
+            alert(format!("qh: {login} (private): {}", clip_to(&crate::review::shown(&text), 80)));
         }
     }
     for (id, ts, gid, b) in &p.gmsgs {
@@ -1400,7 +1408,7 @@ pub fn channel_msgs(chan: &str) -> Vec<(String, String, String, bool)> {
         if chan == "#team" {
             return s.chat.iter().map(|(t, f, x)| (ago(*t), who(f), plain(x), *f != s.me && pings(x, &s.me))).collect();
         }
-        s.msgs.iter().filter(|m| m.chan == chan).map(|m| (ago(m.ts), who(&m.from), plain(&m.text), m.from != s.me && pings(&m.text, &s.me))).collect()
+        s.msgs.iter().filter(|m| m.chan == chan).map(|m| (ago(m.ts), who(&m.from), plain(&crate::review::shown(&m.text)), m.from != s.me && pings(&m.text, &s.me))).collect()
     }).unwrap_or_default()
 }
 
@@ -1410,6 +1418,55 @@ pub fn channel_members(chan: &str) -> Vec<String> {
         Some(gid) => s.groups.get(gid).map(|g| g.members.clone()).unwrap_or_default(),
         None => chan.strip_prefix('@').map(|l| vec![s.me.clone(), l.to_string()]).unwrap_or_default(),
     }).unwrap_or_default()
+}
+
+/// `x` in a private thread: hide everything in it so far, for you only (they keep their copy).
+pub fn channel_clear(chan: &str) {
+    if chan == "#team" { return }
+    cur(|s| {
+        let t = s.msgs.iter().filter(|m| m.chan == chan).map(|m| m.ts).max().unwrap_or(0).max(now());
+        s.cleared.insert(chan.to_string(), t);
+        s.msgs.retain(|m| m.chan != chan);
+        read_locked(s, chan);
+        save_private(s);
+        bump();
+    });
+}
+
+/// A teammate's push handed to you to decide (a `#qh-hold` private message).
+#[derive(Clone, Debug)]
+pub struct Hold {
+    pub from: String,
+    pub head: String,
+    pub text: String,          // the message without its tag: reason and diff
+    pub ago: String,
+    pub decided: Option<bool>, // you approved (true) or sent it back (false)
+}
+
+/// Pushes handed to you, newest first; a decided one stays (with what you said) for a while.
+pub fn holds() -> Vec<Hold> {
+    cur(|s| {
+        let mut out: Vec<Hold> = vec![];
+        for m in s.msgs.iter().filter(|m| m.from != s.me && m.chan.starts_with('@')) {
+            let Some(crate::review::Tag::Hold { head, .. }) = crate::review::tag(&m.text) else { continue };
+            let decided = s.msgs.iter().filter(|x| x.from == s.me && x.chan == m.chan && x.ts >= m.ts).find_map(|x| match crate::review::tag(&x.text) {
+                Some(crate::review::Tag::Decide { head: h, approve, .. }) if h == head => Some(approve),
+                _ => None,
+            });
+            out.retain(|h| h.head != head || h.from != m.from);
+            out.push(Hold { from: m.from.clone(), head, text: crate::review::shown(&m.text), ago: ago(m.ts), decided });
+        }
+        out.reverse();
+        out
+    }).unwrap_or_default()
+}
+
+/// Approve a held push of `from`'s, or send it back with a note: it goes to them privately, and
+/// their qh lets the push through or hands the note to their agent.
+pub fn decide_hold(from: &str, head: &str, approve: bool, note: &str) -> Result<String, String> {
+    if !holds().iter().any(|h| h.from == from && h.head == head) { return Err("no such held push".into()) }
+    dm_send(from, &crate::review::decision_text(head, approve, note))?;
+    Ok(if approve { format!("approved {from}'s push") } else { format!("sent {from}'s push back") })
 }
 
 pub fn channel_read(chan: &str) {
@@ -3613,7 +3670,7 @@ mod tests {
             uses: HashMap::new(), waiting: vec![], sheets: HashMap::new(), asked: vec![], answered: vec![], answers: "auto".into(),
             answerer: None, promises: vec![], last_answer: HashMap::new(), unread: 0, dirty: false, running: Default::default(), finished: Default::default(),
             secret: None, my_dms: vec![], my_groups: vec![], my_gmsgs: vec![], groups: HashMap::new(), msgs: vec![],
-            msg_ids: Default::default(), chan_unread: HashMap::new(), pinged: vec![],
+            msg_ids: Default::default(), chan_unread: HashMap::new(), cleared: HashMap::new(), pinged: vec![],
         }
     }
 
@@ -3983,6 +4040,21 @@ mod tests {
         let a = s.outbox.last().unwrap();
         assert_eq!((a["kind"].as_str(), a["re"].as_u64(), a["session"].as_str()), (Some("a"), Some(9), Some("api")));
         assert!(a["text"].as_str().unwrap().ends_with("8080"));
+    }
+
+    #[test]
+    fn a_cleared_thread_stays_cleared_when_their_folder_comes_again() {
+        let ((a, a_pub), (b, b_pub)) = (member("alice"), member("bob"));
+        let mut alice = keyed("alice", &a, &[("bob", &b_pub)]);
+        dm_locked(&mut alice, "bob", "ping-1").unwrap();
+        let folder = published(&alice, &a_pub);
+        let mut bob = keyed("bob", &b, &[("alice", &a_pub)]);
+        assert!(take_private(&mut bob, "alice", &folder));
+        let t = bob.msgs.iter().map(|m| m.ts).max().unwrap();
+        bob.cleared.insert("@alice".into(), t);
+        bob.msgs.retain(|m| m.chan != "@alice");
+        bob.msg_ids.clear(); // as after a restart
+        assert!(!take_private(&mut bob, "alice", &folder) && bob.msgs.is_empty(), "the old line doesn't come back");
     }
 
     #[test]

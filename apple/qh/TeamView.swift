@@ -6,6 +6,8 @@ struct TeamState {
     struct Waiting: Identifiable { var id: String { "\(from)#\(num)" }; let from: String; let num: Int; let session: String; let text: String; let question: Bool }
     struct Msg: Identifiable { let id = UUID(); let who: String; let when: String; let text: String; let ping: Bool }
     struct Edit { let file: String; let functions: [String] }
+    /// A teammate's push handed to you to decide: the reviewer's reason and the diff.
+    struct Hold: Identifiable { var id: String { from + "/" + head }; let from: String; let head: String; let text: String; let ago: String; let decided: String? }
     struct Agent: Identifiable {
         var id: String { login + "/" + name }
         let login: String, name: String, status: String, topic: String, now: String, branch: String
@@ -25,6 +27,9 @@ struct TeamState {
     let chan: String
     let messages: [Msg]
     let agents: [Agent]
+    let holds: [Hold]
+    /// requests and held pushes still waiting on you
+    var needs: Int { waiting.count + holds.filter { $0.decided == nil }.count }
 
     init(_ e: [String: Any]) {
         running = e["running"] as? Bool ?? false
@@ -47,6 +52,10 @@ struct TeamState {
         chan = e["chan"] as? String ?? "#team"
         messages = (e["messages"] as? [[String: Any]] ?? []).map {
             Msg(who: $0["who"] as? String ?? "", when: $0["when"] as? String ?? "", text: $0["text"] as? String ?? "", ping: $0["ping"] as? Bool ?? false)
+        }
+        holds = (e["holds"] as? [[String: Any]] ?? []).map {
+            Hold(from: $0["from"] as? String ?? "", head: $0["head"] as? String ?? "", text: $0["text"] as? String ?? "",
+                 ago: $0["ago"] as? String ?? "", decided: $0["decided"] as? String)
         }
         agents = (e["agents"] as? [[String: Any]] ?? []).map { a in
             Agent(login: a["login"] as? String ?? "", name: a["name"] as? String ?? "", status: a["status"] as? String ?? "",
@@ -91,7 +100,7 @@ struct TeamPageView: View {
             switch ws.teamPage {
             case .channel(let id): ChannelPage(project: project, chan: id)
             case .peer(let login, let name): PeerPage(project: project, login: login, name: name)
-            case .requests: RequestsPage(project: project, waiting: t?.waiting ?? [])
+            case .requests: RequestsPage(project: project, waiting: t?.waiting ?? [], holds: t?.holds ?? [])
             case .members: MembersPage(people: t?.people ?? [], me: t?.me ?? "")
             case .claims: ClaimsPage(agents: t?.agents ?? [])
             case .activity: ActivityPage(rows: t?.activity ?? [])
@@ -114,7 +123,12 @@ struct ChannelPage: View {
         let msgs = t?.chan == chan ? t?.messages ?? [] : []
         VStack(spacing: 0) {
             PageHeader(title: chan.hasPrefix("@") ? String(chan.dropFirst()) : chan,
-                       subtitle: chan == "#team" ? "everyone in \(t?.repo ?? "the team")" : chan.hasPrefix("@") ? "direct message" : "group")
+                       subtitle: chan == "#team" ? "everyone in \(t?.repo ?? "the team")" : chan.hasPrefix("@") ? "direct message" : "group") {
+                if chan != "#team" && !msgs.isEmpty {
+                    Button("Clear") { project.teamClear(chan) }.buttonStyle(.hand).font(Theme.sans(12.5)).foregroundStyle(Theme.soft)
+                        .help("Hide everything in this thread so far, for you only; they keep their copy")
+                }
+            }
             ScrollViewReader { sv in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
@@ -307,13 +321,16 @@ struct PeerPage: View {
 struct RequestsPage: View {
     @ObservedObject var project: Project
     let waiting: [TeamState.Waiting]
+    var holds: [TeamState.Hold] = []
 
     var body: some View {
+        let n = waiting.count + holds.filter { $0.decided == nil }.count
         VStack(spacing: 0) {
-            PageHeader(title: "Requests", subtitle: waiting.isEmpty ? "nothing waiting" : "\(waiting.count) waiting for you")
+            PageHeader(title: "Requests", subtitle: n == 0 ? "nothing waiting" : "\(n) waiting for you")
             ScrollView {
                 LazyVStack(spacing: 10) {
-                    if waiting.isEmpty {
+                    ForEach(holds) { h in HoldCard(project: project, hold: h) }
+                    if waiting.isEmpty && holds.isEmpty {
                         EmptyHint(icon: "tray", text: "When a teammate's agent asks yours for something, it waits here for your OK.", hint: "inbox zero").padding(.top, 20)
                     }
                     ForEach(waiting) { w in
@@ -347,6 +364,78 @@ struct RequestsPage: View {
     private func answer(_ w: TeamState.Waiting, _ a: String) {
         project.prompt("/team answer \(w.from) \(w.num) \(a)")
         project.loadTeam("#team")
+    }
+}
+
+/// A push a teammate's qh held and handed to you: why, the change itself, and your call.
+struct HoldCard: View {
+    @ObservedObject var project: Project
+    @EnvironmentObject var ws: Workspace
+    let hold: TeamState.Hold
+    @State private var sending = false
+    @State private var note = ""
+
+    var body: some View {
+        let parts = split(hold.text)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                Avatar(name: hold.from)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(hold.from).font(Theme.sans(13, medium: true)).foregroundStyle(Theme.ink)
+                    Text(hold.decided.map { "push \($0) · \(hold.ago)" } ?? "push held for you to decide · \(hold.ago)")
+                        .font(Theme.sans(12)).foregroundStyle(hold.decided == nil ? Theme.accent : Theme.faint)
+                }
+                Spacer()
+                Text(String(hold.head.prefix(7))).font(Theme.mono(11)).foregroundStyle(Theme.faint)
+            }
+            Text(parts.reason).font(Theme.sans(14)).foregroundStyle(Theme.ink).lineSpacing(3).textSelection(.enabled)
+            if !parts.diff.isEmpty {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(parts.diff.enumerated()), id: \.offset) { _, l in
+                        Text(l).font(Theme.mono(12)).lineLimit(1)
+                            .foregroundStyle(l.hasPrefix("@@") ? Theme.faint : l.hasPrefix("+") ? Color.green : l.hasPrefix("-") ? Color.red : Theme.ink)
+                    }
+                }
+                .padding(10).frame(maxWidth: .infinity, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Theme.paper))
+                .textSelection(.enabled)
+            }
+            if hold.decided == nil {
+                if sending {
+                    TextField("What must change before it goes?", text: $note, axis: .vertical).textFieldStyle(.plain).font(Theme.sans(14))
+                        .padding(10).background(RoundedRectangle(cornerRadius: 8).fill(Theme.paper))
+                        .onSubmit(sendBack)
+                    HStack(spacing: 8) {
+                        PillButton(title: "Send back", primary: true, action: sendBack)
+                        PillButton(title: "Cancel") { sending = false }
+                    }
+                } else {
+                    HStack(spacing: 8) {
+                        PillButton(title: "Approve push", primary: true) { project.teamHold(hold, approve: true, note: "") }
+                        PillButton(title: "Send back…") { sending = true }
+                        PillButton(title: "Talk it through") { ws.teamPage = .channel("@" + hold.from); project.loadTeam("@" + hold.from) }
+                    }
+                }
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Theme.side))
+        .opacity(hold.decided == nil ? 1 : 0.6)
+    }
+
+    private func sendBack() {
+        let n = note.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !n.isEmpty else { return }
+        project.teamHold(hold, approve: false, note: n)
+        sending = false
+    }
+
+    /// The message is the reason, then a blank line, then the diff lines.
+    private func split(_ t: String) -> (reason: String, diff: [String]) {
+        let lines = t.components(separatedBy: "\n")
+        guard let i = lines.firstIndex(where: { $0.hasPrefix("@@") || $0.hasPrefix("+++ ") }) else { return (t, []) }
+        return (lines[..<i].joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines), Array(lines[i...]))
     }
 }
 

@@ -482,7 +482,7 @@ struct TeamNav: View {
                     }
                 } else {
                     // what needs you first, then your own work, then the team
-                    if let n = t?.waiting.count, n > 0 {
+                    if let n = t?.needs, n > 0 {
                         Header(text: "Needs you")
                         page(.requests, icon: "tray.full", "Requests", badge: n)
                     }
@@ -497,7 +497,7 @@ struct TeamNav: View {
                         }
                     }
                     Header(text: "Team")
-                    if (t?.waiting.count ?? 0) == 0 { page(.requests, icon: "tray", "Requests") }
+                    if (t?.needs ?? 0) == 0 { page(.requests, icon: "tray", "Requests") }
                     page(.members, icon: "person.2", "Members", trailing: "\(t?.people.filter(\.online).count ?? 0)/\(t?.people.count ?? 0)")
                     page(.map, icon: "square.grid.3x3.square", "Map")
                     page(.claims, icon: "lock.doc", "Claims")

@@ -240,7 +240,9 @@ fn team_state(chan: Option<&str>) -> Value {
     crate::team::channel_read(chan);
     json!({"type": "team", "running": true, "me": crate::team::me(), "repo": crate::team::repo(),
            "status": crate::team::status_line(), "people": people, "channels": channels, "waiting": waiting,
-           "activity": activity, "chan": chan, "messages": msgs, "agents": agents, "reviews": crate::review::list(), "team_push": true})
+           "activity": activity, "chan": chan, "messages": msgs, "agents": agents, "reviews": crate::review::list(), "team_push": true,
+           "holds": crate::team::holds().into_iter().map(|h| json!({"from": h.from, "head": h.head, "text": h.text, "ago": h.ago,
+               "decided": h.decided.map(|a| if a { "approved" } else { "sent back" })})).collect::<Vec<_>>()})
 }
 
 /// Debounce for pushed team updates: send when the generation moved and the last push is at
@@ -394,6 +396,20 @@ fn command(hub: &Arc<Hub>, st: &Arc<State>, v: &Value) -> Option<String> {
             if let Err(e) = crate::team::channel_send(chan, text) { return Some(e) }
             st.broadcast(&team_state(Some(chan)));
             *lock(&st.team_chan) = Some(chan.to_string());
+        }
+        "team_hold" => {
+            // a teammate's push handed to us: approve it, or send it back with a note
+            let (from, head) = (v["from"].as_str().unwrap_or(""), v["head"].as_str().unwrap_or(""));
+            let approve = v["approve"].as_bool().unwrap_or(false);
+            let note = v["note"].as_str().unwrap_or("");
+            if !approve && note.trim().is_empty() { return Some("say what must change before it can go".into()) }
+            if let Err(e) = crate::team::decide_hold(from, head, approve, note) { return Some(e) }
+            st.broadcast(&team_state(lock(&st.team_chan).clone().as_deref()));
+        }
+        "team_clear" => {
+            let chan = v["chan"].as_str().unwrap_or("");
+            crate::team::channel_clear(chan);
+            st.broadcast(&team_state(Some(chan)));
         }
         "team_transcript" => {
             let (login, session) = (v["login"].as_str().unwrap_or(""), v["session"].as_str().unwrap_or(""));

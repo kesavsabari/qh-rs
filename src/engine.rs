@@ -854,18 +854,23 @@ fn hold_push(hub: &Arc<Hub>, m: &Arc<Member>, r: &crate::review::Outcome) -> Opt
     let me = crate::team::me().unwrap_or_default();
     let login = |to: &str| to.split('/').next().unwrap_or(to).to_string();
     let hand = |list: &[(String, String)]| -> Vec<String> {
-        list.iter().map(|(to, a)| match crate::team::dm_send(&login(to), &crate::review::handoff_text(&me, &r.files, a)) {
+        let owners: Vec<String> = list.iter().map(|(to, _)| login(to)).collect();
+        crate::review::held(&r.head, &m.name, &owners);
+        list.iter().map(|(to, a)| match crate::team::dm_send(&login(to), &crate::review::handoff_text(&me, &r.files, a, &r.diff, &r.head, &m.name)) {
             Ok(_) => format!("@{}", login(to)),
             Err(e) => format!("@{} (couldn't message: {e})", login(to)),
         }).collect()
     };
+    // the owner approved it (or the user chose to push anyway): a retried push goes through
+    if crate::review::pushed_anyway(&r.head) { return None }
     if !r.handoff.is_empty() {
         let who = hand(&r.handoff).join(", ");
         hub.emit(&m.name, Event::Notice(format!("push held: handed to {who} in team chat")));
         return Some(format!("{}\n\nPush NOT run: the reviewer handed this to their person, and {who} got a private message in team chat. \
-Tell the user to talk it through with them there; push again only once the user says so.", r.text));
+They can approve it or send it back from there; their decision comes to you as a message. \
+Push again only once it's approved or the user says so.", r.text));
     }
-    if r.changes.is_empty() || crate::review::pushed_anyway(&r.head) { return None }
+    if r.changes.is_empty() { return None }
     let owners: Vec<String> = r.changes.iter().map(|(t, _)| login(t)).collect();
     let comments: String = r.changes.iter().map(|(t, a)| format!("{t}: {}", a.trim())).collect::<Vec<_>>().join("\n\n");
     let args = json!({"owners": owners.join(", "), "text": comments.chars().take(2000).collect::<String>()});
@@ -874,7 +879,8 @@ Tell the user to talk it through with them there; push again only once the user 
         crate::hub::Answer::Always(_) => {
             let who = hand(&r.changes).join(", ");
             hub.emit(&m.name, Event::Notice(format!("push held: handed to {who} in team chat")));
-            Some(format!("{}\n\nPush NOT run: the user handed this to {who} in team chat. Wait for the user before pushing again.", r.text))
+            Some(format!("{}\n\nPush NOT run: the user handed this to {who} in team chat. Their decision (approve or send back) \
+comes to you as a message; until then, don't push.", r.text))
         }
         crate::hub::Answer::No => Some(format!("{}\n\nPush NOT run: a reviewer asked for changes and the user held the push. \
 Make the changes they asked for (or tell the user why not), commit, and push again.", r.text)),

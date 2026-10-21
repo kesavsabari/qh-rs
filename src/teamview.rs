@@ -304,6 +304,12 @@ enum To {
     Task(String, String),     // work for a teammate's session (waits in their Requests)
     Question(String, String), // a question for their agent (answered read-only)
     Reply(String, u64),       // writing back to a waiting request
+    SendBack(String, String), // what a held push needs before it goes: (pusher, commit)
+}
+
+/// Pushes handed to you that you haven't decided yet: they head the Requests tab.
+fn open_holds() -> Vec<crate::team::Hold> {
+    crate::team::holds().into_iter().filter(|h| h.decided.is_none()).collect()
 }
 
 const CHAT: usize = 1;
@@ -325,7 +331,7 @@ impl TeamView {
     pub fn open(cwd: &Path) -> Self {
         if let Some((_, r)) = crate::team::github_repo(cwd) { gh_refresh(&r, false) }
         // a request waiting: open on it
-        let tab = if crate::team::pending().is_empty() { 0 } else { REQUESTS };
+        let tab = if crate::team::pending().is_empty() && open_holds().is_empty() { 0 } else { REQUESTS };
         Self { tab, ..Self::default() }
     }
 
@@ -367,6 +373,7 @@ impl TeamView {
                         To::Question(who, s) => crate::team::ask_person_agent(&who, &s, &text),
                         To::Task(who, s) => crate::team::send(&who, &s, &text),
                         To::Reply(from, id) => crate::team::reply_request(&from, id, &text),
+                        To::SendBack(from, head) => crate::team::decide_hold(&from, &head, false, &text),
                     };
                     return match r { Ok(m) if m.is_empty() => Act::None, Ok(m) => Act::Note(m), Err(e) => Act::Err(e) };
                 }
@@ -387,9 +394,19 @@ impl TeamView {
         // requests are answered only in their own tab, one picked request at a time: a key
         // pressed elsewhere in the room never accepts anything
         if self.tab == REQUESTS {
-            let pending = crate::team::pending();
-            self.sel[REQUESTS] = self.sel[REQUESTS].min(pending.len().saturating_sub(1));
-            if let Some(i) = pending.get(self.sel[REQUESTS]).cloned() {
+            let (holds, pending) = (open_holds(), crate::team::pending());
+            self.sel[REQUESTS] = self.sel[REQUESTS].min((holds.len() + pending.len()).saturating_sub(1));
+            // a held push: approve it, send it back with what to change, or talk it through
+            if let Some(h) = holds.get(self.sel[REQUESTS]).cloned() {
+                match k.code {
+                    KeyCode::Enter | KeyCode::Char('a') => return match crate::team::decide_hold(&h.from, &h.head, true, "") {
+                        Ok(m) => Act::Note(format!("{m}: it goes out as soon as their qh hears")), Err(e) => Act::Err(e) },
+                    KeyCode::Char('s') => { self.typing = Some((To::SendBack(h.from.clone(), h.head.clone()), String::new())); return Act::None }
+                    KeyCode::Char('r') => { self.typing = Some((To::Chat(format!("@{}", h.from)), String::new())); return Act::None }
+                    _ => {}
+                }
+            }
+            if let Some(i) = self.sel[REQUESTS].checked_sub(holds.len()).and_then(|n| pending.get(n)).cloned() {
                 match k.code {
                     KeyCode::Enter | KeyCode::Char('a') => return Self::accept(hub, &i, "once"),
                     KeyCode::Char('A') if i.question.is_some() => return Self::accept(hub, &i, "always"),
@@ -455,6 +472,12 @@ impl TeamView {
             KeyCode::PageUp => self.scroll = self.scroll.saturating_add(10),
             KeyCode::PageDown => self.scroll = self.scroll.saturating_sub(10),
             KeyCode::Char('r') => if let Some((_, r)) = crate::team::github_repo(cwd) { gh_refresh(&r, true) },
+            KeyCode::Char('x') if self.tab == CHAT => {
+                let c = self.channel();
+                if c.id == "#team" { return Act::Note("the team room can't be cleared; x clears a private or group thread".into()) }
+                crate::team::channel_clear(&c.id);
+                return Act::Note(format!("cleared {} for you (they keep their copy)", c.label));
+            }
             KeyCode::Char('m') | KeyCode::Char('c') if self.tab <= CHAT => {
                 self.tab = CHAT;
                 self.typing = Some((To::Chat(self.channel().id), String::new()));
@@ -469,7 +492,7 @@ impl TeamView {
         match self.tab {
             0 => people(hub, root).iter().map(|p| p.sessions.len()).sum(),
             CHAT => crate::team::channels().len(),
-            REQUESTS => crate::team::pending().len(),
+            REQUESTS => open_holds().len() + crate::team::pending().len(),
             ISSUES => gh().issues.len(),
             PRS => gh().prs.len(),
             _ => crate::team::activity().len(),
@@ -536,7 +559,7 @@ impl TeamView {
 
         // tab strip
         let gh = gh();
-        let counts = [ppl.iter().map(|p| p.sessions.len()).sum::<usize>(), crate::team::chat_unread(), pending.len(), gh.issues.len(), gh.prs.len(), 0];
+        let counts = [ppl.iter().map(|p| p.sessions.len()).sum::<usize>(), crate::team::chat_unread(), pending.len() + open_holds().len(), gh.issues.len(), gh.prs.len(), 0];
         let mut spans: Vec<Span> = vec![Span::raw(" ")];
         for (i, t) in TABS.iter().enumerate() {
             let label = if i > 0 && i <= PRS && counts[i] > 0 { format!(" {} {t} ({}) ", i + 1, counts[i]) } else { format!(" {} {t} ", i + 1) };
@@ -559,7 +582,7 @@ impl TeamView {
             0 if self.detail => self.draw_people(f, body, hub, &ppl, &gh),
             0 => self.draw_map(f, body, &ppl, &root),
             CHAT => self.draw_chat(f, body),
-            REQUESTS => self.draw_requests(f, body, &pending),
+            REQUESTS => self.draw_requests(f, body, &open_holds(), &pending),
             ISSUES => self.draw_list(f, body, gh.issues.iter().map(|(n, t, a)| (format!("#{n}"), t.clone(), if a.is_empty() { "open".into() } else { format!("→ {a}") })).collect(),
                                 gh.loading, &gh.error, "no open issues"),
             PRS => self.draw_list(f, body, gh.prs.iter().map(|(n, t, who, br, ci)| (format!("#{n}"), t.clone(), format!("{who} · {br} {ci}"))).collect(),
@@ -589,6 +612,7 @@ impl TeamView {
                 To::Question(who, s) => format!(" question for {who}'s {s} (answered read-only) › "),
                 To::Task(who, s) => format!(" task for {who}'s {s} (runs once they accept it) › "),
                 To::Reply(who, _) => format!(" reply to {who} (no work starts) › "),
+                To::SendBack(who, _) => format!(" send {who}'s push back: what must change › "),
             };
             f.render_widget(Paragraph::new(Line::from(vec![
                 Span::styled(label, Style::new().fg(accent).add_modifier(Modifier::BOLD)),
@@ -599,7 +623,8 @@ impl TeamView {
             (true, _) => "Enter send · Esc cancel · @login pings someone, @team everyone",
             (_, 0) if !self.detail => "↑↓ pick · Enter open · a ask their agent · p private message · m message the team · ←→ or 1-6 tabs · Esc back",
             (_, 0) => "↑↓ sessions · Enter open yours / give their agent a task · m message · Esc back to the map",
-            (_, CHAT) => "↑↓ channel · Enter or m write · /dm <login> and /team group <name> <logins> from the prompt · ←→ tabs · Esc back",
+            (_, CHAT) => "↑↓ channel · Enter or m write · x clear a private thread · /dm <login> and /team group <name> <logins> from the prompt · ←→ tabs · Esc back",
+            (_, REQUESTS) if self.sel[REQUESTS] < open_holds().len() => "↑↓ pick · Enter or a approve the push · s send back with a note · r talk it through · ←→ tabs · Esc back",
             (_, REQUESTS) => "↑↓ pick · Enter or a accept · r reply · d decline · A always answer their questions · ←→ tabs · Esc back",
             (_, ISSUES) => "↑↓ pick · Enter start it in its own branch and session · r refresh · ←→ tabs · Esc back",
             (_, PRS) => "↑↓ pick · Enter have your current session review it · r refresh · ←→ tabs · Esc back",
@@ -610,19 +635,37 @@ impl TeamView {
 
     /// Requests: work teammates (or their agents) asked of your sessions, and questions when
     /// /answers is "ask". Nothing in here has reached any session.
-    fn draw_requests(&mut self, f: &mut Frame, area: Rect, pending: &[crate::team::Incoming]) {
+    fn draw_requests(&mut self, f: &mut Frame, area: Rect, holds: &[crate::team::Hold], pending: &[crate::team::Incoming]) {
         let area = Rect { x: area.x + 1, width: area.width.saturating_sub(2), ..area };
-        if pending.is_empty() {
+        if pending.is_empty() && holds.is_empty() {
             f.render_widget(Paragraph::new("\n  No requests. When a teammate or their agent asks one of your sessions to do something, it waits here:\n  nothing runs until you accept it.")
                 .style(Style::new().fg(Color::DarkGray)).wrap(Wrap { trim: false }), area);
             return;
         }
-        self.sel[REQUESTS] = self.sel[REQUESTS].min(pending.len() - 1);
+        self.sel[REQUESTS] = self.sel[REQUESTS].min(holds.len() + pending.len() - 1);
         let w = area.width as usize;
         let mut lines: Vec<Line> = vec![Line::raw("")];
         let mut sel_line = 0;
-        for (n, i) in pending.iter().enumerate() {
+        // held pushes first: the reviewer's reason and the diff, coloured, whole on the picked one
+        for (n, h) in holds.iter().enumerate() {
             let on = n == self.sel[REQUESTS];
+            if on { sel_line = lines.len() }
+            let head = format!("{} {} · push held for you to decide · {}", if on { "▸" } else { " " }, h.from, h.ago);
+            lines.push(Line::styled(clip(&head, w), if on { Style::new().fg(Color::Black).bg(Color::Magenta).add_modifier(Modifier::BOLD) }
+                                                   else { Style::new().fg(Color::Magenta).add_modifier(Modifier::BOLD) }));
+            let body: Vec<String> = h.text.lines().flat_map(|l| if l.starts_with(['+', '-', '@']) { vec![clip(l, w.saturating_sub(4))] }
+                                                             else { crate::ui::wrap(l, w.saturating_sub(4).max(10)) }).collect();
+            let shown = if on { body.len() } else { body.len().min(2) };
+            for l in &body[..shown] {
+                let st = if l.starts_with("@@") { Style::new().fg(Color::Cyan) } else if l.starts_with('+') { Style::new().fg(Color::Green) }
+                         else if l.starts_with('-') { Style::new().fg(Color::Red) } else { Style::new() };
+                lines.push(Line::styled(format!("    {l}"), st));
+            }
+            if body.len() > shown { lines.push(Line::styled(format!("    … {} more lines (↑↓ to pick it)", body.len() - shown), Style::new().fg(Color::DarkGray))) }
+            lines.push(Line::raw(""));
+        }
+        for (n, i) in pending.iter().enumerate() {
+            let on = n + holds.len() == self.sel[REQUESTS];
             if on { sel_line = lines.len() }
             let from = if i.from_session.is_empty() { i.from.clone() } else { format!("{}'s {}", i.from, i.from_session) };
             let kind = if i.question.is_some() { "question for" } else { "work for" };

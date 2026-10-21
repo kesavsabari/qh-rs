@@ -530,8 +530,10 @@ fn command(hub: &Arc<Hub>, st: &Arc<State>, v: &Value) -> Option<String> {
         }
         "model" => {
             let Some(m) = hub.get(tab) else { return Some(format!("no tab {tab}")) };
+            let id = v["model"].as_str().unwrap_or("");
+            if let Some(e) = crate::providers::bare_provider(id) { return Some(e) }
             let mut s = lock(&m.set);
-            (s.provider, s.model) = crate::providers::parse_model(v["model"].as_str().unwrap_or(""));
+            (s.provider, s.model) = crate::providers::parse_model(id);
             drop(s);
             hub.changed();
         }

@@ -89,7 +89,13 @@ fn parse() -> Args {
         match x.as_str() {
             "--resume" | "-r" => a.resume = Some(it.next_if(|v| !v.starts_with('-')).unwrap_or_else(|| "latest".into())),
             "--profile" => a.profile = it.next(),
-            "--model" | "-m" => a.model = it.next(),
+            "--model" | "-m" => {
+                a.model = it.next();
+                if let Some(e) = a.model.as_deref().and_then(crate::providers::bare_provider) {
+                    eprintln!("qh: {e}");
+                    std::process::exit(2);
+                }
+            }
             "--think" => a.think = true,
             "-p" | "--print" => a.print.extend(it.next()),
             "--ctx" => a.ctx = it.next().and_then(|v| v.parse().ok()),

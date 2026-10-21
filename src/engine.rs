@@ -989,10 +989,12 @@ relevant files first, then call ask_model again with the code, error or plan pas
         }
     }
     // a secret, a write outside the project, a protected path, an unsandboxed run: asked in every mode
+    let mut approved = None; // the agent never sees the card, so it's told the user approved
     if let Some(why) = crate::sandbox::guard(name, &args, &cwd, &m.root, &hub.cfg) {
         if !hub.confirm(m, name, &args, Some(&why)) {
             return format!("denied by user: it {why}. Don't try another way around it; ask the user if it's needed.");
         }
+        approved = Some(why);
     } else if tools::risky(name, &args, &hub.cfg) && !allowed(&lock(&m.set).allow, name, &args)
         && !hub.confirm(m, name, &args, None) {
         return "denied by user".into();
@@ -1046,6 +1048,9 @@ relevant files first, then call ask_model again with the code, error or plan pas
     }
     if let Some(r) = review {
         out = format!("{r}\n\n{out}");
+    }
+    if let Some(why) = approved {
+        out = format!("(the user approved this: it {why})\n{out}");
     }
     if name == "bash" {
         *lock(&m.cwd) = cwd; // a cd in the command moves this session only

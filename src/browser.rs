@@ -422,7 +422,7 @@ impl Browser {
     fn centre(&mut self, r: i64) -> Result<(f64, f64), String> {
         self.el(r)?;
         let v = self.eval(&format!("(() => {{ const e = document.querySelector('[data-qh=\"{r}\"]'); if (!e) return null; \
-            e.scrollIntoView({{block: 'center'}}); const b = e.getBoundingClientRect(); return [b.x + b.width / 2, b.y + b.height / 2]; }})()"))?;
+            e.scrollIntoView({{block: 'center', behavior: 'instant'}}); const b = e.getBoundingClientRect(); return [b.x + b.width / 2, b.y + b.height / 2]; }})()"))?;
         match (v[0].as_f64(), v[1].as_f64()) {
             (Some(x), Some(y)) => Ok((x, y)),
             _ => Err("page changed since the last snapshot; call snapshot()".into()),

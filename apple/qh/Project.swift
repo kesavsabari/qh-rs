@@ -509,7 +509,7 @@ final class Project: ObservableObject, Identifiable {
 
 /// A list a /command offers (/model, /provider, /merge…): choosing runs `cmd value`.
 struct PickerState: Identifiable {
-    struct Row: Identifiable { let id = UUID(); let value: String; let label: String; let group: String }
+    struct Row: Identifiable { let value: String; let label: String; let group: String; var id: String { group + "\u{1}" + value } }
     let id = UUID()
     let title: String
     let cmd: String

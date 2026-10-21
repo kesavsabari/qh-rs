@@ -889,7 +889,10 @@ struct PickerSheet: View {
     @State private var sel = 0
 
     var body: some View {
-        let rows = picker.rows.filter { filter.isEmpty || $0.label.localizedCaseInsensitiveContains(filter) || $0.value.localizedCaseInsensitiveContains(filter) }
+        // same match as the TUI: every word in group + label (the value carries a "provider:" prefix,
+        // so matching it made "chat" pull in every chatgpt row whatever its label)
+        let words = filter.lowercased().split(separator: " ")
+        let rows = picker.rows.filter { r in let hay = (r.group + " " + r.label).lowercased(); return words.allSatisfy { hay.contains($0) } }
         VStack(alignment: .leading, spacing: 10) {
             Text(picker.title).font(Theme.sans(17, medium: true)).foregroundStyle(Theme.ink)
             TextField("type to filter \(picker.rows.count)", text: $filter).textFieldStyle(.plain).font(Theme.mono(13))
@@ -900,9 +903,10 @@ struct PickerSheet: View {
                 .onChange(of: filter) { _, _ in sel = 0 }
             ScrollViewReader { sv in
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 0) {
-                        // one view per row (header inside it): two sibling views per ForEach element made
-                        // the lazy stack reuse stale rows after filtering, labels under the wrong group
+                    // plain VStack with ids stable across filtering (group + value): the old LazyVStack had a
+                    // `.id(i)` on each row that overrode the ForEach id, so after filtering row i kept the
+                    // view (and label) of whatever sat at index i before: ollama names under "ChatGPT"
+                    VStack(alignment: .leading, spacing: 0) {
                         ForEach(Array(rows.enumerated()), id: \.element.id) { i, r in
                           VStack(alignment: .leading, spacing: 0) {
                             if !r.group.isEmpty && (i == 0 || rows[i - 1].group != r.group) {
@@ -918,11 +922,10 @@ struct PickerSheet: View {
                             .contentShape(Rectangle())
                             .hand().onTapGesture { project.choose(picker, r.value) }
                           }
-                          .id(i)
                         }
                     }
                 }
-                .onChange(of: sel) { _, v in sv.scrollTo(v) }
+                .onChange(of: sel) { _, v in if let r = rows[safe: v] { sv.scrollTo(r.id) } }
             }
             HStack {
                 Spacer()

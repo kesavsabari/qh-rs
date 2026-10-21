@@ -44,6 +44,7 @@ const MIN_LINK_WRITE: Duration = Duration::from_secs(1); // floor for the addres
 const KEEPALIVE: Duration = Duration::from_secs(120);
 const POLL: Duration = Duration::from_secs(3);
 const OFFLINE_AFTER: u64 = 300; // seconds without a write before someone counts as offline
+const ORPHAN_AFTER: u64 = 1800; // seconds every key holder must be gone before an admin starts a new key
 const CLAIM_HOT: u64 = 600;     // a function someone edited this recently is theirs: others pause
 
 /// Who changed which functions, per session: file -> function -> when (unix seconds).
@@ -1651,6 +1652,36 @@ fn settle_key(repo: &str) {
             s.dirty = true;
         }
     });
+    recover_key(repo);
+}
+
+/// Every folder we can't read was last written long ago: whoever held the team key lost it with
+/// their machine, so nobody is left to let anyone in. A repo admin starts the next key
+/// generation, as `/team remove` does, and the others switch to it when they come back.
+fn recover_key(repo: &str) {
+    let Some((me, epoch)) = with(repo, |s| {
+        let t = now();
+        let mut holders = s.peers.values().filter(|p| !p.wrapped.is_empty() || p.locked).peekable();
+        let orphaned = s.key.is_none() && holders.peek().is_some()
+            && holders.all(|p| !p.online && t.saturating_sub(p.ts) >= ORPHAN_AFTER);
+        orphaned.then(|| (s.me.clone(), s.peers.values().map(|p| p.epoch).max().unwrap_or(0)))
+    }).flatten() else { return };
+    if !is_admin(repo, &me, &token().unwrap_or_default()) {
+        return;
+    }
+    with(repo, |s| {
+        let left: Vec<String> = s.peers.values().map(|p| p.login.clone()).collect();
+        for l in left {
+            if !s.approved.contains(&l) { s.approved.push(l) }
+        }
+        let k = tc::new_team_key();
+        save_key(&s.repo, &k);
+        s.key = Some(k);
+        s.epoch = s.epoch.max(epoch) + 1;
+        s.dirty = true;
+    });
+    persist_membership(repo);
+    log_to(repo, "nobody who holds the team key has been seen in a long time: you're an admin, so you started a new one");
 }
 
 fn stale_check(repo: &str, hooks: &Hooks) {
@@ -3406,6 +3437,26 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn an_admin_restarts_a_team_whose_key_holders_are_long_gone() {
+        let repo = "rec/orphan";
+        let mut st = state("kesav");
+        st.repo = repo.into();
+        let old = now() - ORPHAN_AFTER - 60;
+        st.peers.insert("dave".into(), Peer { login: "dave".into(), locked: true, ts: old, epoch: 2, ..Default::default() });
+        STATES.lock().unwrap().get_or_insert_with(HashMap::new).insert(repo.into(), st);
+        with(repo, |s| s.admins.insert("kesav".into(), false));
+        settle_key(repo);
+        assert!(with(repo, |s| s.key.is_none()).unwrap(), "only an admin may start over");
+        with(repo, |s| { s.admins.insert("kesav".into(), true); s.peers.get_mut("dave").unwrap().ts = now() });
+        settle_key(repo);
+        assert!(with(repo, |s| s.key.is_none()).unwrap(), "dave wrote lately: wait for him to let us in");
+        with(repo, |s| s.peers.get_mut("dave").unwrap().ts = old);
+        settle_key(repo);
+        let (key, epoch, approved) = with(repo, |s| (s.key.is_some(), s.epoch, s.approved.clone())).unwrap();
+        assert!(key && epoch == 3 && approved.contains(&"dave".to_string()), "a new generation, and dave gets it when he's back");
+    }
 
     #[test]
     fn auth_header_is_standard_base64() {

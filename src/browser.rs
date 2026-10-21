@@ -13,7 +13,11 @@ use std::time::{Duration, Instant};
 const TEXT_PAGE: usize = 3500; // chars of page text per snapshot page
 const MAX_ELEMENTS: usize = 60;
 
-const SNAPSHOT_JS: &str = r#"(() => {
+// `__ROOT__` is replaced with a JSON selector or null: every element still gets a ref (so refs stay
+// page-wide), but only those inside the region are marked `inside`, and `region` is its text.
+const SNAPSHOT_JS: &str = r#"((rootSel) => {
+  const root = rootSel ? document.querySelector(rootSel) : null;
+  if (rootSel && !root) return {missing: true};
   const sel = 'a[href], button, input, textarea, select, summary, [role=button], [role=link], [role=tab], [role=checkbox], [role=menuitem], [onclick], [contenteditable=true]';
   const out = [];
   document.querySelectorAll('[data-qh]').forEach(e => e.removeAttribute('data-qh'));
@@ -35,17 +39,173 @@ const SNAPSHOT_JS: &str = r#"(() => {
     if (!name && el.name) name = el.name;
     name = name.replace(/\s+/g, ' ').trim().slice(0, 80);
     let extra = '';
-    if (tag === 'input' || tag === 'textarea') extra = el.value ? ` value="${String(el.value).slice(0, 40)}"` : '';
+    // the value goes back whole; Rust shortens it with an explicit marker
+    const value = (tag === 'input' || tag === 'textarea') && el.type !== 'password' ? String(el.value || '') : '';
     if (tag === 'select') extra = ` selected="${el.value}"` + ' options=' + JSON.stringify([...el.options].map(o => o.text).slice(0, 10));
     if (el.type === 'password') extra = ' (password)';
     const editable = el.isContentEditable || tag === 'textarea' || (tag === 'input' &&
       !['button', 'submit', 'reset', 'checkbox', 'radio', 'file', 'image', 'range', 'color'].includes(el.type));
-    out.push({ref: n, role, name, extra, editable, password: el.type === 'password', href: tag === 'a' ? (el.getAttribute('href') || '') : ''});
+    out.push({ref: n, role, name, extra, value, inside: !root || root.contains(el), editable, password: el.type === 'password', href: tag === 'a' ? (el.getAttribute('href') || '') : ''});
   }
   const nav = performance.getEntriesByType('navigation')[0];
   return {status: nav ? nav.responseStatus || 0 : 0, title: document.title, url: location.href,
-          text: (document.body ? document.body.innerText : '').replace(/\n{3,}/g, '\n\n').trim(), elements: out};
-})()"#;
+          text: (document.body ? document.body.innerText : '').replace(/\n{3,}/g, '\n\n').trim(),
+          region: root ? root.innerText.replace(/\n{3,}/g, '\n\n').trim() : null, elements: out};
+})(__ROOT__)"#;
+
+/// Longest input value shown in full; longer ones are cut with an explicit marker.
+const MAX_VALUE: usize = 80;
+/// Changed text lines shown in a click/type diff.
+const MAX_DIFF_LINES: usize = 30;
+
+/// An input's value for a snapshot line, never cut silently.
+fn show_value(v: &str) -> String {
+    let n = v.chars().count();
+    if v.is_empty() { String::new() }
+    else if n <= MAX_VALUE { format!(" value=\"{v}\"") }
+    else { format!(" value=\"{}…({n} chars)\"", v.chars().take(MAX_VALUE).collect::<String>()) }
+}
+
+struct El {
+    r: i64,
+    key: String,  // role + name + href: what the element is, for matching across snapshots
+    body: String, // the line without its [ref]
+    inside: bool, // within the snapshot's selector region
+}
+
+/// One read of the page, as the model sees it.
+struct Page {
+    title: String,
+    url: String,
+    status: u64,
+    els: Vec<El>,
+    text: String,
+    problems: Vec<String>,
+}
+
+impl Page {
+    fn from_json(d: &Value, problems: Vec<String>) -> Page {
+        let str_ = |v: &Value| v.as_str().unwrap_or("").to_string();
+        let els = d["elements"].as_array().into_iter().flatten().map(|e| {
+            let href = e["href"].as_str().unwrap_or("");
+            let to = if href.is_empty() || href.starts_with("javascript:") { String::new() } else {
+                format!(" → {}", href.chars().take(80).collect::<String>())
+            };
+            let (role, name) = (str_(&e["role"]), str_(&e["name"]));
+            El { r: e["ref"].as_i64().unwrap_or(0), key: format!("{role}\0{name}\0{href}"),
+                 body: format!("{role} \"{name}\"{}{}{to}", str_(&e["extra"]), show_value(e["value"].as_str().unwrap_or(""))),
+                 inside: e["inside"].as_bool() != Some(false) }
+        }).collect();
+        let text = d["region"].as_str().or(d["text"].as_str()).unwrap_or("").to_string();
+        Page { title: str_(&d["title"]), url: str_(&d["url"]), status: d["status"].as_u64().unwrap_or(0), els, text, problems }
+    }
+
+    fn warn(&self) -> String {
+        if self.status >= 400 {
+            format!("HTTP {}: this page does not exist or failed. Don't guess URLs; go back and click a [ref] \
+                     link, or use a URL shown after → in a snapshot.\n", self.status)
+        } else {
+            String::new()
+        }
+    }
+
+    fn problems(&self) -> String {
+        // said even when clean, so the model knows the check ran
+        if self.problems.is_empty() { return "\n\nNo console errors or failed requests.".to_string() }
+        let more = self.problems.len().saturating_sub(MAX_PROBLEMS);
+        format!("\n\nPage problems since the last action (console errors, failed requests):\n{}{}",
+                self.problems.iter().take(MAX_PROBLEMS).map(|p| format!("- {p}")).collect::<Vec<_>>().join("\n"),
+                if more > 0 { format!("\n- … {more} more") } else { String::new() })
+    }
+
+    fn render(&self, page: usize) -> String {
+        let shown: Vec<&El> = self.els.iter().filter(|e| e.inside).collect();
+        let mut lines: Vec<String> = shown.iter().take(MAX_ELEMENTS).map(|e| format!("[{}] {}", e.r, e.body)).collect();
+        if shown.len() > MAX_ELEMENTS {
+            lines.push(format!("… {} more elements (scroll to see others)", shown.len() - MAX_ELEMENTS));
+        }
+        let text: Vec<char> = self.text.chars().collect();
+        let pages = text.len().div_ceil(TEXT_PAGE).max(1);
+        let page = page.clamp(1, pages);
+        let chunk: String = text[((page - 1) * TEXT_PAGE).min(text.len())..(page * TEXT_PAGE).min(text.len())].iter().collect();
+        let more = if page < pages { format!("\n(text page {page}/{pages}; snapshot(page={}) for more)", page + 1) } else { String::new() };
+        format!("{}Title: {}\nURL: {}\n\nElements:\n{}\n\nText:\n{chunk}{more}{}", self.warn(), self.title, self.url,
+                lines.join("\n"), self.problems())
+    }
+}
+
+/// What changed between two reads of the page: URL/title, elements added (+), removed (-) or
+/// changed (~, e.g. a value), and text lines added or removed. Problems are always summarised.
+fn diff(before: &Page, after: &Page) -> String {
+    let mut out = vec![];
+    if before.url != after.url {
+        out.push(format!("URL: {} → {}", before.url, after.url));
+    }
+    if before.title != after.title {
+        out.push(format!("Title: \"{}\" → \"{}\"", before.title, after.title));
+    }
+    // match elements by identity, in order, so repeated ones ("Delete" per row) pair up one to one
+    let mut old: std::collections::HashMap<&str, std::collections::VecDeque<&El>> = std::collections::HashMap::new();
+    for e in &before.els {
+        old.entry(&e.key).or_default().push_back(e);
+    }
+    let (mut els, mut shifted) = (vec![], false);
+    for e in &after.els {
+        match old.get_mut(e.key.as_str()).and_then(|q| q.pop_front()) {
+            None => els.push(format!("+ [{}] {}", e.r, e.body)),
+            Some(o) => {
+                shifted |= o.r != e.r;
+                if o.body != e.body {
+                    els.push(format!("~ [{}] {}  (was: {})", e.r, e.body, o.body));
+                }
+            }
+        }
+    }
+    let mut gone: Vec<&El> = old.into_values().flatten().collect();
+    gone.sort_by_key(|e| e.r);
+    els.extend(gone.iter().map(|e| format!("- {}", e.body)));
+    if !els.is_empty() {
+        let more = els.len().saturating_sub(MAX_ELEMENTS);
+        els.truncate(MAX_ELEMENTS);
+        if more > 0 {
+            els.push(format!("… {more} more element changes; snapshot() for the whole page"));
+        }
+        out.push(format!("Elements:\n{}", els.join("\n")));
+    }
+    if shifted {
+        out.push("Refs were renumbered: use the refs shown here, or snapshot() before clicking others.".into());
+    }
+    let (added, removed) = line_diff(&before.text, &after.text);
+    let cap = |v: Vec<&str>, sign: &str| {
+        let more = v.len().saturating_sub(MAX_DIFF_LINES);
+        let mut l: Vec<String> = v.iter().take(MAX_DIFF_LINES).map(|s| format!("{sign} {}", s.chars().take(200).collect::<String>())).collect();
+        if more > 0 {
+            l.push(format!("{sign} … {more} more lines"));
+        }
+        l
+    };
+    if !added.is_empty() || !removed.is_empty() {
+        let mut l = cap(added, "+");
+        l.extend(cap(removed, "-"));
+        out.push(format!("Text:\n{}", l.join("\n")));
+    }
+    let body = if out.is_empty() { "No visible change on the page.".to_string() } else { out.join("\n\n") };
+    format!("{}Changes since the last snapshot (full=true or snapshot() for the whole page):\n{body}{}", after.warn(), after.problems())
+}
+
+/// Non-blank lines of `b` not in `a`, and of `a` not in `b`, counting repeats.
+fn line_diff<'a>(a: &'a str, b: &'a str) -> (Vec<&'a str>, Vec<&'a str>) {
+    let lines = |s: &'a str| s.lines().map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>();
+    let (a, b) = (lines(a), lines(b));
+    let minus = |x: &[&'a str], y: &[&'a str]| {
+        let mut left: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for l in y {
+            *left.entry(l).or_default() += 1;
+        }
+        x.iter().filter(|l| match left.get_mut(**l) { Some(n) if *n > 0 => { *n -= 1; false } _ => true }).copied().collect::<Vec<_>>()
+    };
+    (minus(&b, &a), minus(&a, &b))
+}
 
 struct Ws {
     s: TcpStream,
@@ -209,6 +369,7 @@ struct Browser {
     child: Option<Child>,
     ws: Ws,
     refs: Vec<Value>,
+    last: Option<Page>, // what the model last saw, for click/type diffs
 }
 
 static B: LazyLock<Mutex<Option<Browser>>> = LazyLock::new(|| Mutex::new(None));
@@ -282,7 +443,7 @@ fn connect(port: u16, child: Option<Child>) -> Result<Browser, String> {
     // console errors, exceptions and failed requests come back with each snapshot
     ws.call("Runtime.enable", json!({}))?;
     ws.call("Network.enable", json!({}))?;
-    Ok(Browser { child, ws, refs: vec![] })
+    Ok(Browser { child, ws, refs: vec![], last: None })
 }
 
 pub fn shutdown() {
@@ -375,43 +536,40 @@ impl Browser {
         }
     }
 
-    fn snapshot(&mut self, page: usize) -> Result<String, String> {
+    /// Read the page; `region` limits the shown elements and text to a CSS selector.
+    fn read(&mut self, region: Option<&str>) -> Result<Page, String> {
         self.wait_ready();
-        let d = self.eval(SNAPSHOT_JS)?;
-        self.refs = d["elements"].as_array().cloned().unwrap_or_default();
-        let mut lines: Vec<String> = self.refs.iter().take(MAX_ELEMENTS).map(|e| {
-            let href = e["href"].as_str().unwrap_or("");
-            let to = if href.is_empty() || href.starts_with("javascript:") { String::new() } else {
-                format!(" → {}", href.chars().take(80).collect::<String>())
-            };
-            format!("[{}] {} \"{}\"{}{to}", e["ref"], e["role"].as_str().unwrap_or(""), e["name"].as_str().unwrap_or(""),
-                    e["extra"].as_str().unwrap_or(""))
-        }).collect();
-        if self.refs.len() > MAX_ELEMENTS {
-            lines.push(format!("… {} more elements (scroll to see others)", self.refs.len() - MAX_ELEMENTS));
+        let d = self.eval(&SNAPSHOT_JS.replace("__ROOT__", &region.map_or("null".into(), |r| json!(r).to_string())))?;
+        if d["missing"] == true {
+            return Err(format!("no element matches selector {}", region.unwrap_or("")));
         }
-        let text: Vec<char> = d["text"].as_str().unwrap_or("").chars().collect();
-        let pages = text.len().div_ceil(TEXT_PAGE).max(1);
-        let page = page.clamp(1, pages);
-        let chunk: String = text[((page - 1) * TEXT_PAGE).min(text.len())..(page * TEXT_PAGE).min(text.len())].iter().collect();
-        let more = if page < pages { format!("\n(text page {page}/{pages}; snapshot(page={}) for more)", page + 1) } else { String::new() };
-        let status = d["status"].as_u64().unwrap_or(0);
-        let warn = if status >= 400 {
-            format!("HTTP {status}: this page does not exist or failed. Don't guess URLs; go back and click a [ref] \
-                     link, or use a URL shown after → in a snapshot.\n")
-        } else {
-            String::new()
-        };
+        self.refs = d["elements"].as_array().cloned().unwrap_or_default();
         let problems = std::mem::take(&mut self.ws.problems);
-        // said even when clean, so the model knows the check ran
-        let problems = if problems.is_empty() { "\n\nNo console errors or failed requests.".to_string() } else {
-            let more = problems.len().saturating_sub(MAX_PROBLEMS);
-            format!("\n\nPage problems since the last action (console errors, failed requests):\n{}{}",
-                    problems.iter().take(MAX_PROBLEMS).map(|p| format!("- {p}")).collect::<Vec<_>>().join("\n"),
-                    if more > 0 { format!("\n- … {more} more") } else { String::new() })
+        Ok(Page::from_json(&d, problems))
+    }
+
+    fn snapshot(&mut self, page: usize, region: Option<&str>) -> Result<String, String> {
+        let p = self.read(region)?;
+        let out = p.render(page);
+        // a region view is partial; diffing the next action against it would report the rest as new
+        self.last = if region.is_none() { Some(p) } else { None };
+        Ok(out)
+    }
+
+    /// After click/type: what changed since the last snapshot, or the whole page when asked
+    /// for (full=true), when there is nothing to compare with, or when the diff isn't shorter.
+    fn changed(&mut self, full: bool) -> Result<String, String> {
+        let p = self.read(None)?;
+        let whole = p.render(1);
+        let out = match (&self.last, full) {
+            (Some(before), false) => {
+                let d = diff(before, &p);
+                if d.len() < whole.len() { d } else { whole }
+            }
+            _ => whole,
         };
-        Ok(format!("{warn}Title: {}\nURL: {}\n\nElements:\n{}\n\nText:\n{chunk}{more}{problems}", d["title"].as_str().unwrap_or(""),
-                   d["url"].as_str().unwrap_or(""), lines.join("\n")))
+        self.last = Some(p);
+        Ok(out)
     }
 
     fn el(&self, r: i64) -> Result<&Value, String> {
@@ -489,9 +647,12 @@ pub fn call(name: &str, a: &Value, headless: bool, allow: &[String]) -> String {
                     return Err(format!("{e} loading {url}"));
                 }
                 sleep(300);
-                b.snapshot(1)
+                b.snapshot(1, None)
             }
-            "snapshot" => b.snapshot(a["page"].as_u64().unwrap_or(1) as usize),
+            "snapshot" => {
+                let region = s("selector");
+                b.snapshot(a["page"].as_u64().unwrap_or(1) as usize, Some(region.as_str()).filter(|r| !r.is_empty()))
+            }
             "click" => {
                 let (x, y) = b.centre(r)?;
                 for t in ["mousePressed", "mouseReleased"] {
@@ -503,7 +664,7 @@ pub fn call(name: &str, a: &Value, headless: bool, allow: &[String]) -> String {
                     b.eval("history.back()")?;
                     return Ok(e);
                 }
-                b.snapshot(1)
+                b.changed(a["full"].as_bool() == Some(true))
             }
             "type" => {
                 let el = b.el(r)?;
@@ -524,7 +685,7 @@ pub fn call(name: &str, a: &Value, headless: bool, allow: &[String]) -> String {
                     b.key("Enter", 13, "\r")?;
                     sleep(600);
                 }
-                b.snapshot(1)
+                b.changed(a["full"].as_bool() == Some(true))
             }
             "select" => {
                 b.el(r)?;
@@ -535,17 +696,17 @@ pub fn call(name: &str, a: &Value, headless: bool, allow: &[String]) -> String {
                 if ok != true {
                     return Ok(format!("error: no option \"{}\" in [{r}]", s("option")));
                 }
-                b.snapshot(1)
+                b.snapshot(1, None)
             }
             "scroll" => {
                 b.eval(&format!("window.scrollBy(0, {})", if s("direction") == "up" { -600 } else { 600 }))?;
                 sleep(300);
-                b.snapshot(1)
+                b.snapshot(1, None)
             }
             "back" => {
                 b.eval("history.back()")?;
                 sleep(500);
-                b.snapshot(1)
+                b.snapshot(1, None)
             }
             "screenshot" => {
                 let shot = b.ws.call("Page.captureScreenshot", json!({"format": "jpeg", "quality": 60}))?;
@@ -564,9 +725,9 @@ pub fn schemas() -> Vec<Value> {
     use crate::tools::schema;
     vec![
         schema("browse", "Open a URL in a real browser (click, type, scroll tools follow).", &[("url", "string")], &["url"]),
-        schema("snapshot", "Re-read the current page. page=2.. for more text. Console errors and failed requests since the last action are listed at the end.", &[("page", "integer")], &[]),
-        schema("click", "Click element [ref] from the latest snapshot.", &[("ref", "integer")], &["ref"]),
-        schema("type", "Fill element [ref] with text; submit=true presses Enter.", &[("ref", "integer"), ("text", "string"), ("submit", "boolean")], &["ref", "text"]),
+        schema("snapshot", "Re-read the whole current page. page=2.. for more text; selector=CSS selector shows only that region's elements and text. Console errors and failed requests since the last action are listed at the end.", &[("page", "integer"), ("selector", "string")], &[]),
+        schema("click", "Click element [ref] from the latest snapshot. Returns only what changed on the page (+ added, - removed, ~ changed elements and text, URL/title, console errors); full=true returns the whole page instead.", &[("ref", "integer"), ("full", "boolean")], &["ref"]),
+        schema("type", "Fill element [ref] with text; submit=true presses Enter. Returns only what changed on the page; full=true returns the whole page instead.", &[("ref", "integer"), ("text", "string"), ("submit", "boolean"), ("full", "boolean")], &["ref", "text"]),
         schema("select", "Choose an option (by visible label) in select [ref].", &[("ref", "integer"), ("option", "string")], &["ref", "option"]),
         schema("scroll", "Scroll the page up or down.", &[("direction", "string")], &[]),
         schema("back", "Go back one page.", &[], &[]),
@@ -597,5 +758,72 @@ mod url_tests {
         let extra: Vec<String> = r("localhost:57961").unwrap().iter().map(|x| x[7..].to_string()).collect();
         assert!(check_url("http://localhost:57961/", &extra).is_none() && check_url("http://localhost:57962/", &extra).is_some());
         assert!(check_url("http://localhost:9/", &["localhost".to_string()]).is_none(), "a bare host allows every port");
+    }
+}
+
+#[cfg(test)]
+mod diff_tests {
+    use super::{diff, show_value, Page};
+    use serde_json::{json, Value};
+
+    fn page(url: &str, title: &str, els: Value, text: &str) -> Page {
+        Page::from_json(&json!({"url": url, "title": title, "status": 200, "elements": els, "text": text}), vec![])
+    }
+
+    #[test]
+    fn long_values_carry_a_marker() {
+        let v = "Submitted by the agent while testing the form, end to end, ok?";
+        assert_eq!(show_value("hi"), " value=\"hi\"");
+        assert_eq!(show_value(""), "");
+        let s = show_value(&v.repeat(2));
+        assert!(s.ends_with(&format!("…({} chars)\"", v.len() * 2)), "{s}");
+        assert_eq!(show_value(v), format!(" value=\"{v}\""), "a {}-char value is shown whole", v.len());
+    }
+
+    #[test]
+    fn diff_reports_only_changes() {
+        let a = page("http://x/", "Form", json!([
+            {"ref": 1, "role": "text", "name": "Name", "extra": "", "value": ""},
+            {"ref": 2, "role": "button", "name": "Save", "extra": ""},
+            {"ref": 3, "role": "link", "name": "Help", "extra": "", "href": "/help"}]), "Welcome\nFill the form");
+        let b = page("http://x/", "Form", json!([
+            {"ref": 1, "role": "text", "name": "Name", "extra": "", "value": "Ann"},
+            {"ref": 2, "role": "button", "name": "Save", "extra": ""},
+            {"ref": 3, "role": "link", "name": "Help", "extra": "", "href": "/help"}]), "Welcome\nFill the form");
+        let d = diff(&a, &b);
+        assert!(d.contains("~ [1] text \"Name\" value=\"Ann\"  (was: text \"Name\")"), "{d}");
+        assert!(!d.contains("Save\"") && !d.contains("Help") && !d.contains("URL:") && !d.contains("renumbered"), "{d}");
+        assert!(d.contains("No console errors"), "{d}");
+        assert!(diff(&a, &a).contains("No visible change"));
+    }
+
+    #[test]
+    fn diff_shows_navigation_additions_removals_and_shifts() {
+        let a = page("http://x/", "Form", json!([
+            {"ref": 1, "role": "button", "name": "Save", "extra": ""},
+            {"ref": 2, "role": "button", "name": "Delete", "extra": ""},
+            {"ref": 3, "role": "button", "name": "Delete", "extra": ""}]), "Rows\nrow a\nrow b");
+        let mut b = page("http://x/done", "Saved", json!([
+            {"ref": 1, "role": "status", "name": "Saved!", "extra": ""},
+            {"ref": 2, "role": "button", "name": "Save", "extra": ""},
+            {"ref": 3, "role": "button", "name": "Delete", "extra": ""}]), "Rows\nrow a\nSaved!");
+        b.problems = vec!["console error: boom".into()];
+        let d = diff(&a, &b);
+        assert!(d.contains("URL: http://x/ → http://x/done") && d.contains("Title: \"Form\" → \"Saved\""), "{d}");
+        assert!(d.contains("+ [1] status \"Saved!\""), "{d}");
+        assert_eq!(d.matches("- button \"Delete\"").count(), 1, "one of two Deletes went: {d}");
+        assert!(d.contains("renumbered"), "{d}");
+        assert!(d.contains("+ Saved!") && d.contains("- row b") && !d.contains("row a"), "{d}");
+        assert!(d.contains("console error: boom"), "{d}");
+    }
+
+    #[test]
+    fn region_render_keeps_only_inside_elements_and_text() {
+        let p = Page::from_json(&json!({"url": "u", "title": "t", "elements": [
+            {"ref": 1, "role": "button", "name": "Out", "extra": "", "inside": false},
+            {"ref": 2, "role": "button", "name": "In", "extra": "", "inside": true}],
+            "text": "whole page", "region": "just the form"}), vec![]);
+        let r = p.render(1);
+        assert!(r.contains("[2] button \"In\"") && !r.contains("Out") && r.contains("just the form") && !r.contains("whole page"), "{r}");
     }
 }

@@ -135,12 +135,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 /// until hover). Re-applied at 10 Hz because SwiftUI can reset them on window changes.
 @MainActor
 enum TrafficLights {
-    private static var shown: [ObjectIdentifier: Bool] = [:]
-
     static func start() {
         Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
             MainActor.assumeIsolated {
-                _ = NSEvent.mouseLocation
                 for w in NSApp.windows where w.isVisible && w.styleMask.contains(.titled) && w.sheetParent == nil {
                     set(w, true)   // close / minimise / zoom always visible; the title bar stays hidden
                 }
@@ -149,13 +146,13 @@ enum TrafficLights {
     }
 
     private static func set(_ w: NSWindow, _ show: Bool) {
-        let id = ObjectIdentifier(w)
-        guard shown[id] != show else { return }
-        shown[id] = show
-        let buttons = [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton].compactMap { w.standardWindowButton($0) }
-        NSAnimationContext.runAnimationGroup { c in
-            c.duration = show ? 0.12 : 0.25
-            for b in buttons { b.animator().alphaValue = show ? 1 : 0 }
+        // SwiftUI's hidden title bar can hide the buttons again after a window change, so this
+        // re-asserts them every tick rather than once
+        for t in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+            guard let b = w.standardWindowButton(t) else { continue }
+            if b.isHidden != !show { b.isHidden = !show }
+            if b.alphaValue != (show ? 1 : 0) { b.alphaValue = show ? 1 : 0 }
+            b.superview?.superview?.isHidden = false
         }
     }
 }

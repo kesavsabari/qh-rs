@@ -26,7 +26,6 @@ struct ContentView: View {
         .animation(still ? nil : .smooth, value: ws.compact)
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { ws.fitCompact($0) }
         .sheet(isPresented: $ws.palette) { Palette().environmentObject(ws) }
-        .toolbar(.hidden, for: .windowToolbar)
     }
 
     private var card: some View {

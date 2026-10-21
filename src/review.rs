@@ -312,18 +312,33 @@ pub fn take_events() -> Vec<Value> {
 /// Wait until every review in `ids` is answered, `wait` passes, or `stop()`; then mark the
 /// unanswered ones as given up. Returns the (to, answer) pairs that came in.
 pub fn wait_for(ids: &[u64], wait: Duration, stop: &dyn Fn() -> bool) -> Vec<(String, Option<String>)> {
+    until(ids, wait, stop, &|| false);
+    collect(ids)
+}
+
+/// Wait until every review in `ids` is answered or `stop()`; past `wait`, only while `more()` says
+/// one is still being worked on, and never past REVIEW_CAP.
+fn until(ids: &[u64], wait: Duration, stop: &dyn Fn() -> bool, more: &dyn Fn() -> bool) {
     let t0 = Instant::now();
     loop {
         let done = { let v = REVIEWS.lock().unwrap(); ids.iter().all(|id| v.iter().any(|r| r.id == *id && r.answer.is_some())) };
-        if done || t0.elapsed() >= wait || stop() { break }
-        std::thread::sleep(Duration::from_millis(200).min(wait.saturating_sub(t0.elapsed())));
+        let el = t0.elapsed();
+        if done || stop() || el >= REVIEW_CAP || (el >= wait && !more()) { break }
+        std::thread::sleep(Duration::from_millis(200));
     }
+}
+
+/// The (to, answer) pairs so far; the unanswered ones are marked as given up.
+fn collect(ids: &[u64]) -> Vec<(String, Option<String>)> {
     let mut v = REVIEWS.lock().unwrap();
     v.iter_mut().filter(|r| ids.contains(&r.id)).map(|r| {
         if r.answer.is_none() { r.gave_up = true }
         (r.to.clone(), r.answer.clone())
     }).collect()
 }
+
+/// However long a reviewer who has the request and is online takes, a push waits no longer.
+const REVIEW_CAP: Duration = Duration::from_secs(300);
 
 // ---- the whole request ----
 
@@ -436,7 +451,15 @@ pub fn before_push(session: &str, cwd: &Path, cfg: &crate::config::Config, notic
     if !cfg.review { return None }
     let (ids, line) = request(session, cwd).ok()?;
     notice(format!("{line} · waiting up to {}s before pushing", cfg.review_wait));
-    let got = wait_for(&ids, Duration::from_secs(cfg.review_wait), stop);
+    // past review_wait, keep holding while an owner who has the request is online: their agent is on it
+    let told = std::cell::Cell::new(false);
+    let more = || {
+        let on = { let v = REVIEWS.lock().unwrap(); v.iter().filter(|r| ids.contains(&r.id) && r.answer.is_none()).any(|r| crate::team::reviewing(r.id, &r.to)) };
+        if on && !told.replace(true) { notice("still reviewing: their agent has it and they're online, so the push keeps waiting (5 min at most)".into()) }
+        on
+    };
+    until(&ids, Duration::from_secs(cfg.review_wait), stop, &more);
+    let got = collect(&ids);
     let text = summary(&got);
     notice(text.lines().next().unwrap_or("").to_string());
     let pick = |v: &str| got.iter().filter_map(|(t, a)| a.as_ref().filter(|a| verdict(a) == v).map(|a| (t.clone(), a.clone()))).collect();
@@ -478,6 +501,16 @@ pub fn tests_track(id: u64, repo: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_push_keeps_waiting_while_the_reviewer_is_on_it() {
+        track(Review { id: 900_101, repo: "t/w".into(), session: "main".into(), to: "bob/main".into(), files: vec![], head: String::new(), answer: None, ts: now(), gave_up: false });
+        let t0 = Instant::now();
+        until(&[900_101], Duration::ZERO, &|| false, &|| t0.elapsed() < Duration::from_millis(400));
+        let e = t0.elapsed();
+        assert!(e >= Duration::from_millis(400) && e < Duration::from_secs(2), "{e:?}: held while they work, then went ahead");
+        assert_eq!(collect(&[900_101]), vec![("bob/main".to_string(), None)]);
+    }
 
     #[test]
     fn codeowners_parse_and_match_like_github() {

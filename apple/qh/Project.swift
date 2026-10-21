@@ -212,7 +212,7 @@ final class Project: ObservableObject, Identifiable {
     func loadSessions() { client.send(["type": "sessions"]) }
     func deleteSession(_ s: SavedSession) { client.send(["type": "delete_session", "id": s.id]) }
     func resume(_ s: SavedSession) {
-        if let t = openSessions[s.id] { active = t; return }
+        if let t = openSessions[s.id], tabs.contains(where: { $0.name == t }) { active = t; return }
         client.send(["type": "resume", "id": s.id])
     }
     func loadTranscript(_ login: String, _ session: String) {
@@ -371,7 +371,9 @@ final class Project: ObservableObject, Identifiable {
             let list = e["tabs"] as? [[String: Any]] ?? []
             let names = list.compactMap { $0["name"] as? String }
             for t in list { update(tab(t["name"] as? String ?? ""), t) }
+            let before = tabs.count
             tabs.removeAll { !names.contains($0.name) }
+            if tabs.count != before { loadSessions() }   // a closed tab frees its session in the sidebar
             if !names.contains(active) { active = names.first ?? "main" }
         case "text":
             tab(tabName).stream(e["delta"] as? String ?? "")

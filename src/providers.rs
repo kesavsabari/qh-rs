@@ -172,6 +172,12 @@ pub fn parse_model(id: &str) -> (String, String) {
     }
 }
 
+/// "chatgpt" alone names a provider, not a model; as a model it would go to the local Ollama.
+pub fn bare_provider(id: &str) -> Option<String> {
+    (!id.contains(':') && id != "ollama" && (get(id).is_some() || PRESETS.iter().any(|p| p.0 == id)))
+        .then(|| format!("{id} is a provider, not a model: pick one like {id}:<model> (`/model {id}` lists them)"))
+}
+
 /// How a model is shown and typed: "qwen3.5:9b" for the local Ollama, else "provider:model".
 pub fn display(provider: &str, model: &str) -> String {
     if provider.is_empty() || provider == "ollama" { model.to_string() } else { format!("{provider}:{model}") }
@@ -325,4 +331,14 @@ pub fn test(name: &str) -> Result<usize, String> {
         }
     }
     models(&p).map(|m| m.len())
+}
+
+#[cfg(test)]
+mod bare_tests {
+    #[test]
+    fn a_bare_provider_name_is_not_taken_for_a_local_model() {
+        assert!(super::bare_provider("chatgpt").is_some_and(|e| e.contains("chatgpt:<model>")));
+        assert!(super::bare_provider("chatgpt:gpt-5.6-terra").is_none());
+        assert!(super::bare_provider("qwen3.5:9b").is_none() && super::bare_provider("llama3").is_none() && super::bare_provider("ollama").is_none());
+    }
 }

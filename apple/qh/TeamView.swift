@@ -143,9 +143,13 @@ struct ChannelPage: View {
                                     Text(m.who).font(Theme.sans(13, medium: true)).foregroundStyle(Theme.ink)
                                     Text(m.when).font(Theme.mono(10.5)).foregroundStyle(Theme.faint)
                                 }
-                                Text(Mentions.render(m.text, project)).font(Theme.sans(14)).foregroundStyle(Theme.ink).lineSpacing(3).textSelection(.enabled)
-                                    .padding(.leading, m.ping ? 8 : 0)
-                                    .overlay(alignment: .leading) { if m.ping { Rectangle().fill(Theme.accent).frame(width: 2) } }
+                                if let c = ReviewNote(m.text) {
+                                    ReviewNoteCard(note: c)
+                                } else {
+                                    Text(Mentions.render(m.text, project)).font(Theme.sans(14)).foregroundStyle(Theme.ink).lineSpacing(3).textSelection(.enabled)
+                                        .padding(.leading, m.ping ? 8 : 0)
+                                        .overlay(alignment: .leading) { if m.ping { Rectangle().fill(Theme.accent).frame(width: 2) } }
+                                }
                             }
                         }
                     }
@@ -436,6 +440,78 @@ struct HoldCard: View {
         let lines = t.components(separatedBy: "\n")
         guard let i = lines.firstIndex(where: { $0.hasPrefix("@@") || $0.hasPrefix("+++ ") }) else { return (t, []) }
         return (lines[..<i].joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines), Array(lines[i...]))
+    }
+}
+
+/// A machine message in a DM (review hand-off, `#qh-hold`, `#qh-decide`) read as a card, not a paragraph.
+struct ReviewNote {
+    let title: String
+    let verdict: String
+    let reason: String
+    let diff: [String]
+    let commit: String
+
+    init?(_ t: String) {
+        let lines = t.components(separatedBy: "\n")
+        let tag = lines.last { $0.hasPrefix("#qh-hold ") || $0.hasPrefix("#qh-decide ") }
+        guard t.hasPrefix("[review]") || tag != nil else { return nil }
+        let words = tag?.split(separator: " ").map(String.init) ?? []
+        commit = words.count > 1 ? String(words[1].prefix(7)) : ""
+        let body = lines.filter { !$0.hasPrefix("#qh-") }
+        let d = body.firstIndex { $0.hasPrefix("+++ ") || $0.hasPrefix("@@") || $0.hasPrefix("diff --git") } ?? body.count
+        diff = Array(body[d...]).filter { !$0.isEmpty }
+        var r = body[..<d].joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        if r.hasPrefix("[review]") { r = String(r.dropFirst(8)).trimmingCharacters(in: .whitespaces) }
+        if let v = ["CHANGES", "HANDOFF", "OK", "APPROVE"].first(where: { r.contains($0 + " —") }),
+           let range = r.range(of: v + " —") {
+            verdict = v
+            let head = r[..<range.lowerBound].replacingOccurrences(of: "Your agent said:", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+            title = head.isEmpty ? "Review" : head
+            reason = r[range.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
+        } else if words.first == "#qh-decide" {
+            verdict = words.count > 2 && words[2] == "approve" ? "APPROVED" : "SENT BACK"
+            title = verdict == "APPROVED" ? "Push approved" : "Push sent back"
+            reason = r
+        } else {
+            verdict = ""; title = "Review"; reason = r
+        }
+    }
+}
+
+struct ReviewNoteCard: View {
+    let note: ReviewNote
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "checkmark.shield").font(.system(size: 12)).foregroundStyle(Theme.soft)
+                Text(note.title).font(Theme.sans(13, medium: true)).foregroundStyle(Theme.ink).lineLimit(2)
+                Spacer(minLength: 8)
+                if !note.verdict.isEmpty {
+                    Text(note.verdict).font(Theme.mono(10.5)).foregroundStyle(note.verdict == "APPROVED" || note.verdict == "OK" ? Theme.soft : Theme.accent)
+                        .padding(.horizontal, 7).padding(.vertical, 2)
+                        .background(Capsule().stroke(Theme.faint.opacity(0.5)))
+                }
+                if !note.commit.isEmpty { Text(note.commit).font(Theme.mono(11)).foregroundStyle(Theme.faint) }
+            }
+            if !note.reason.isEmpty {
+                Markdown(text: note.reason)
+            }
+            if !note.diff.isEmpty {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(note.diff.enumerated()), id: \.offset) { _, l in
+                        Text(l).font(Theme.mono(12)).lineLimit(1)
+                            .foregroundStyle(l.hasPrefix("@@") || l.hasPrefix("+++") ? Theme.faint : l.hasPrefix("+") ? Color.green : l.hasPrefix("-") ? Color.red : Theme.ink)
+                    }
+                }
+                .padding(10).frame(maxWidth: .infinity, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Theme.paper))
+                .textSelection(.enabled)
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Theme.side))
     }
 }
 

@@ -443,13 +443,17 @@ struct HoldCard: View {
     }
 }
 
-/// A machine message in a DM (review hand-off, `#qh-hold`, `#qh-decide`) read as a card, not a paragraph.
+/// A machine message in a DM (review hand-off, `#qh-hold`, `#qh-decide`) read as a card, not a paragraph:
+/// who wants what, the verdict, one short line per point, the change folded away.
 struct ReviewNote {
+    struct Point: Hashable { let loc: String; let text: String }
     let title: String
     let verdict: String
-    let reason: String
+    let points: [Point]
+    let files: [String]
     let diff: [String]
     let commit: String
+    let isHold: Bool
 
     init?(_ t: String) {
         let lines = t.components(separatedBy: "\n")
@@ -457,51 +461,103 @@ struct ReviewNote {
         guard t.hasPrefix("[review]") || tag != nil else { return nil }
         let words = tag?.split(separator: " ").map(String.init) ?? []
         commit = words.count > 1 ? String(words[1].prefix(7)) : ""
+        isHold = words.first == "#qh-hold"
         let body = lines.filter { !$0.hasPrefix("#qh-") }
         let d = body.firstIndex { $0.hasPrefix("+++ ") || $0.hasPrefix("@@") || $0.hasPrefix("diff --git") } ?? body.count
         diff = Array(body[d...]).filter { !$0.isEmpty }
-        var r = body[..<d].joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        files = diff.compactMap { $0.hasPrefix("+++ b/") ? String($0.dropFirst(6)) : nil }
+        var r = body[..<d].joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
         if r.hasPrefix("[review]") { r = String(r.dropFirst(8)).trimmingCharacters(in: .whitespaces) }
-        if let v = ["CHANGES", "HANDOFF", "OK", "APPROVE"].first(where: { r.contains($0 + " —") }),
-           let range = r.range(of: v + " —") {
-            verdict = v
-            let head = r[..<range.lowerBound].replacingOccurrences(of: "Your agent said:", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
-            title = head.isEmpty ? "Review" : head
-            reason = r[range.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
-        } else if words.first == "#qh-decide" {
-            verdict = words.count > 2 && words[2] == "approve" ? "APPROVED" : "SENT BACK"
-            title = verdict == "APPROVED" ? "Push approved" : "Push sent back"
-            reason = r
+        var why = r
+        var v = ""
+        for k in ["CHANGES", "HANDOFF", "OK"] {
+            if let range = r.range(of: k + " —") { v = k; why = String(r[range.upperBound...]); break }
+        }
+        if words.first == "#qh-decide" {
+            let ok = words.count > 2 && words[2] == "approve"
+            verdict = ok ? "Approved" : "Sent back"
+            title = ok ? "Push approved" : "Push sent back"
         } else {
-            verdict = ""; title = "Review"; reason = r
+            verdict = ["CHANGES": "Changes needed", "HANDOFF": "Needs your call", "OK": "Looks good"][v] ?? ""
+            let who = r.components(separatedBy: " wants to push").first.map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
+            title = r.contains(" wants to push") && !who.isEmpty ? "\(who) wants to push" : "Review"
+        }
+        points = ReviewNote.split(why)
+    }
+
+    /// "`shop.py:12`: dividing… keep `/ 100`. `STAFF90` and…" → one point per sentence, the leading file:line pulled out.
+    static func split(_ s: String) -> [Point] {
+        var out: [String] = []
+        var cur = ""
+        var tick = false
+        for ch in s {
+            if ch == "`" { tick.toggle() }
+            cur.append(ch)
+            if !tick && (ch == "." || ch == ";") { out.append(cur); cur = "" }
+        }
+        out.append(cur)
+        return out.compactMap { raw in
+            var t = raw.trimmingCharacters(in: CharacterSet.whitespaces.union(CharacterSet(charactersIn: ".;")))
+            guard t.count > 2 else { return nil }
+            var loc = ""
+            if let m = t.range(of: #"^`?[\w./-]+\.\w+(:\d+(-\d+)?)?`?:\s*"#, options: .regularExpression) {
+                loc = t[m].trimmingCharacters(in: CharacterSet(charactersIn: "`: "))
+                t = String(t[m.upperBound...])
+            }
+            return Point(loc: loc, text: t.prefix(1).uppercased() + t.dropFirst())
         }
     }
 }
 
 struct ReviewNoteCard: View {
     let note: ReviewNote
+    @EnvironmentObject var ws: Workspace
+    @State private var showDiff = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                Image(systemName: "checkmark.shield").font(.system(size: 12)).foregroundStyle(Theme.soft)
-                Text(note.title).font(Theme.sans(13, medium: true)).foregroundStyle(Theme.ink).lineLimit(2)
-                Spacer(minLength: 8)
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(note.title).font(Theme.sans(14, medium: true)).foregroundStyle(Theme.ink)
                 if !note.verdict.isEmpty {
-                    Text(note.verdict).font(Theme.mono(10.5)).foregroundStyle(note.verdict == "APPROVED" || note.verdict == "OK" ? Theme.soft : Theme.accent)
-                        .padding(.horizontal, 7).padding(.vertical, 2)
-                        .background(Capsule().stroke(Theme.faint.opacity(0.5)))
+                    Text(note.verdict).font(Theme.sans(11.5, medium: true))
+                        .foregroundStyle(note.verdict == "Approved" || note.verdict == "Looks good" ? Theme.soft : Theme.accent)
+                        .padding(.horizontal, 8).padding(.vertical, 2)
+                        .background(Capsule().fill((note.verdict == "Approved" || note.verdict == "Looks good" ? Theme.soft : Theme.accent).opacity(0.12)))
                 }
+                Spacer(minLength: 8)
                 if !note.commit.isEmpty { Text(note.commit).font(Theme.mono(11)).foregroundStyle(Theme.faint) }
             }
-            if !note.reason.isEmpty {
-                Markdown(text: note.reason)
+            if !note.files.isEmpty {
+                Text(note.files.joined(separator: "  ·  ")).font(Theme.mono(11.5)).foregroundStyle(Theme.soft)
             }
-            if !note.diff.isEmpty {
+            if !note.points.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(note.points, id: \.self) { p in
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Circle().fill(Theme.faint).frame(width: 4, height: 4).offset(y: -3)
+                            VStack(alignment: .leading, spacing: 2) {
+                                if !p.loc.isEmpty { Text(p.loc).font(Theme.mono(11)).foregroundStyle(Theme.faint) }
+                                Text(Markdown.inline(p.text)).font(Theme.sans(13.5)).foregroundStyle(Theme.ink).lineSpacing(2).textSelection(.enabled)
+                            }
+                        }
+                    }
+                }
+            }
+            HStack(spacing: 14) {
+                if !note.diff.isEmpty {
+                    Button(showDiff ? "Hide change" : "Show change") { withAnimation(.easeOut(duration: 0.15)) { showDiff.toggle() } }
+                        .buttonStyle(.hand).font(Theme.sans(12.5)).foregroundStyle(Theme.soft)
+                }
+                if note.isHold {
+                    Button("Decide in Requests") { ws.teamPage = .requests }
+                        .buttonStyle(.hand).font(Theme.sans(12.5, medium: true)).foregroundStyle(Theme.accent)
+                }
+            }
+            if showDiff {
                 VStack(alignment: .leading, spacing: 0) {
-                    ForEach(Array(note.diff.enumerated()), id: \.offset) { _, l in
+                    ForEach(Array(note.diff.filter { !$0.hasPrefix("+++") && !$0.hasPrefix("---") }.enumerated()), id: \.offset) { _, l in
                         Text(l).font(Theme.mono(12)).lineLimit(1)
-                            .foregroundStyle(l.hasPrefix("@@") || l.hasPrefix("+++") ? Theme.faint : l.hasPrefix("+") ? Color.green : l.hasPrefix("-") ? Color.red : Theme.ink)
+                            .foregroundStyle(l.hasPrefix("@@") ? Theme.faint : l.hasPrefix("+") ? Color.green : l.hasPrefix("-") ? Color.red : Theme.ink)
                     }
                 }
                 .padding(10).frame(maxWidth: .infinity, alignment: .leading)
@@ -509,8 +565,8 @@ struct ReviewNoteCard: View {
                 .textSelection(.enabled)
             }
         }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(16)
+        .frame(maxWidth: 560, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Theme.side))
     }
 }

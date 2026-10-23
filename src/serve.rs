@@ -232,7 +232,7 @@ fn team_state(chan: Option<&str>) -> Value {
         let (login, online) = (p.login.clone(), p.online);
         p.sessions.into_iter().map(move |v| json!({"login": login, "online": online, "name": v.name, "status": v.status,
             "topic": v.topic, "now": v.now, "branch": v.branch, "files": v.files, "waiting": v.waiting.is_some(),
-            "edits": v.edits.into_iter().map(|(f, fns, _)| json!({"file": f, "functions": fns})).collect::<Vec<_>>()}))
+            "edits": v.edits.into_iter().map(|(f, fns, ts)| json!({"file": f, "functions": fns, "ago": crate::team::now().saturating_sub(ts)})).collect::<Vec<_>>()}))
     }).collect();
     let chan = chan.unwrap_or("#team");
     let msgs: Vec<Value> = crate::team::channel_msgs(chan).into_iter().map(|(when, who, text, ping)|

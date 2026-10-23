@@ -267,7 +267,7 @@ pub fn repo() -> Option<String> {
     cur(|s| s.repo.clone())
 }
 
-fn now() -> u64 {
+pub(crate) fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 

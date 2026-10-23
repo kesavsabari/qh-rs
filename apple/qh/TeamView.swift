@@ -5,7 +5,7 @@ struct TeamState {
     struct Channel: Identifiable { let id: String; let label: String; let unread: Int; let pinged: Bool; let online: Bool }
     struct Waiting: Identifiable { var id: String { "\(from)#\(num)" }; let from: String; let num: Int; let session: String; let text: String; let question: Bool }
     struct Msg: Identifiable { let id = UUID(); let who: String; let when: String; let text: String; let ping: Bool }
-    struct Edit { let file: String; let functions: [String] }
+    struct Edit { let file: String; let functions: [String]; var ago: Int = 0; var live: Bool { ago < 120 } }
     /// A teammate's push handed to you to decide: the reviewer's reason and the diff.
     struct Hold: Identifiable { var id: String { from + "/" + head }; let from: String; let head: String; let text: String; let ago: String; let decided: String? }
     struct Agent: Identifiable {
@@ -62,7 +62,7 @@ struct TeamState {
                   topic: a["topic"] as? String ?? "", now: a["now"] as? String ?? "", branch: a["branch"] as? String ?? "",
                   online: a["online"] as? Bool ?? false, waiting: a["waiting"] as? Bool ?? false,
                   files: a["files"] as? [String] ?? [],
-                  edits: (a["edits"] as? [[String: Any]] ?? []).map { Edit(file: $0["file"] as? String ?? "", functions: $0["functions"] as? [String] ?? []) })
+                  edits: (a["edits"] as? [[String: Any]] ?? []).map { Edit(file: $0["file"] as? String ?? "", functions: $0["functions"] as? [String] ?? [], ago: $0["ago"] as? Int ?? 0) })
         }
     }
 }

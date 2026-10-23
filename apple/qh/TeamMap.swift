@@ -61,14 +61,17 @@ struct MapPage: View {
         var out: [String: [Mark]] = [:]
         for a in project.team?.agents ?? [] where a.login != me {
             for e in a.edits {
-                out[e.file, default: []].append(Mark(who: a.login, editing: true,
-                    what: "\(a.login) · \(a.name) is editing" + (e.functions.isEmpty ? "" : " " + e.functions.joined(separator: ", "))))
+                // live only while it's still touching the file; after that it's a change waiting to be pushed
+                let fns = e.functions.isEmpty ? "" : " " + e.functions.joined(separator: ", ")
+                out[e.file, default: []].append(Mark(who: a.login, editing: e.live,
+                    what: e.live ? "\(a.login) · \(a.name) is editing" + fns : "\(a.login) · \(a.name) changed" + fns + ", not pushed yet"))
             }
             for f in a.files where !a.edits.contains(where: { $0.file == f }) {
                 out[f, default: []].append(Mark(who: a.login, editing: false, what: "\(a.login) · \(a.name) holds it"))
             }
         }
-        for c in project.changes { out[c.short, default: []].append(Mark(who: me, editing: true, what: "your agent changed it")) }
+        let working = project.tabs.contains { $0.busy }
+        for c in project.changes { out[c.short, default: []].append(Mark(who: me, editing: working, what: working ? "your agent is working on it" : "your agent changed it, not pushed yet")) }
         return out
     }
 

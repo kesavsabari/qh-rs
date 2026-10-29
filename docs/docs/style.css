@@ -116,7 +116,7 @@ a.card:hover b { color: var(--accent); }
 .upd li { margin: 6px 0; }
 .upd p { margin: 0; }
 .upd .upd-sum { margin: 0 0 8px; color: var(--soft); }
-.upd-full .upd-v span::after { content: ' · newest'; font: .78rem var(--mono); color: var(--accent); letter-spacing: 0; }
+.upd:first-child .upd-v span::after { content: ' · newest'; font: .78rem var(--mono); color: var(--accent); letter-spacing: 0; }
 .upd-brief .upd-v span { font-size: 1.25rem; }
 .upd-line { padding: 14px 0; }
 .upd-line .upd-v { margin-bottom: 4px; }

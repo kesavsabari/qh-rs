@@ -1950,6 +1950,27 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // live: reaches the real relay over tcp/tls 443
+    fn the_default_relay_carries_a_pair_over_tcp() {
+        let spec = DEFAULT_RELAY.unwrap().to_string();
+        let ((a, ra), (b, rb)) = (with_relay(spec.clone()), with_relay(spec.clone()));
+        let relay: SocketAddr = spec.parse().unwrap();
+        lock(&a.udp_off).push(relay);
+        a.block(&b.me());
+        b.block(&a.me());
+        std::thread::sleep(Duration::from_millis(300));
+        meet(&a, &b);
+        wait(&ra, 30, |e| matches!(e, Event::Up { peer, .. } if *peer == b.me())).expect("through the relay over tcp");
+        assert!(a.lines()[0].path.as_deref().is_some_and(|p| p.ends_with("over tcp")), "{:?}", a.lines());
+        a.send(&b.me(), b"over 443").unwrap();
+        assert!(wait(&rb, 10, |e| matches!(e, Event::Msg { data, .. } if data == b"over 443")).is_some());
+        b.send(&a.me(), b"and back").unwrap();
+        assert!(wait(&ra, 10, |e| matches!(e, Event::Msg { data, .. } if data == b"and back")).is_some());
+        a.stop();
+        b.stop();
+    }
+
+    #[test]
     fn a_public_relay_wont_bounce_traffic_or_hand_a_pairs_place_to_an_onlooker() {
         let port = relay_server(None, 25);
         let spec = format!("127.0.0.1:{port}");

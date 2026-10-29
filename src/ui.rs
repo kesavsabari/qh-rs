@@ -369,7 +369,12 @@ fn model_list(hub: &Hub) -> Vec<(String, String, String)> {
             out.push((v, format!("{}{}{price}", mi.id, k(mi.ctx)), group.clone()));
         }
     }
-    out
+    // recently used models first, under their own group
+    let mut top: Vec<(String, String, String)> = crate::hub::recent_models().iter()
+        .filter_map(|r| out.iter().position(|(v, _, _)| v == r).map(|i| out.remove(i)))
+        .map(|(v, l, _)| (v, l, "Recent".to_string())).collect();
+    top.extend(out);
+    top
 }
 
 pub fn emitter(tx: Sender<Ui>) -> crate::hub::Emit {
@@ -1497,6 +1502,7 @@ impl App {
                     };
                 }
                 let (p, mo) = { let s = lock(&m.set); (s.provider.clone(), s.model.clone()) };
+                self.hub.used_model(&p, &mo);
                 let (c, _) = self.hub.ctx_for(&m, true);
                 let where_ = if crate::providers::is_local(&p, &mo) { "local GPU, takes turns" } else { "cloud, runs in parallel" };
                 self.note(&a, format!("model {}{note} · {}k context · {where_}", crate::providers::display(&p, &mo), c / 1024));

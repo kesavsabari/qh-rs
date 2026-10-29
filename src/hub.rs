@@ -235,6 +235,19 @@ impl Hub {
         let _ = std::fs::write(state_dir().join("default_model"), crate::providers::display(provider, model));
     }
 
+    /// A model picked with /model: it goes to the top of the recent list and becomes what new
+    /// tabs (and the next run) start on.
+    pub fn used_model(&self, provider: &str, model: &str) {
+        let id = crate::providers::display(provider, model);
+        let mut list = recent_models();
+        list.retain(|m| *m != id);
+        list.insert(0, id);
+        list.truncate(5);
+        let _ = std::fs::create_dir_all(state_dir());
+        let _ = std::fs::write(state_dir().join("recent_models"), list.join("\n"));
+        self.set_default_model(provider, model);
+    }
+
     pub fn emit(&self, name: &str, ev: Event) {
         (self.emit)(name, ev)
     }
@@ -1259,4 +1272,10 @@ pub(crate) mod tests {
         for h in hs { h.join().unwrap(); }
         assert_eq!(*order.lock().unwrap(), vec![0, 1, 2, 3]);
     }
+}
+
+/// Models picked with /model, newest first (at most 5), kept across runs.
+pub fn recent_models() -> Vec<String> {
+    std::fs::read_to_string(state_dir().join("recent_models")).unwrap_or_default()
+        .lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect()
 }

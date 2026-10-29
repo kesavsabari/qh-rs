@@ -1,5 +1,5 @@
 // What's new and the update history, read from CHANGELOG.md so it is only ever written once.
-// The newest version shows in full, the one before by its headlines, older ones as one line.
+// Every version shows in full: its summary line, then every point.
 (() => {
   const SRC = 'https://raw.githubusercontent.com/kesavsabari/qh-rs/main/CHANGELOG.md';
   const boxes = document.querySelectorAll('[data-updates]');
@@ -26,17 +26,8 @@
     }).filter(v => /^\d/.test(v.version));  // skips "Unreleased"
   }
 
-  // the bold lead of a point, or its first clause
-  const headline = p => {
-    const b = p.match(/^\*\*(.+?)\*\*/);
-    const h = b ? b[1] : p.split(/[.:;](\s|$)/)[0];
-    return h.replace(/[.:]$/, '');
-  };
-
   const label = v => `<h3 class="upd-v"><span>${esc(v.version)}</span>${v.date ? `<time>${esc(v.date)}</time>` : ''}</h3>`;
-  const full = v => `<article class="upd upd-full">${label(v)}<ul>${v.points.map(p => `<li>${inline(p)}</li>`).join('')}</ul></article>`;
-  const brief = v => `<article class="upd upd-brief">${label(v)}<p>${v.points.map(p => inline(headline(p))).join(' · ')}</p></article>`;
-  const line = v => `<article class="upd upd-line">${label(v)}<p>${inline(v.summary || headline(v.points[0] || ''))}</p></article>`;
+  const full = v => `<article class="upd upd-full">${label(v)}${v.summary ? `<p class="upd-sum">${inline(v.summary)}</p>` : ''}<ul>${v.points.map(p => `<li>${inline(p)}</li>`).join('')}</ul></article>`;
 
   fetch(SRC, { cache: 'no-cache' }).then(r => r.ok ? r.text() : Promise.reject()).then(md => {
     const vs = parse(md);
@@ -44,7 +35,7 @@
     boxes.forEach(box => {
       box.innerHTML = box.dataset.updates === 'latest'
         ? full(vs[0])
-        : vs.map((v, i) => i === 0 ? full(v) : i === 1 ? brief(v) : line(v)).join('');
+        : vs.map(full).join('');  // every version in full, like the roadmap
     });
   }).catch(() => {});  // the link already in the box stays: the changelog on GitHub
 })();

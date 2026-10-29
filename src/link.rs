@@ -83,6 +83,13 @@ pub const RELAY_PORT: u16 = 47232;
 pub const RELAY_TCP_PORT: u16 = 443;
 const TCP_AFTER: Duration = Duration::from_secs(5); // a relay silent this long on UDP: try TCP
 const TCP_RETRY: Duration = Duration::from_secs(60);
+// Birthday punch, for a strict router on one side only: the strict side opens many sockets toward
+// the other's public address, the other sprays hellos at random ports on the strict side's IP until
+// one lands in an open hole. Rate-limited and rare, as it looks a little like a port scan.
+const BDAY_SOCKETS: usize = 256;
+const BDAY_FOR: Duration = Duration::from_secs(20);
+const BDAY_RATE: u32 = 100; // probes a second from the side that sprays
+const BDAY_EVERY: Duration = Duration::from_secs(300);
 
 /// One packet on a TCP stream: a 2-byte length, then the packet.
 pub fn write_frame(w: &mut impl Write, pkt: &[u8]) -> std::io::Result<()> {
@@ -386,6 +393,8 @@ struct Peer {
     resync_at: Instant,
     relayed: (Instant, usize),
     proved: Instant, // when we last answered a relay server's challenge for this pair
+    strict: bool,    // they said their router changes ports per destination
+    bday_at: Option<Instant>, // our last birthday punch toward them
 }
 
 struct Inner {
@@ -445,8 +454,19 @@ pub struct Link {
     events: Sender<Event>,
     mapping: Mutex<Option<Upnp>>, // the router port we asked for, given back at stop
     lanes: Mutex<HashMap<SocketAddr, Lane>>, // per relay server: is UDP getting through, or TCP
+    bday: Mutex<Bday>,
     #[cfg(test)]
     udp_off: Mutex<Vec<SocketAddr>>, // tests: this relay can't be reached over UDP
+}
+
+/// The strict side of a birthday punch: the sockets held open, and which one reaches whom once
+/// a hole worked (their packets only come back through the socket that opened it).
+#[derive(Default)]
+struct Bday {
+    socks: Vec<Arc<UdpSocket>>,
+    until: Option<Instant>,
+    route: HashMap<SocketAddr, Arc<UdpSocket>>,
+    reading: bool, // a thread reads the sockets
 }
 
 /// How we reach one relay server. UDP until it stays silent, then TCP.
@@ -523,7 +543,7 @@ impl Link {
         };
         let (tx, rx) = channel();
         let link = Arc::new(Link { inner: Arc::new(Mutex::new(inner)), v4, v6, stop: Arc::new(AtomicBool::new(false)), events: tx, mapping: Mutex::new(None),
-            lanes: Mutex::new(HashMap::new()), #[cfg(test)] udp_off: Mutex::new(vec![]) });
+            lanes: Mutex::new(HashMap::new()), bday: Mutex::default(), #[cfg(test)] udp_off: Mutex::new(vec![]) });
         link.v4.set_read_timeout(Some(Duration::from_millis(200)))?;
         // The beacon listens on a fixed port; a second qh on this machine finds it taken and goes
         // without (teammates on one machine reach each other by the LAN address anyway).
@@ -615,6 +635,9 @@ impl Link {
         v.sort();
         v.dedup();
         let mut out: Vec<String> = v.into_iter().map(|(_, s)| s).collect();
+        if strict(&lock(&self.inner)) {
+            out.push("nat=strict".into()); // older qh skips what isn't an address
+        }
         out.extend(lock(&self.inner).servers.iter().map(server_str));
         out
     }
@@ -627,8 +650,7 @@ impl Link {
     /// Whether this side looks to be behind a NAT that changes ports per destination; hole
     /// punching rarely works then, so a relay is the likely path.
     pub fn strict_nat(&self) -> bool {
-        let i = lock(&self.inner);
-        i.stun_seen.windows(2).any(|w| w[0].ip() == w[1].ip() && w[0].port() != w[1].port())
+        strict(&lock(&self.inner))
     }
 
     /// Learn (or update) a teammate: their public key and published addresses, and when (their
@@ -637,6 +659,7 @@ impl Link {
     pub fn peer(&self, public: &str, addrs: &[String], ms: u64) {
         let Ok(pk) = <[u8; 32]>::try_from(b64url_decode(public)) else { return };
         let relays: Vec<Server> = addrs.iter().filter(|a| a.starts_with("relay=")).filter_map(|a| parse_server(a)).collect();
+        let strict = addrs.iter().any(|a| a == "nat=strict");
         let addrs: Vec<SocketAddr> = addrs.iter()
             .filter_map(|a| a.rsplit_once('=').map_or(a.as_str(), |(_, x)| x).parse().ok()).collect();
         let mut i = lock(&self.inner);
@@ -651,6 +674,9 @@ impl Link {
             p.addrs_ms = p.addrs_ms.max(ms);
             if !relays.is_empty() {
                 p.relays = relays;
+            }
+            if !addrs.is_empty() {
+                p.strict = strict;
             }
             if !addrs.is_empty() && p.addrs != addrs {
                 p.addrs = addrs;
@@ -668,7 +694,7 @@ impl Link {
             public: public.to_string(), id, static_dh, hello_key: aead(&hkdf(&static_dh, b"hello")), addrs, addrs_ms: ms, known, relays,
             sess: None, trying_since: None, next_hello: now, last_upgrade: now, punch: None, hello_ts: 0,
             out: VecDeque::new(), parts: HashMap::new(), done: VecDeque::new(), resync_at: now, relayed: (now, 0),
-            proved: now - Duration::from_secs(1),
+            proved: now - Duration::from_secs(1), strict, bday_at: None,
         });
         rekey(&mut i);
     }
@@ -703,7 +729,7 @@ impl Link {
     /// Every teammate's line in detail, for `/team link`.
     pub fn lines(&self) -> Vec<LineInfo> {
         let i = lock(&self.inner);
-        let strict = i.stun_seen.windows(2).any(|w| w[0].ip() == w[1].ip() && w[0].port() != w[1].port());
+        let strict = strict(&i);
         i.peers.iter().enumerate().map(|(k, p)| {
             let s = p.sess.as_ref();
             let why = match s {
@@ -755,6 +781,10 @@ impl Link {
             }
             #[cfg(test)]
             if lock(&self.udp_off).contains(&to) { return }
+        }
+        if let Some(s) = lock(&self.bday).route.get(&to).cloned() {
+            let _ = s.send_to(bytes, to);
+            return;
         }
         let sock = if to.is_ipv4() { &self.v4 } else if let Some(s) = &self.v6 { s } else { return };
         let _ = sock.send_to(bytes, to);
@@ -878,12 +908,23 @@ impl Link {
         }
     }
 
-    fn tick(&self) {
+    fn tick(self: &Arc<Self>) {
         let mut i = lock(&self.inner);
         let mut sends = vec![];
         let mut events = vec![];
         let now = Instant::now();
+        let mut bdays = vec![];
+        let me_strict = strict(&i);
         for k in 0..i.peers.len() {
+            // One side strict, the other not, and no direct line: try a birthday punch.
+            let p = &mut i.peers[k];
+            let direct = p.sess.as_ref().is_some_and(|s| matches!(s.path, Path::Direct(_)));
+            let waiting = p.sess.is_some() || p.trying_since.is_some_and(|t| now - t >= TRY_RELAY_AFTER);
+            let public: Vec<SocketAddr> = p.addrs.iter().filter(|a| kind(a) == "public").copied().collect();
+            if !direct && waiting && p.strict != me_strict && !public.is_empty() && p.bday_at.is_none_or(|t| now - t > BDAY_EVERY) {
+                p.bday_at = Some(now);
+                bdays.push((p.public.clone(), public, me_strict));
+            }
             // A line that went quiet is down; start looking again.
             if i.peers[k].sess.as_ref().is_some_and(|s| now - s.last_rx > DEAD) {
                 let p = &mut i.peers[k];
@@ -960,6 +1001,120 @@ impl Link {
         }
         drop(i);
         self.flush(sends, events);
+        for (peer, to, me_strict) in bdays {
+            if me_strict { self.bday_open(&peer, to) } else { self.bday_spray(&peer, to) }
+        }
+        self.bday_tidy();
+    }
+
+    /// A fresh hello for `peer` (an older one would be taken as a replay).
+    fn hello_for(&self, peer: &str) -> Option<Vec<u8>> {
+        let i = lock(&self.inner);
+        let k = i.peers.iter().position(|p| p.public == peer)?;
+        (!i.blocked.contains(&i.peers[k].id)).then(|| hello(&i, k, false))
+    }
+
+    /// Strict side: many sockets, each saying hello to their public address every second, so
+    /// our router keeps many holes toward them open while they guess at one.
+    fn bday_open(self: &Arc<Self>, peer: &str, to: Vec<SocketAddr>) {
+        let mut b = lock(&self.bday);
+        let start = !std::mem::replace(&mut b.reading, true);
+        while b.socks.len() < BDAY_SOCKETS {
+            let Ok(s) = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)) else { break };
+            let _ = s.set_nonblocking(true);
+            b.socks.push(Arc::new(s));
+        }
+        b.until = Some(Instant::now() + BDAY_FOR);
+        drop(b);
+        let (l, peer) = (self.clone(), peer.to_string());
+        std::thread::spawn(move || {
+            let end = Instant::now() + BDAY_FOR;
+            while Instant::now() < end && !l.stop.load(Ordering::Relaxed) {
+                let Some(h) = l.hello_for(&peer) else { return };
+                let socks = lock(&l.bday).socks.clone();
+                for s in &socks {
+                    for a in &to {
+                        let _ = s.send_to(&h, a);
+                    }
+                }
+                std::thread::sleep(Duration::from_secs(1));
+            }
+        });
+        if start {
+            let l = self.clone();
+            std::thread::spawn(move || l.bday_receive());
+        }
+    }
+
+    /// Reads the birthday sockets (one thread, not one each: this runs on weak machines too). The
+    /// first socket to hear from an address becomes the way to it.
+    fn bday_receive(&self) {
+        let mut buf = [0u8; 2048];
+        let mut gate = Gate { window: Instant::now(), per_ip: HashMap::new(), strangers: 0 };
+        while !self.stop.load(Ordering::Relaxed) {
+            let socks = {
+                let mut b = lock(&self.bday);
+                if b.socks.is_empty() {
+                    b.reading = false;
+                    return;
+                }
+                b.socks.clone()
+            };
+            let mut got = false;
+            for s in &socks {
+                while let Ok((n, from)) = s.recv_from(&mut buf) {
+                    got = true;
+                    lock(&self.bday).route.entry(from).or_insert_with(|| s.clone());
+                    self.packet(&buf[..n], from, &mut gate);
+                }
+            }
+            if !got {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+
+    /// Cone side: hellos from our one socket to random ports on their IP, for a while.
+    fn bday_spray(self: &Arc<Self>, peer: &str, to: Vec<SocketAddr>) {
+        let (l, peer) = (self.clone(), peer.to_string());
+        std::thread::spawn(move || {
+            let end = Instant::now() + BDAY_FOR;
+            while Instant::now() < end && !l.stop.load(Ordering::Relaxed) {
+                if l.hello_for(&peer).is_none() || l.direct_to(&peer) {
+                    return;
+                }
+                // ten a tick, a fresh hello each tick
+                let Some(h) = l.hello_for(&peer) else { return };
+                for _ in 0..BDAY_RATE / 10 {
+                    let r = random();
+                    let port = 1024 + u16::from_be_bytes([r[0], r[1]]) % (65535 - 1024);
+                    for a in &to {
+                        l.raw_send(SocketAddr::new(a.ip(), port), &h);
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        });
+    }
+
+    fn direct_to(&self, peer: &str) -> bool {
+        lock(&self.inner).peers.iter().any(|p| p.public == peer && p.sess.as_ref().is_some_and(|s| matches!(s.path, Path::Direct(_))))
+    }
+
+    /// After a punch: keep only the sockets that lines use, and close the rest.
+    fn bday_tidy(&self) {
+        let mut b = lock(&self.bday);
+        if b.until.is_none_or(|t| Instant::now() < t) {
+            return;
+        }
+        let used: Vec<SocketAddr> = lock(&self.inner).peers.iter()
+            .filter_map(|p| match p.sess.as_ref()?.path { Path::Direct(a) => Some(a), _ => None }).collect();
+        b.route.retain(|a, _| used.contains(a));
+        let keep: Vec<Arc<UdpSocket>> = b.route.values().cloned().collect();
+        b.socks.retain(|s| keep.iter().any(|k| Arc::ptr_eq(k, s)));
+        if b.route.is_empty() {
+            b.until = None;
+        }
     }
 
     /// Find our own addresses (LAN and IPv6 from the routing table, public from STUN, a port
@@ -1084,7 +1239,14 @@ fn addrs_msg(i: &Inner) -> Vec<u8> {
     for r in &i.servers {
         msg.extend(format!(" {}", server_str(r)).bytes());
     }
+    if strict(i) {
+        msg.extend(b" nat=strict");
+    }
     msg
+}
+
+fn strict(i: &Inner) -> bool {
+    i.stun_seen.windows(2).any(|w| w[0].ip() == w[1].ip() && w[0].port() != w[1].port())
 }
 
 fn describe(i: &Inner, p: &Path) -> String {
@@ -1516,6 +1678,7 @@ fn on_data(i: &mut Inner, k: usize, pkt: &[u8], from: Path, sends: &mut Vec<(Soc
             let first = p.sess.as_mut().is_some_and(|s| !std::mem::replace(&mut s.heard_addrs, true));
             if !addrs.is_empty() && (ms == 0 || ms >= p.addrs_ms) {
                 p.addrs_ms = p.addrs_ms.max(ms);
+                p.strict = text.split(' ').any(|t| t == "nat=strict");
                 if p.addrs != addrs {
                     p.addrs = addrs;
                     p.punch = Some(Instant::now());

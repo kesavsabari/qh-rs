@@ -21,7 +21,7 @@
 use crate::oauth::{b64url, b64url_decode, random};
 use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, CHACHA20_POLY1305};
 use std::collections::{HashMap, VecDeque};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -97,17 +97,6 @@ pub fn write_frame(w: &mut impl Write, pkt: &[u8]) -> std::io::Result<()> {
     w.write_all(&[&n.to_be_bytes()[..], pkt].concat())
 }
 
-pub fn read_frame(r: &mut impl Read) -> std::io::Result<Vec<u8>> {
-    let mut n = [0u8; 2];
-    r.read_exact(&mut n)?;
-    let n = u16::from_be_bytes(n) as usize;
-    if n > 2048 {
-        return Err(std::io::ErrorKind::InvalidData.into());
-    }
-    let mut b = vec![0u8; n];
-    r.read_exact(&mut b)?;
-    Ok(b)
-}
 /// The relay used when the config says relay = "default". Empty until the project runs one.
 pub const DEFAULT_RELAY: Option<&str> = Some("15.235.127.134:47232");
 const RELAY_BYTES_PER_MIN: usize = 2 * 1024 * 1024;

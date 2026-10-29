@@ -21,7 +21,8 @@
 use crate::oauth::{b64url, b64url_decode, random};
 use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, CHACHA20_POLY1305};
 use std::collections::{HashMap, VecDeque};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs, UdpSocket};
+use std::io::{Read, Write};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -77,6 +78,29 @@ pub const PROOF: u8 = 0x55;     // address -> server, inside RELAYED: [0x55][sid
 const HELLOS_PER_IP: u32 = 50;
 const STRANGER_HELLOS: u32 = 500;
 pub const RELAY_PORT: u16 = 47232;
+/// Where a relay also takes the same packets over TCP, for networks that block UDP: 443, so it
+/// passes firewalls that only let web traffic out.
+pub const RELAY_TCP_PORT: u16 = 443;
+const TCP_AFTER: Duration = Duration::from_secs(5); // a relay silent this long on UDP: try TCP
+const TCP_RETRY: Duration = Duration::from_secs(60);
+
+/// One packet on a TCP stream: a 2-byte length, then the packet.
+pub fn write_frame(w: &mut impl Write, pkt: &[u8]) -> std::io::Result<()> {
+    let n = u16::try_from(pkt.len()).map_err(|_| std::io::ErrorKind::InvalidInput)?;
+    w.write_all(&[&n.to_be_bytes()[..], pkt].concat())
+}
+
+pub fn read_frame(r: &mut impl Read) -> std::io::Result<Vec<u8>> {
+    let mut n = [0u8; 2];
+    r.read_exact(&mut n)?;
+    let n = u16::from_be_bytes(n) as usize;
+    if n > 2048 {
+        return Err(std::io::ErrorKind::InvalidData.into());
+    }
+    let mut b = vec![0u8; n];
+    r.read_exact(&mut b)?;
+    Ok(b)
+}
 /// The relay used when the config says relay = "default". Empty until the project runs one.
 pub const DEFAULT_RELAY: Option<&str> = Some("15.235.127.134:47232");
 const RELAY_BYTES_PER_MIN: usize = 2 * 1024 * 1024;
@@ -121,21 +145,29 @@ enum Path {
 struct Server {
     addr: SocketAddr,
     secret: Option<[u8; 32]>,
+    tcp: u16, // its TCP port, when UDP doesn't get through
 }
 
-/// "relay=1.2.3.4:47232#secret" (or without "relay=" / "#secret"); numeric addresses only.
+/// "relay=1.2.3.4:47232/8443#secret" (or without "relay=", "/tcp port" or "#secret"); numeric
+/// addresses only.
 fn parse_server(s: &str) -> Option<Server> {
     let s = s.strip_prefix("relay=").unwrap_or(s);
     let (a, k) = s.split_once('#').map_or((s, None), |(a, k)| (a, Some(k)));
+    let (a, tcp) = match a.split_once('/') {
+        Some((a, t)) => (a, t.parse().ok()?),
+        None => (a, RELAY_TCP_PORT),
+    };
     let secret = match k {
         Some(k) => Some(<[u8; 32]>::try_from(b64url_decode(k)).ok()?),
         None => None,
     };
-    Some(Server { addr: a.parse().ok()?, secret })
+    Some(Server { addr: a.parse().ok()?, secret, tcp })
 }
 
 fn server_str(s: &Server) -> String {
-    format!("relay={}{}", s.addr, s.secret.map(|k| format!("#{}", b64url(&k))).unwrap_or_default())
+    // the default port is left out: an older qh can't read "/port" and would drop the relay
+    let tcp = if s.tcp == RELAY_TCP_PORT { String::new() } else { format!("/{}", s.tcp) };
+    format!("relay={}{tcp}{}", s.addr, s.secret.map(|k| format!("#{}", b64url(&k))).unwrap_or_default())
 }
 
 /// What a private relay checks: HMAC(secret, token), first 8 bytes. Public relays get zeros.
@@ -376,6 +408,7 @@ struct Inner {
     memory: HashMap<String, Vec<SocketAddr>>, // public key -> known endpoints, as saved
     memory_dirty: bool,
     hello_keys: Arc<Vec<(Id, [u8; 32])>>, // each teammate's hello key: tried outside the lock
+    over_tcp: Vec<SocketAddr>, // relay servers we reach over TCP right now
 }
 
 /// The hello budget (see HELLOS_PER_IP).
@@ -411,6 +444,19 @@ pub struct Link {
     stop: Arc<AtomicBool>,
     events: Sender<Event>,
     mapping: Mutex<Option<Upnp>>, // the router port we asked for, given back at stop
+    lanes: Mutex<HashMap<SocketAddr, Lane>>, // per relay server: is UDP getting through, or TCP
+    #[cfg(test)]
+    udp_off: Mutex<Vec<SocketAddr>>, // tests: this relay can't be reached over UDP
+}
+
+/// How we reach one relay server. UDP until it stays silent, then TCP.
+#[derive(Default)]
+struct Lane {
+    tcp: Option<TcpStream>,
+    sent: Option<Instant>,  // first UDP packet to it that hasn't been answered yet
+    heard: Option<Instant>, // its last packet to us
+    failed: Option<Instant>, // the last TCP attempt that failed or dropped
+    connecting: bool,
 }
 
 /// A UPnP port mapping on the home router: where to ask, and which port.
@@ -473,10 +519,11 @@ impl Link {
         let inner = Inner {
             secret, me, eph, eph_pub, peers: vec![], hello_keys: Arc::new(vec![]), next_id: u64::from_be_bytes(next) >> 2,
             mine: vec![], mine_ms: 0, stun_tx: HashMap::new(), stun_seen: vec![], relay: o.relay, beacon: false, servers: vec![], relay_specs: o.relays.clone(), rediscover: false, blocked: vec![],
-            memory, memory_dirty: false,
+            memory, memory_dirty: false, over_tcp: vec![],
         };
         let (tx, rx) = channel();
-        let link = Arc::new(Link { inner: Arc::new(Mutex::new(inner)), v4, v6, stop: Arc::new(AtomicBool::new(false)), events: tx, mapping: Mutex::new(None) });
+        let link = Arc::new(Link { inner: Arc::new(Mutex::new(inner)), v4, v6, stop: Arc::new(AtomicBool::new(false)), events: tx, mapping: Mutex::new(None),
+            lanes: Mutex::new(HashMap::new()), #[cfg(test)] udp_off: Mutex::new(vec![]) });
         link.v4.set_read_timeout(Some(Duration::from_millis(200)))?;
         // The beacon listens on a fixed port; a second qh on this machine finds it taken and goes
         // without (teammates on one machine reach each other by the LAN address anyway).
@@ -496,6 +543,7 @@ impl Link {
         std::thread::spawn(move || {
             while !l.stop.load(Ordering::Relaxed) {
                 l.tick();
+                l.check_lanes();
                 if let Some(f) = &file {
                     l.save_memory(f);
                 }
@@ -691,8 +739,81 @@ impl Link {
             SocketAddr::V6(a) => a.ip().to_ipv4_mapped().map_or(to, |v4| SocketAddr::new(IpAddr::V4(v4), a.port())),
             v4 => v4,
         };
+        if bytes.first() == Some(&RELAYED) {
+            let mut lanes = lock(&self.lanes);
+            let lane = lanes.entry(to).or_default();
+            if let Some(s) = lane.tcp.as_mut() {
+                if write_frame(s, bytes).is_ok() {
+                    return;
+                }
+                lane.tcp = None;
+                lane.failed = Some(Instant::now());
+                drop(lanes);
+                lock(&self.inner).over_tcp.retain(|a| *a != to);
+            } else {
+                lane.sent.get_or_insert_with(Instant::now);
+            }
+            #[cfg(test)]
+            if lock(&self.udp_off).contains(&to) { return }
+        }
         let sock = if to.is_ipv4() { &self.v4 } else if let Some(s) = &self.v6 { s } else { return };
         let _ = sock.send_to(bytes, to);
+    }
+
+    /// A relay we keep sending to over UDP that never answers: UDP is blocked on this network (or on
+    /// the way), so open the same lane over TCP. The TCP lane stays until it breaks.
+    fn check_lanes(self: &Arc<Self>) {
+        let now = Instant::now();
+        let servers: Vec<Server> = {
+            let i = lock(&self.inner);
+            let mut v = i.servers.clone();
+            v.extend(i.peers.iter().flat_map(|p| p.relays.iter().copied()));
+            v
+        };
+        let mut lanes = lock(&self.lanes);
+        for srv in servers {
+            let Some(lane) = lanes.get_mut(&srv.addr) else { continue };
+            let silent = lane.sent.is_some_and(|t| now - t > TCP_AFTER) && lane.heard.is_none_or(|h| lane.sent.is_some_and(|t| h < t));
+            if lane.tcp.is_some() || lane.connecting || !silent || lane.failed.is_some_and(|f| now - f < TCP_RETRY) {
+                continue;
+            }
+            lane.connecting = true;
+            let l = self.clone();
+            std::thread::spawn(move || l.open_lane(srv));
+        }
+    }
+
+    fn open_lane(self: Arc<Self>, srv: Server) {
+        let at = SocketAddr::new(srv.addr.ip(), srv.tcp);
+        let s = TcpStream::connect_timeout(&at, Duration::from_secs(5)).ok().filter(|s| {
+            // keepalives come every 15 s, so 45 s of nothing means the connection is gone
+            s.set_nodelay(true).is_ok() && s.set_read_timeout(Some(Duration::from_secs(45))).is_ok()
+                && s.set_write_timeout(Some(Duration::from_secs(2))).is_ok()
+        });
+        let r = s.as_ref().and_then(|s| s.try_clone().ok());
+        {
+            let mut lanes = lock(&self.lanes);
+            let lane = lanes.entry(srv.addr).or_default();
+            lane.connecting = false;
+            match (s, &r) {
+                (Some(s), Some(_)) => { lane.tcp = Some(s); lane.sent = None; }
+                _ => { lane.failed = Some(Instant::now()); return }
+            }
+        }
+        lock(&self.inner).over_tcp.push(srv.addr);
+        let mut r = r.unwrap();
+        let mut gate = Gate { window: Instant::now(), per_ip: HashMap::new(), strangers: 0 };
+        while !self.stop.load(Ordering::Relaxed) {
+            let Ok(pkt) = read_frame(&mut r) else { break };
+            self.packet(&pkt, srv.addr, &mut gate);
+        }
+        let mut lanes = lock(&self.lanes);
+        if let Some(l) = lanes.get_mut(&srv.addr) {
+            l.tcp = None;
+            l.failed = Some(Instant::now());
+        }
+        drop(lanes);
+        lock(&self.inner).over_tcp.retain(|a| *a != srv.addr);
     }
 
     fn receive(&self, sock: &UdpSocket) {
@@ -700,42 +821,52 @@ impl Link {
         let mut gate = Gate { window: Instant::now(), per_ip: HashMap::new(), strangers: 0 };
         while !self.stop.load(Ordering::Relaxed) {
             let Ok((n, from)) = sock.recv_from(&mut buf) else { continue };
-            let pkt = &buf[..n];
-            let mut i = lock(&self.inner);
-            if pkt.len() >= 20 && pkt[0] == 0x01 && pkt[1] == 0x01 {
-                stun_reply(&mut i, pkt);
-                continue;
-            }
-            let mut sends = vec![];
-            let mut events = vec![];
-            if pkt.len() == 33 && pkt[0] == CHALLENGE {
-                on_challenge(&mut i, pkt, from, &mut sends);
-                drop(i);
-                self.flush(sends, vec![]);
-                continue;
-            }
-            let from_server = pkt.len() > 25 && pkt[0] == RELAYED
-                && (i.servers.iter().any(|s| s.addr == from) || i.peers.iter().any(|p| p.relays.iter().any(|r| r.addr == from)));
-            let (body, path) = if from_server { (&pkt[25..], Path::Server(from)) } else { (pkt, Path::Direct(from)) };
-            if body.first() == Some(&HELLO) {
-                // the trial decryption happens outside the lock, and only within the budget
-                let known = from_server || i.peers.iter().any(|p| p.addrs.contains(&from) || p.known.contains(&from)
-                    || p.sess.as_ref().is_some_and(|s| s.path == path));
-                if !gate.allow(from.ip(), known) {
-                    continue;
-                }
-                let (keys, me) = (i.hello_keys.clone(), i.me);
-                drop(i);
-                let Some((id, plain)) = open_with(&keys, &me, body) else { continue };
-                i = lock(&self.inner);
-                let Some(k) = i.peers.iter().position(|p| p.id == id) else { continue };
-                take(&mut i, k, plain, body, path, &mut sends, &mut events, 0);
-            } else {
-                handle(&mut i, body, path, &mut sends, &mut events, 0);
-            }
-            drop(i);
-            self.flush(sends, events);
+            self.packet(&buf[..n], from, &mut gate);
         }
+    }
+
+    /// One packet from `from`, whichever way it came (UDP, or a relay's TCP lane).
+    fn packet(&self, pkt: &[u8], from: SocketAddr, gate: &mut Gate) {
+        if pkt.first().is_some_and(|b| *b == RELAYED || *b == CHALLENGE) {
+            if let Some(l) = lock(&self.lanes).get_mut(&from) {
+                l.heard = Some(Instant::now());
+                l.sent = None;
+            }
+        }
+        let mut i = lock(&self.inner);
+        if pkt.len() >= 20 && pkt[0] == 0x01 && pkt[1] == 0x01 {
+            stun_reply(&mut i, pkt);
+            return;
+        }
+        let mut sends = vec![];
+        let mut events = vec![];
+        if pkt.len() == 33 && pkt[0] == CHALLENGE {
+            on_challenge(&mut i, pkt, from, &mut sends);
+            drop(i);
+            self.flush(sends, vec![]);
+            return;
+        }
+        let from_server = pkt.len() > 25 && pkt[0] == RELAYED
+            && (i.servers.iter().any(|s| s.addr == from) || i.peers.iter().any(|p| p.relays.iter().any(|r| r.addr == from)));
+        let (body, path) = if from_server { (&pkt[25..], Path::Server(from)) } else { (pkt, Path::Direct(from)) };
+        if body.first() == Some(&HELLO) {
+            // the trial decryption happens outside the lock, and only within the budget
+            let known = from_server || i.peers.iter().any(|p| p.addrs.contains(&from) || p.known.contains(&from)
+                || p.sess.as_ref().is_some_and(|s| s.path == path));
+            if !gate.allow(from.ip(), known) {
+                return;
+            }
+            let (keys, me) = (i.hello_keys.clone(), i.me);
+            drop(i);
+            let Some((id, plain)) = open_with(&keys, &me, body) else { return };
+            i = lock(&self.inner);
+            let Some(k) = i.peers.iter().position(|p| p.id == id) else { return };
+            take(&mut i, k, plain, body, path, &mut sends, &mut events, 0);
+        } else {
+            handle(&mut i, body, path, &mut sends, &mut events, 0);
+        }
+        drop(i);
+        self.flush(sends, events);
     }
 
     fn flush(&self, sends: Vec<(SocketAddr, Vec<u8>)>, events: Vec<Event>) {
@@ -852,9 +983,10 @@ impl Link {
                 let relays = lock(&self.inner).relay_specs.clone();
                 let servers: Vec<Server> = relays.iter().filter_map(|spec| {
                     let (host, key) = spec.split_once('#').map_or((spec.as_str(), None), |(h, k)| (h, Some(k)));
+                    let (host, tcp) = host.split_once('/').map_or((host, String::new()), |(h, t)| (h, format!("/{t}")));
                     let host = if host.contains(':') { host.to_string() } else { format!("{host}:{RELAY_PORT}") };
                     let addr = host.to_socket_addrs().ok()?.find(|a| a.is_ipv4())?;
-                    parse_server(&match key { Some(k) => format!("{addr}#{k}"), None => addr.to_string() })
+                    parse_server(&match key { Some(k) => format!("{addr}{tcp}#{k}"), None => format!("{addr}{tcp}") })
                 }).collect();
                 let servers_moved = {
                     let mut i = lock(&self.inner);
@@ -959,6 +1091,7 @@ fn describe(i: &Inner, p: &Path) -> String {
     match p {
         Path::Direct(a) => format!("{} {a}", kind(a)),
         Path::Via(r) => format!("via {}", i.peers.iter().find(|p| p.id == *r).map_or("?", |p| p.public.as_str())),
+        Path::Server(a) if i.over_tcp.contains(a) => format!("relay {} over tcp", relay_name(a)),
         Path::Server(a) => format!("relay {}", relay_name(a)),
     }
 }
@@ -1728,8 +1861,51 @@ mod tests {
         let sock = UdpSocket::bind("127.0.0.1:0").unwrap();
         sock.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
         let port = sock.local_addr().unwrap().port();
-        std::thread::spawn(move || crate::relay::serve(&sock, secret, Some(Instant::now() + Duration::from_secs(secs))));
+        std::thread::spawn(move || crate::relay::serve_with(&sock, None, secret, Some(Instant::now() + Duration::from_secs(secs))));
         port
+    }
+
+    /// A relay server on localhost taking UDP and TCP (on the same port number) for `secs`.
+    fn relay_server_tcp(secret: Option<[u8; 32]>, secs: u64) -> u16 {
+        let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = tcp.local_addr().unwrap().port();
+        let sock = UdpSocket::bind(("127.0.0.1", port)).unwrap();
+        sock.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+        std::thread::spawn(move || crate::relay::serve_with(&sock, Some(tcp), secret, Some(Instant::now() + Duration::from_secs(secs))));
+        port
+    }
+
+    #[test]
+    fn where_udp_is_blocked_the_relay_is_reached_over_tcp() {
+        let key: [u8; 32] = random();
+        let port = relay_server_tcp(Some(key), 30);
+        let spec = format!("127.0.0.1:{port}/{port}#{}", b64url(&key));
+        let ((a, ra), (b, rb)) = (with_relay(spec.clone()), with_relay(spec));
+        let relay: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+        lock(&a.udp_off).push(relay); // a's network drops UDP to the relay; b's doesn't
+        a.block(&b.me());
+        b.block(&a.me());
+        std::thread::sleep(Duration::from_millis(300));
+        meet(&a, &b);
+        let up = wait(&ra, 20, |e| matches!(e, Event::Up { peer, .. } if *peer == b.me())).expect("through the relay over tcp");
+        assert!(matches!(&up, Event::Up { path, .. } if path.starts_with("relay 127.0.0.1")), "{up:?}");
+        assert!(lock(&a.lanes).get(&relay).is_some_and(|l| l.tcp.is_some()), "a's lane is tcp");
+        assert!(a.lines()[0].path.as_deref().is_some_and(|p| p.ends_with("over tcp")), "{:?}", a.lines());
+        a.send(&b.me(), &vec![7u8; 5000]).unwrap();
+        assert!(wait(&rb, 10, |e| matches!(e, Event::Msg { data, .. } if data.len() == 5000)).is_some(), "a → b");
+        b.send(&a.me(), b"back over udp, then tcp").unwrap();
+        assert!(wait(&ra, 10, |e| matches!(e, Event::Msg { data, .. } if data == b"back over udp, then tcp")).is_some(), "b → a");
+        a.stop();
+        b.stop();
+    }
+
+    #[test]
+    fn a_relay_spec_keeps_its_tcp_port_and_leaves_out_the_default() {
+        let s = parse_server("relay=1.2.3.4:47232/8443").unwrap();
+        assert_eq!((s.addr.port(), s.tcp), (47232, 8443));
+        assert_eq!(server_str(&s), "relay=1.2.3.4:47232/8443");
+        let d = parse_server("1.2.3.4:47232").unwrap();
+        assert_eq!((d.tcp, server_str(&d)), (RELAY_TCP_PORT, "relay=1.2.3.4:47232".to_string()));
     }
 
     fn with_relay(spec: String) -> (Arc<Link>, Receiver<Event>) {

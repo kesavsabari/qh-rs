@@ -667,6 +667,8 @@ impl TeamView {
         for (n, i) in pending.iter().enumerate() {
             let on = n + holds.len() == self.sel[REQUESTS];
             if on { sel_line = lines.len() }
+            // the picked one is open in front of them: now the sender may hear it was seen
+            if on && !i.seen() { crate::team::mark_seen(&i.from, i.id) }
             let from = if i.from_session.is_empty() { i.from.clone() } else { format!("{}'s {}", i.from, i.from_session) };
             let kind = if i.question.is_some() { "question for" } else { "work for" };
             let head = format!("{} {from} · {kind} your {} · {}{}", if on { "▸" } else { " " }, i.session, crate::team::ago(i.ts),

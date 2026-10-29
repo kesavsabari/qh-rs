@@ -117,6 +117,7 @@ const SUBCOMMANDS: &[(&str, &str)] = &[
     ("/dm <login> <text>", "a private message: only the two of you can read it"),
     ("/team group <name> <login> <login>…", "a private group chat: only its members can read it"),
     ("/team group", "your groups"),
+    ("/team withdraw", "take back a request you sent that isn't answered yet"),
     ("/answers auto", "teammates' agents ask yours; up to 20 answers an hour"),
     ("/answers ask", "you allow each question first"),
     ("/answers off", "they only see your fact sheet"),
@@ -1957,6 +1958,20 @@ Type /team create to put it on GitHub (private) and invite friends by their GitH
                         _ => self.err(&a, "usage: /team open <who> <session>"),
                     }
                 }
+                "withdraw" => {
+                    let all: Vec<(String, String)> = crate::team::outgoing().into_iter().filter(|o| !o.status().done())
+                        .map(|o| (format!("withdraw {}", o.id), format!("{} · {}: {}", o.to, o.status().as_str(), o.text.chars().take(60).collect::<String>())))
+                        .collect();
+                    if all.is_empty() { return self.note(&a, "nothing of yours is waiting to withdraw"); }
+                    self.picker = Some(picker("take back which request?", "/team", all));
+                }
+                _ if arg.starts_with("withdraw ") => match arg[9..].trim().parse::<u64>() {
+                    Ok(id) => match crate::team::withdraw(id) {
+                        Ok(()) => self.note(&a, "withdrawn: it leaves their list"),
+                        Err(e) => self.err(&a, e),
+                    },
+                    Err(_) => self.err(&a, "usage: /team withdraw (pick from the list)"),
+                },
                 _ if arg.starts_with("send ") => {
                     let mut w = arg[5..].splitn(3, ' ');
                     match (w.next(), w.next(), w.next()) {
@@ -2569,7 +2584,7 @@ then it's `git push -u origin {branch}` and `gh pr create --fill`.");
             serde_json::json!({"sessions": sessions, "files": files, "transcripts": transcripts})
         });
         let (h1, h2, h3, h4, a1, a2) = (self.hub.clone(), self.hub.clone(), self.hub.clone(), self.hub.clone(), a.clone(), a.clone());
-        let (h5, h6) = (self.hub.clone(), self.hub.clone());
+        let (h5, h6, h7) = (self.hub.clone(), self.hub.clone(), self.hub.clone());
         let hooks = crate::team::Hooks {
             answer: std::sync::Arc::new(move |q: crate::team::Question| {
                 // a read-only copy of the asked session answers; the session itself carries on
@@ -2607,6 +2622,7 @@ then it's `git push -u origin {branch}` and `gh pr create --fill`.");
                 i.from, if i.question.is_some() { "asks" } else { "sent a request for" }, i.session,
                 i.text.chars().filter(|c| !c.is_control()).take(200).collect::<String>())))),
             refresh: Box::new(move || h4.emit("", Event::Changed)),
+            changed: Box::new(move |_| h7.emit("", Event::Changed)),
         };
         crate::team::start(&cwd, summary, hooks, background)
     }

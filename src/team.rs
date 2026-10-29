@@ -122,7 +122,92 @@ pub struct Incoming {
     pub ts: u64,
     pub from_session: String, // the session of theirs that sent it ("" = the person)
     pub replied: bool,        // we wrote back but haven't accepted or declined yet
+    pub kind: String,         // handover | question
+    pub history: Vec<(Status, u64)>, // delivered when it reached us, then seen, replied…
+    pub snoozed: bool,        // "later": off the card, still counted
 }
+
+impl Incoming {
+    /// When it reached us (its send time when older data has no history).
+    pub fn arrived(&self) -> u64 {
+        self.history.first().map_or(self.ts, |h| h.1)
+    }
+    pub fn seen(&self) -> bool {
+        self.history.iter().any(|h| h.0 == Status::Seen)
+    }
+}
+
+/// Where a request is, the same words on both sides. The sender learns each step from the
+/// receiver's status messages; "queued" is the sender's own until the first one comes back.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Status { #[default] Queued, Delivered, Seen, Replied, Accepted, Declined, Withdrawn, Expired }
+
+impl Status {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Status::Queued => "queued", Status::Delivered => "delivered", Status::Seen => "seen", Status::Replied => "replied",
+            Status::Accepted => "accepted", Status::Declined => "declined", Status::Withdrawn => "withdrawn", Status::Expired => "expired",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Status> {
+        [Status::Queued, Status::Delivered, Status::Seen, Status::Replied, Status::Accepted, Status::Declined, Status::Withdrawn, Status::Expired]
+            .into_iter().find(|x| x.as_str() == s)
+    }
+    /// Nothing more happens to it.
+    pub fn done(self) -> bool {
+        matches!(self, Status::Accepted | Status::Declined | Status::Withdrawn | Status::Expired)
+    }
+}
+
+/// A request we sent, and what became of it.
+#[derive(Clone, Debug, Default)]
+pub struct Outgoing {
+    pub id: u64,
+    pub to: String,
+    pub session: String,
+    pub text: String,
+    pub kind: String,
+    pub from_session: String,
+    pub ts: u64,
+    pub history: Vec<(Status, u64)>,
+    pub reply: String, // their latest words back (a reply, or why they declined)
+}
+
+impl Outgoing {
+    pub fn status(&self) -> Status {
+        self.history.last().map_or(Status::Queued, |h| h.0)
+    }
+}
+
+/// Answers, reviews and mentions: worth knowing, nothing to decide.
+#[derive(Clone, Debug)]
+pub struct Fyi {
+    pub ts: u64,
+    pub kind: String, // answer | review | mention | reply
+    pub text: String,
+}
+
+/// What came in since qh was last open in this project.
+#[derive(Clone, Debug, Default)]
+pub struct Away {
+    pub since_ts: u64,
+    pub needs_you: Vec<Incoming>,
+    pub fyi: Vec<Fyi>,
+}
+
+/// What the UI is told without asking.
+#[derive(Clone, Debug)]
+pub enum TeamEvent {
+    Arrived { from: String, id: u64 },
+    Gone { from: String, id: u64 },     // withdrawn or expired on their side
+    Outgoing { id: u64, status: Status },
+}
+
+/// What we do with a waiting request.
+#[derive(Clone, Debug)]
+pub enum Action { Accept, Always, Reply(String), Decline(Option<String>), Later }
+
+const REQUEST_LIFE: u64 = 14 * 86400; // a request nobody acted on expires after two weeks
 
 /// A private group: only its members hold its key.
 #[derive(Clone, Debug)]
@@ -186,6 +271,9 @@ struct State {
     next_id: u64,
     seen: HashMap<String, u64>, // highest message id handled, per sender
     pending: Vec<Incoming>,
+    sent: Vec<Outgoing>,        // our requests and their statuses (the last 100)
+    fyi: Vec<Fyi>,              // answers, reviews, mentions (the last 50)
+    last_open: u64,             // when qh last had this project open before this run
     roles: HashMap<String, String>, // login -> viewer | trusted (member when absent); our own rules for our sessions
     approved: Vec<String>,          // people we'll let in without asking (invited, or let in before)
     asking: Vec<String>,            // newcomers waiting for "let in"
@@ -696,6 +784,106 @@ fn save_json(dir: &str, repo: &str, v: &Value) {
     let _ = crate::platform::write_private(&p, v.to_string().as_bytes());
 }
 
+fn history_json(h: &[(Status, u64)]) -> Value {
+    h.iter().map(|(st, ts)| json!([st.as_str(), ts])).collect::<Vec<_>>().into()
+}
+
+fn history_of(v: &Value) -> Vec<(Status, u64)> {
+    v.as_array().into_iter().flatten()
+        .filter_map(|x| Some((Status::parse(x[0].as_str()?)?, x[1].as_u64()?))).collect()
+}
+
+fn incoming_json(i: &Incoming) -> Value {
+    json!({"from": i.from, "id": i.id, "session": i.session, "text": i.text, "ts": i.ts, "from_session": i.from_session,
+           "replied": i.replied, "kind": i.kind, "snoozed": i.snoozed, "history": history_json(&i.history),
+           "question": i.question.as_ref().map(|q| json!({"repo": q.repo, "from": q.from, "from_session": q.from_session,
+                                                           "id": q.id, "session": q.session, "text": q.text}))})
+}
+
+fn incoming_of(v: &Value) -> Incoming {
+    let s = |k: &str| v[k].as_str().unwrap_or("").to_string();
+    let q = &v["question"];
+    Incoming {
+        from: s("from"), id: v["id"].as_u64().unwrap_or(0), session: s("session"), text: s("text"), ts: v["ts"].as_u64().unwrap_or(0),
+        from_session: s("from_session"), replied: v["replied"].as_bool().unwrap_or(false), kind: s("kind"),
+        snoozed: v["snoozed"].as_bool().unwrap_or(false), history: history_of(&v["history"]),
+        question: q.is_object().then(|| Question {
+            repo: q["repo"].as_str().unwrap_or("").into(), from: q["from"].as_str().unwrap_or("").into(),
+            from_session: q["from_session"].as_str().unwrap_or("").into(), id: q["id"].as_u64().unwrap_or(0),
+            session: q["session"].as_str().unwrap_or("").into(), text: q["text"].as_str().unwrap_or("").into() }),
+    }
+}
+
+fn outgoing_json(o: &Outgoing) -> Value {
+    json!({"id": o.id, "to": o.to, "session": o.session, "text": o.text, "kind": o.kind, "from_session": o.from_session,
+           "ts": o.ts, "history": history_json(&o.history), "reply": o.reply})
+}
+
+fn outgoing_of(v: &Value) -> Outgoing {
+    let s = |k: &str| v[k].as_str().unwrap_or("").to_string();
+    Outgoing { id: v["id"].as_u64().unwrap_or(0), to: s("to"), session: s("session"), text: s("text"), kind: s("kind"),
+               from_session: s("from_session"), ts: v["ts"].as_u64().unwrap_or(0), history: history_of(&v["history"]), reply: s("reply") }
+}
+
+/// What's in flight survives a restart: our outbox (else a request to someone offline is gone the
+/// moment we restart before they read it), what waits for us, what we sent, and when we were last open.
+struct Saved { outbox: Vec<Value>, pending: Vec<Incoming>, sent: Vec<Outgoing>, fyi: Vec<Fyi>, ts: u64 }
+
+fn load_requests(repo: &str) -> Saved {
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(per_repo("team-requests", repo)).unwrap_or_default()).unwrap_or_default();
+    let arr = |k: &str| v[k].as_array().cloned().unwrap_or_default();
+    Saved {
+        outbox: arr("outbox"),
+        pending: arr("pending").iter().map(incoming_of).collect(),
+        sent: arr("sent").iter().map(outgoing_of).collect(),
+        fyi: arr("fyi").iter().map(|f| Fyi { ts: f["ts"].as_u64().unwrap_or(0), kind: f["kind"].as_str().unwrap_or("").into(),
+                                             text: f["text"].as_str().unwrap_or("").into() }).collect(),
+        ts: v["ts"].as_u64().unwrap_or(0),
+    }
+}
+
+static SAVED: Mutex<Option<HashMap<String, (String, u64)>>> = Mutex::new(None);
+
+/// Written when something changed, and once a minute anyway (the time says when we were last open).
+fn save_requests(s: &State) {
+    let mut v = json!({
+        "outbox": s.outbox,
+        "pending": s.pending.iter().map(incoming_json).collect::<Vec<_>>(),
+        "sent": s.sent.iter().map(outgoing_json).collect::<Vec<_>>(),
+        "fyi": s.fyi.iter().map(|f| json!({"ts": f.ts, "kind": f.kind, "text": f.text})).collect::<Vec<_>>(),
+    });
+    let body = v.to_string();
+    let mut g = SAVED.lock().unwrap();
+    let last = g.get_or_insert_with(HashMap::new).entry(s.repo.clone()).or_default();
+    if last.0 == body && now().saturating_sub(last.1) < 60 { return }
+    *last = (body, now());
+    v["ts"] = json!(now());
+    save_json("team-requests", &s.repo, &v);
+}
+
+/// Tell whoever sent request `re` where it is now (rides our next write, like any message).
+fn status_out(s: &mut State, to: &str, re: u64, st: Status, text: &str) {
+    s.next_id += 1;
+    s.outbox.push(json!({"id": s.next_id, "to": to, "kind": "s", "re": re, "status": st.as_str(), "text": text, "ts": now()}));
+    s.dirty = true;
+}
+
+fn push_fyi(s: &mut State, kind: &str, text: String) {
+    s.fyi.push(Fyi { ts: now(), kind: kind.into(), text });
+    let n = s.fyi.len();
+    if n > 50 { s.fyi.drain(..n - 50); }
+}
+
+/// Requests nobody acted on for two weeks: gone, and the sender is told.
+fn expire_locked(s: &mut State) -> Vec<(String, u64)> {
+    let old: Vec<(String, u64)> = s.pending.iter().filter(|i| now().saturating_sub(i.arrived()) > REQUEST_LIFE)
+        .map(|i| (i.from.clone(), i.id)).collect();
+    for (from, id) in &old {
+        decide_locked(s, from, *id, "expired");
+    }
+    old
+}
+
 /// Let `login` in without asking when they turn up (you invited them).
 pub fn approve(repo: &str, login: &str) {
     let mut v = load_list("team-approved", repo);
@@ -748,6 +936,8 @@ pub struct Hooks {
     pub answer: std::sync::Arc<dyn Fn(Question) + Send + Sync>,
     /// An answer came back for one of our sessions: hand it over (now, or before its next call).
     pub answered: Box<dyn Fn(&str, &str) + Send>,
+    /// A request arrived or left, or one of ours moved on: redraw what shows it.
+    pub changed: Box<dyn Fn(TeamEvent) + Send>,
 }
 
 /// Connect this folder's project (or just show it, if it's already connected).
@@ -772,10 +962,15 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks, background: bool) -> Re
     let my_chat: Vec<Value> = mine[mine.len().saturating_sub(30)..].iter().copied()
         .enumerate().map(|(i, (ts, _, t))| json!({"id": ts * 1000 + i as u64, "ts": ts, "text": t})).collect();
     hold_connection(&repo, background)?;
+    let saved = load_requests(&repo);
+    // our ids keep rising across runs, past anything still in flight
+    let next_id = saved.outbox.iter().filter_map(|m| m["id"].as_u64()).chain(saved.sent.iter().map(|o| o.id))
+        .max().unwrap_or(0).max(now() * 1000);
     let (running, finished) = (std::sync::Arc::new(AtomicBool::new(true)), std::sync::Arc::new(AtomicBool::new(false)));
     STATES.lock().unwrap().get_or_insert_with(HashMap::new).insert(repo.clone(), State {
         repo: repo.clone(), me: me.clone(), peers: HashMap::new(), error: String::new(), key: load_key(&repo),
-        outbox: vec![], next_id: now() * 1000, seen, pending: vec![], roles: load_roles(&repo),
+        outbox: saved.outbox, next_id, seen, pending: saved.pending, sent: saved.sent, fyi: saved.fyi, last_open: saved.ts,
+        roles: load_roles(&repo),
         approved: load_list("team-approved", &repo), asking: vec![], invites, chat,
         epoch: std::fs::read_to_string(per_repo("team-epoch", &repo)).ok().and_then(|e| e.trim().parse().ok()).unwrap_or(0),
         removed: load_list("team-removed", &repo), admins: HashMap::new(),
@@ -812,6 +1007,8 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks, background: bool) -> Re
             let mut files = vec![("pub".to_string(), my_pub.clone())];
             let d = summary(); // outside the lock: it reads the hub
             with(&repo2, |s| {
+                expire_locked(s);
+                save_requests(s);
                 if let Some(k) = &s.key {
                     // the key goes to members, and to newcomers we approved; nobody else
                     let mut wraps: Vec<(String, String)> = s.peers.values()
@@ -1561,6 +1758,7 @@ fn take_in(repo: &str, me: &String, key: Option<Key>, mut p: Peer, hooks: &Hooks
                 if pings(text, me) {
                     if !s.pinged.iter().any(|c| c == "#team") { s.pinged.push("#team".into()) }
                     alert(format!("qh: {login} mentioned you: {}", clip_to(text, 80)));
+                    push_fyi(s, "mention", format!("{login} mentioned you: {}", clip_to(text, 300)));
                 }
             }
         }
@@ -1591,8 +1789,46 @@ fn take_in(repo: &str, me: &String, key: Option<Key>, mut p: Peer, hooks: &Hooks
         }
         let mut inc = Incoming { from: login.clone(), id, session: m["session"].as_str().unwrap_or("main").into(),
                                  text: m["text"].as_str().unwrap_or("").into(), question: None, ts: m["ts"].as_u64().unwrap_or_else(now),
-                                 from_session: m["from_session"].as_str().unwrap_or("").into(), replied: false };
+                                 from_session: m["from_session"].as_str().unwrap_or("").into(), replied: false, ..Default::default() };
         let role = s.roles.get(login).map(String::as_str).unwrap_or("member");
+        if m["kind"] == "s" {
+            // where one of our requests is now
+            s.seen.insert(login.clone(), id);
+            s.dirty = true;
+            let (re, text) = (m["re"].as_u64().unwrap_or(0), inc.text.clone());
+            let Some(st) = m["status"].as_str().and_then(Status::parse) else { continue };
+            let Some(o) = s.sent.iter_mut().find(|o| o.to == *login && o.id == re) else { continue };
+            if o.history.iter().any(|h| h.0 == st) && st != Status::Replied { continue }
+            o.history.push((st, inc.ts));
+            if !text.is_empty() { o.reply = text.clone() }
+            let what = clip_to(bare(&o.text), 80);
+            let line = match st {
+                Status::Replied => Some(format!("{login} replied to \"{what}\": {text}")),
+                Status::Accepted => Some(format!("{login} accepted \"{what}\"")),
+                Status::Declined => Some(format!("{login} declined \"{what}\"{}", if text.is_empty() { String::new() } else { format!(": {text}") })),
+                Status::Expired => Some(format!("\"{what}\" expired: {login} didn't act on it in two weeks")),
+                _ => None,
+            };
+            if let Some(line) = line {
+                alert(format!("qh: {}", clip_to(&line, 100)));
+                push_fyi(s, "reply", line.clone());
+                say_locked(repo, s, hooks, line);
+            }
+            (hooks.changed)(TeamEvent::Outgoing { id: re, status: st });
+            continue;
+        }
+        if m["kind"] == "w" {
+            // they took a request back
+            s.seen.insert(login.clone(), id);
+            s.dirty = true;
+            let re = m["re"].as_u64().unwrap_or(0);
+            if let Some(i) = s.pending.iter().position(|x| x.from == *login && x.id == re) {
+                let gone = s.pending.remove(i);
+                say_locked(repo, s, hooks, format!("{login} withdrew their request: \"{}\"", clip_to(bare(&gone.text), 80)));
+                (hooks.changed)(TeamEvent::Gone { from: login.clone(), id: re });
+            }
+            continue;
+        }
         if m["kind"] == "a" {
             // an answer to one of our questions
             s.seen.insert(login.clone(), id);
@@ -1605,6 +1841,7 @@ fn take_in(repo: &str, me: &String, key: Option<Key>, mut p: Peer, hooks: &Hooks
                 // a review of what we pushed (or are about to): the team room and the pusher see it
                 let head = clip_to(&inc.text, 1500);
                 alert(format!("qh: review from {from}: {}", clip_to(&head, 80)));
+                push_fyi(s, "review", format!("review from {from}: {}", clip_to(&head, 300)));
                 say_locked(repo, s, hooks, format!("review from {from} ({}): {head}", crate::review::verdict(&inc.text)));
                 if late && !q.session.is_empty() {
                     (hooks.answered)(&q.session, &format!("[team review from {from}] (it came after the push)\n\n{}", inc.text));
@@ -1621,6 +1858,7 @@ fn take_in(repo: &str, me: &String, key: Option<Key>, mut p: Peer, hooks: &Hooks
             // the whole answer for you to read (the agent gets it in full either way); a very long one is cut with …
             let head = clip_to(&inc.text, 1500);
             alert(format!("qh: {from} answered: {}", clip_to(&head, 80)));
+            push_fyi(s, "answer", format!("{from} answered: {}", clip_to(&head, 300)));
             if q.session.is_empty() {
                 say_locked(repo, s, hooks, format!("{from} answered you: {head}"));
             } else {
@@ -1652,8 +1890,11 @@ If this answer matters a lot, the user can make it a checked promise with /promi
                 inc.text = format!("question: {}", q.text);
                 inc.from_session = q.from_session.clone();
                 inc.question = Some(q);
+                inc.kind = "question".into();
+                inc.history = vec![(Status::Delivered, now)];
                 alert(format!("qh: {who} asks your {}: {}", inc.session, clip_to(&inc.text, 80)));
                 (hooks.ask)(&inc);
+                (hooks.changed)(TeamEvent::Arrived { from: login.clone(), id });
                 s.pending.push(inc);
                 continue;
             }
@@ -1674,7 +1915,11 @@ If this answer matters a lot, the user can make it a checked promise with /promi
         } else {
             log_to(repo, &format!("{} asks your {}: {}", inc.from, inc.session, inc.text));
             alert(format!("qh: {} asks: {}", inc.from, clip_to(bare(&inc.text), 80)));
+            inc.kind = "handover".into();
+            inc.history = vec![(Status::Delivered, now())];
+            status_out(s, login, id, Status::Delivered, "");
             (hooks.ask)(&inc);
+            (hooks.changed)(TeamEvent::Arrived { from: login.clone(), id });
             s.pending.push(inc);
         }
     }
@@ -1782,6 +2027,10 @@ pub fn send_from(to: &str, session: &str, text: &str, from_session: &str) -> Res
         s.next_id += 1;
         let id = s.next_id;
         s.outbox.push(json!({"id": id, "to": to, "session": session, "text": text, "from_session": from_session, "ts": now()}));
+        s.sent.push(Outgoing { id, to: to.into(), session: session.into(), text: text.into(), kind: "handover".into(),
+                               from_session: from_session.into(), ts: now(), history: vec![(Status::Queued, now())], reply: String::new() });
+        let n = s.sent.len();
+        if n > 100 { s.sent.drain(..n - 100); }
         s.dirty = true;
         Ok((format!("you asked {to}'s {session}: {text}"),
             format!("asked {to}'s {session}: it waits in their Requests and runs on their machine only once they accept it{}",
@@ -1860,32 +2109,28 @@ fn accepted_text(inc: &Incoming) -> String {
     format!("[accepted request from {}]: {}", inc.from, inc.text)
 }
 
-/// What the requester reads when we decline.
-fn declined_text(me: &str, inc: &Incoming) -> String {
-    format!("{me} declined: \"{}\"", clip_to(bare(&inc.text), 120))
-}
-
-/// What the requester reads when we write back without starting anything.
-fn replied_text(me: &str, inc: &Incoming, text: &str) -> String {
-    format!("{me} re your request \"{}\": {text}", clip_to(bare(&inc.text), 80))
-}
-
-/// Take a waiting request off the list and mark it handled. A declined request for work tells
-/// the requester (privately); a declined question gets the usual "not answered".
+/// Take a waiting request off the list and mark it handled; the requester learns which way it
+/// went. "once"/"always" accept, "deny" declines (`why` goes with it), "expired" times out.
+/// A declined question gets the usual "not answered".
 fn decide_locked(s: &mut State, from: &str, id: u64, answer: &str) -> Option<Incoming> {
+    decide_why_locked(s, from, id, answer, "")
+}
+
+fn decide_why_locked(s: &mut State, from: &str, id: u64, answer: &str, why: &str) -> Option<Incoming> {
     let i = s.pending.iter().position(|x| x.from == from && x.id == id)?;
     let inc = s.pending.remove(i);
     let prev = s.seen.get(from).copied().unwrap_or(0);
     s.seen.insert(from.to_string(), id.max(prev));
     s.dirty = true;
-    if answer == "deny" {
-        match &inc.question {
-            Some(q) => reply_locked(s, q, &format!("(not answered: {} said no. Use their fact sheet, or ask them directly.)", s.me), &[]),
-            None => {
-                let t = declined_text(&s.me, &inc);
-                if let Err(e) = dm_locked(s, from, &t) { log_to(&s.repo.clone(), &format!("couldn't tell {from} you declined: {e}")) }
-            }
+    match (&inc.question, answer) {
+        (Some(q), "deny" | "expired") => {
+            let q = q.clone();
+            reply_locked(s, &q, &format!("(not answered: {} said no. Use their fact sheet, or ask them directly.)", s.me), &[]);
         }
+        (Some(_), _) => {}
+        (None, "deny") => status_out(s, from, id, Status::Declined, why),
+        (None, "expired") => status_out(s, from, id, Status::Expired, ""),
+        (None, _) => status_out(s, from, id, Status::Accepted, ""),
     }
     Some(inc)
 }
@@ -1927,10 +2172,10 @@ fn reply_request_locked(s: &mut State, from: &str, id: u64, text: &str) -> Resul
         reply_locked(s, &q, &format!("({me} answered this in person) {text}"), &[]);
         return Ok(format!("answered {from}'s question"));
     }
-    let t = replied_text(&s.me, &s.pending[i], text);
-    dm_locked(s, from, &t)?;
     s.pending[i].replied = true;
-    Ok(format!("→ @{from} (private); the request still waits: a accept · d decline"))
+    s.pending[i].history.push((Status::Replied, now()));
+    status_out(s, from, id, Status::Replied, text);
+    Ok(format!("→ {from} (on the request); it still waits: a accept · d decline"))
 }
 
 // ---- behaviour contracts: promises about what a function does, checked by a model ----
@@ -2267,8 +2512,97 @@ pub fn open_questions() -> Vec<(String, String, String, String)> {
         .unwrap_or_default()
 }
 
+/// Requests waiting for us, oldest first (snoozed ones included: they still count).
 pub fn pending() -> Vec<Incoming> {
-    cur(|s| s.pending.clone()).unwrap_or_default()
+    let mut v = cur(|s| s.pending.clone()).unwrap_or_default();
+    v.sort_by_key(|i| i.arrived());
+    v
+}
+
+/// (waiting, when the oldest arrived): cheap enough for every frame.
+pub fn pending_summary() -> (usize, Option<u64>) {
+    cur(|s| (s.pending.len(), s.pending.iter().map(|i| i.arrived()).min())).unwrap_or((0, None))
+}
+
+/// What came in since qh last had this project open.
+pub fn away() -> Away {
+    cur(|s| {
+        let since = s.last_open;
+        let mut needs_you: Vec<Incoming> = s.pending.iter().filter(|i| since > 0 && i.arrived() > since).cloned().collect();
+        needs_you.sort_by_key(|i| i.arrived());
+        Away { since_ts: since, needs_you, fyi: s.fyi.iter().filter(|f| since > 0 && f.ts > since).cloned().collect() }
+    }).unwrap_or_default()
+}
+
+/// Our requests, newest first.
+pub fn outgoing() -> Vec<Outgoing> {
+    cur(|s| s.sent.iter().rev().cloned().collect()).unwrap_or_default()
+}
+
+/// The UI drew this request where the person can see it: the sender learns it was seen.
+pub fn mark_seen(from: &str, id: u64) {
+    cur(|s| mark_seen_locked(s, from, id));
+}
+
+fn mark_seen_locked(s: &mut State, from: &str, id: u64) {
+    let Some(i) = s.pending.iter_mut().find(|i| i.from == from && i.id == id) else { return };
+    if i.seen() { return }
+    i.history.push((Status::Seen, now()));
+    if i.question.is_none() { status_out(s, from, id, Status::Seen, "") }
+    s.dirty = true;
+}
+
+/// Do something with a waiting request. Accepting returns (session, text) to deliver, as `decide`.
+pub fn act(from: &str, id: u64, action: Action) -> Result<Option<(String, String)>, String> {
+    match action {
+        Action::Accept => decide(from, id, "once").map(Some).ok_or_else(|| "that request isn't waiting any more".to_string()),
+        Action::Always => decide(from, id, "always").map(Some).ok_or_else(|| "that request isn't waiting any more".to_string()),
+        Action::Reply(t) => reply_request(from, id, &t).map(|_| None),
+        Action::Decline(why) => {
+            let why = why.unwrap_or_default();
+            let done = cur(|s| decide_why_locked(s, from, id, "deny", why.trim()).is_some()).unwrap_or(false);
+            if !done { return Err("that request isn't waiting any more".into()) }
+            log(&format!("declined {from}'s request"));
+            if let Some(r) = repo() { save_seen(&r) }
+            Ok(None)
+        }
+        Action::Later => cur(|s| s.pending.iter_mut().find(|i| i.from == from && i.id == id).map(|i| { i.snoozed = true; s.dirty = true; }))
+            .flatten().map(|_| None).ok_or_else(|| "that request isn't waiting any more".to_string()),
+    }
+}
+
+/// Put a request of ours back on the line if it isn't there (not once it's been answered).
+pub fn resend(id: u64) -> Result<(), String> {
+    cur(|s| {
+        let o = s.sent.iter().find(|o| o.id == id).ok_or("no such request")?.clone();
+        if o.status().done() { return Err(format!("it was already {}", o.status().as_str())) }
+        if !s.outbox.iter().any(|m| m["id"].as_u64() == Some(id)) {
+            s.outbox.push(json!({"id": id, "to": o.to, "session": o.session, "text": o.text, "from_session": o.from_session, "ts": o.ts}));
+            s.dirty = true;
+        }
+        Ok(())
+    }).unwrap_or_else(|| Err("team mode is off".into()))
+}
+
+/// Take a request of ours back: it leaves their list (or never reaches it).
+pub fn withdraw(id: u64) -> Result<(), String> {
+    cur(|s| withdraw_locked(s, id)).unwrap_or_else(|| Err("team mode is off".into()))
+}
+
+fn withdraw_locked(s: &mut State, id: u64) -> Result<(), String> {
+    {
+        let o = s.sent.iter_mut().find(|o| o.id == id).ok_or("no such request")?;
+        if o.status().done() { return Err(format!("it was already {}", o.status().as_str())) }
+        o.history.push((Status::Withdrawn, now()));
+        let to = o.to.clone();
+        // still in our outbox doesn't mean they lack it (a waiting request stays unacked so a
+        // restart can't lose it), so always tell them; it's a no-op if it never reached them
+        s.outbox.retain(|m| m["id"].as_u64() != Some(id));
+        s.next_id += 1;
+        s.outbox.push(json!({"id": s.next_id, "to": to, "kind": "w", "re": id, "ts": now()}));
+        s.dirty = true;
+        Ok(())
+    }
 }
 
 /// Things waiting in connected projects other than the one on screen: (repo, count).
@@ -3577,6 +3911,134 @@ mod tests {
     }
 
     #[test]
+    fn requests_in_flight_survive_a_restart() {
+        // the bug: the outbox lived in memory only, so restarting before an offline teammate read a
+        // request dropped it; and accepting a later request acked earlier ones that still waited
+        let repo = format!("req/persist{}", std::process::id());
+        let mut s = state("alice");
+        s.repo = repo.clone();
+        s.outbox = vec![json!({"id": 7, "to": "bob", "session": "main", "text": "build it", "ts": 100})];
+        s.pending = vec![Incoming { from: "bob".into(), id: 1, session: "main".into(), text: "T1".into(), ts: 50, kind: "handover".into(),
+                                    history: vec![(Status::Delivered, 60), (Status::Seen, 70)], snoozed: true, ..Default::default() }];
+        s.seen.insert("bob".into(), 2); // T2 was accepted: T1 is below the ack line and must not be lost
+        s.sent = vec![Outgoing { id: 7, to: "bob".into(), session: "main".into(), text: "build it".into(), kind: "handover".into(),
+                                 history: vec![(Status::Queued, 100), (Status::Delivered, 110)], reply: "on it".into(), ..Default::default() }];
+        push_fyi(&mut s, "answer", "bob answered: 8080".into());
+        save_requests(&s);
+        let back = load_requests(&repo);
+        let _ = std::fs::remove_file(per_repo("team-requests", &repo));
+        assert_eq!(back.outbox, s.outbox);
+        assert_eq!(back.pending.len(), 1);
+        let p = &back.pending[0];
+        assert_eq!((p.id, p.text.as_str(), p.arrived(), p.seen(), p.snoozed, p.kind.as_str()), (1, "T1", 60, true, true, "handover"));
+        assert_eq!(back.sent[0].status(), Status::Delivered);
+        assert_eq!(back.sent[0].reply, "on it");
+        assert_eq!(back.fyi[0].text, "bob answered: 8080");
+        assert!(back.ts > 0, "when we were last open");
+    }
+
+    #[test]
+    fn the_sender_hears_each_step_of_a_request() {
+        let (ra, rb) = (format!("req/steps-a{}", std::process::id()), format!("req/steps-b{}", std::process::id()));
+        let mut alice = state("alice");
+        alice.repo = ra.clone();
+        let mut bob = state("bob");
+        bob.repo = rb.clone();
+        bob.next_id = 4;
+        bob.outbox.push(json!({"id": 5, "to": "alice", "session": "main", "text": "build the backend", "ts": now()}));
+        bob.sent.push(Outgoing { id: 5, to: "alice".into(), session: "main".into(), text: "build the backend".into(),
+                                 history: vec![(Status::Queued, now())], ..Default::default() });
+        let bob_out = bob.outbox.clone();
+        { let mut g = STATES.lock().unwrap(); let m = g.get_or_insert_with(HashMap::new); m.insert(ra.clone(), alice); m.insert(rb.clone(), bob); }
+        let events = std::sync::Arc::new(Mutex::new(vec![]));
+        let ev = events.clone();
+        let hooks = Hooks { changed: Box::new(move |e| ev.lock().unwrap().push(format!("{e:?}"))), ..quiet() };
+        let mut nc = false;
+        // alice's qh takes it in: it waits, and bob will hear it was delivered
+        let mut p = peer("bob", &["main"], true);
+        p.outbox = bob_out;
+        take_in(&ra, &"alice".to_string(), None, p, &hooks, &mut nc);
+        with(&ra, |s| {
+            assert_eq!(s.pending.len(), 1);
+            mark_seen_locked(s, "bob", 5);
+            mark_seen_locked(s, "bob", 5); // drawn again: still one "seen"
+            reply_request_locked(s, "bob", 5, "which framework?").unwrap();
+            decide_locked(s, "bob", 5, "once").unwrap();
+        });
+        let alice_out = with(&ra, |s| s.outbox.clone()).unwrap();
+        // bob's qh reads alice's folder: every step lands on his request, in order
+        let mut p = peer("alice", &["main"], true);
+        p.outbox = alice_out.clone();
+        take_in(&rb, &"bob".to_string(), None, p, &hooks, &mut nc);
+        let sent = with(&rb, |s| s.sent[0].clone()).unwrap();
+        let steps: Vec<&str> = sent.history.iter().map(|h| h.0.as_str()).collect();
+        assert_eq!(steps, ["queued", "delivered", "seen", "replied", "accepted"]);
+        assert_eq!(sent.reply, "which framework?");
+        // the same folder again changes nothing
+        let mut p = peer("alice", &["main"], true);
+        p.outbox = alice_out;
+        take_in(&rb, &"bob".to_string(), None, p, &hooks, &mut nc);
+        assert_eq!(with(&rb, |s| s.sent[0].history.len()).unwrap(), 5);
+        let ev = events.lock().unwrap().clone();
+        assert!(ev[0].starts_with("Arrived"), "{ev:?}");
+        assert_eq!(ev.iter().filter(|e| e.starts_with("Outgoing")).count(), 4, "{ev:?}");
+        let alerts = take_alerts();
+        assert!(alerts.iter().any(|a| a == "qh: alice replied to \"build the backend\": which framework?"), "{alerts:?}");
+        assert!(alerts.iter().any(|a| a == "qh: alice accepted \"build the backend\""), "{alerts:?}");
+        let mut g = STATES.lock().unwrap();
+        let m = g.as_mut().unwrap();
+        m.remove(&ra);
+        m.remove(&rb);
+    }
+
+    #[test]
+    fn a_withdrawn_request_leaves_their_list_or_never_reaches_it() {
+        let (ra, rb) = (format!("req/wd-a{}", std::process::id()), format!("req/wd-b{}", std::process::id()));
+        let mut bob = state("bob");
+        bob.repo = rb.clone();
+        bob.next_id = 10;
+        for id in [5, 6] {
+            bob.outbox.push(json!({"id": id, "to": "alice", "session": "main", "text": format!("job {id}"), "ts": now()}));
+            bob.sent.push(Outgoing { id, to: "alice".into(), history: vec![(Status::Queued, now())], ..Default::default() });
+        }
+        let mut alice = state("alice");
+        alice.repo = ra.clone();
+        { let mut g = STATES.lock().unwrap(); let m = g.get_or_insert_with(HashMap::new); m.insert(ra.clone(), alice); m.insert(rb.clone(), bob); }
+        let mut nc = false;
+        // alice has seen job 5 only
+        let mut p = peer("bob", &["main"], true);
+        p.outbox = with(&rb, |s| s.outbox[..1].to_vec()).unwrap();
+        take_in(&ra, &"alice".to_string(), None, p, &quiet(), &mut nc);
+        with(&rb, |s| {
+            withdraw_locked(s, 6).unwrap();    // never reached her: dropped (the notice is a no-op)
+            assert!(!s.outbox.iter().any(|m| m["id"] == 6));
+            withdraw_locked(s, 5).unwrap();    // she has it, unacked while it waits: she's still told
+            assert!(!s.outbox.iter().any(|m| m["id"] == 5));
+            assert!(s.outbox.iter().any(|m| m["kind"] == "w" && m["re"] == 5));
+            assert!(withdraw_locked(s, 5).unwrap_err().contains("already withdrawn"));
+        });
+        let mut p = peer("bob", &["main"], true);
+        p.outbox = with(&rb, |s| s.outbox.clone()).unwrap();
+        take_in(&ra, &"alice".to_string(), None, p, &quiet(), &mut nc);
+        assert!(with(&ra, |s| s.pending.is_empty()).unwrap(), "job 5 left her list");
+        let mut g = STATES.lock().unwrap();
+        let m = g.as_mut().unwrap();
+        m.remove(&ra);
+        m.remove(&rb);
+    }
+
+    #[test]
+    fn a_request_nobody_acts_on_expires_and_the_sender_is_told() {
+        let mut s = state("alice");
+        s.pending = vec![Incoming { from: "bob".into(), id: 3, text: "old".into(), history: vec![(Status::Delivered, now() - REQUEST_LIFE - 10)], ..Default::default() },
+                         Incoming { from: "bob".into(), id: 4, text: "new".into(), history: vec![(Status::Delivered, now())], ..Default::default() }];
+        assert_eq!(expire_locked(&mut s), [("bob".to_string(), 3)]);
+        assert_eq!(s.pending.len(), 1);
+        let m = s.outbox.last().unwrap();
+        assert_eq!((m["re"].as_u64(), m["status"].as_str()), (Some(3), Some("expired")));
+    }
+
+    #[test]
     fn one_qh_holds_a_team_and_the_projects_own_window_takes_it_from_a_background_one() {
         let repo = format!("lock/t{}", std::process::id());
         hold_connection(&repo, true).unwrap();
@@ -3664,7 +4126,7 @@ mod tests {
     }
     fn state(me: &str) -> State {
         State {
-            repo: "o/r".into(), me: me.into(), peers: HashMap::new(), error: String::new(), key: None, outbox: vec![], next_id: 0,
+            repo: "o/r".into(), me: me.into(), peers: HashMap::new(), error: String::new(), key: None, outbox: vec![], next_id: 0, sent: vec![], fyi: vec![], last_open: 0,
             seen: HashMap::new(), pending: vec![], roles: HashMap::new(), approved: vec![], asking: vec![], invites: HashMap::new(),
             epoch: 0, removed: vec![], admins: HashMap::new(), pins: HashMap::new(), gh_login: me.into(), git_ms: HashMap::new(),
             asked_github: HashMap::new(), warned: vec![], my_sha: String::new(),
@@ -3678,7 +4140,7 @@ mod tests {
 
     fn quiet() -> Hooks {
         Hooks { say: Box::new(|_| {}), deliver: Box::new(|_, _| {}), ask: Box::new(|_| {}), refresh: Box::new(|| {}),
-                answer: std::sync::Arc::new(|_| {}), answered: Box::new(|_, _| {}) }
+                answer: std::sync::Arc::new(|_| {}), answered: Box::new(|_, _| {}), changed: Box::new(|_| {}) }
     }
 
     /// A folder as `who` would push it for `login` (signed with `who`'s keys), read back from git.
@@ -4024,15 +4486,19 @@ mod tests {
         let inc = decide_locked(&mut s, "bob", 1, "once").unwrap();
         assert_eq!(accepted_text(&inc), "[accepted request from bob]: [from bob's agent] build the backend");
         assert!(s.my_dms.is_empty());
-        // reply: a private line back; the request still waits
+        let last = |s: &State| { let m = s.outbox.last().unwrap(); (m["kind"].as_str().unwrap().to_string(), m["re"].as_u64().unwrap(),
+                                                                  m["status"].as_str().unwrap().to_string(), m["text"].as_str().unwrap().to_string()) };
+        assert_eq!(last(&s), ("s".into(), 1, "accepted".into(), "".into()), "the sender learns it was accepted");
+        // reply: on the request itself, not a DM; the request still waits
         let r = reply_request_locked(&mut s, "bob", 2, "which framework?").unwrap();
         assert!(r.contains("still waits"), "{r}");
         assert!(s.pending.iter().any(|p| p.id == 2 && p.replied));
-        assert_eq!(read(&s), ["alice re your request \"build the backend\": which framework?"]);
+        assert_eq!(last(&s), ("s".into(), 2, "replied".into(), "which framework?".into()));
         // decline: gone, and they're told
         assert!(decide_locked(&mut s, "bob", 3, "deny").is_some());
         assert!(!s.pending.iter().any(|p| p.id == 3));
-        assert_eq!(read(&s).last().unwrap(), "alice declined: \"build the backend\"");
+        assert_eq!(last(&s), ("s".into(), 3, "declined".into(), "".into()));
+        assert!(read(&s).is_empty(), "no DMs: {:?}", read(&s));
         assert_eq!(s.seen.get("bob"), Some(&3));
         // a waiting question: a reply is its answer, and it's done
         let q = Question { repo: "o/r".into(), from: "bob".into(), from_session: "api".into(), id: 9, session: "main".into(), text: "port?".into() };

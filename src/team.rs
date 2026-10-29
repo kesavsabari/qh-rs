@@ -2863,7 +2863,7 @@ fn hold_connection(repo: &str, background: bool) -> Result<(), String> {
         match f.try_lock() {
             Ok(()) => break,
             Err(std::fs::TryLockError::WouldBlock) => {
-                let held = std::fs::read_to_string(&path).unwrap_or_default();
+                let held = std::fs::read_to_string(per_repo("team-owner", repo)).unwrap_or_default();
                 let (pid, mode) = held.split_once(' ').unwrap_or((held.trim(), ""));
                 // a window opened in the project itself takes the team from one keeping it in the background
                 if background || mode.trim() != "background" || t0.elapsed() > Duration::from_secs(15) {
@@ -2877,8 +2877,10 @@ fn hold_connection(repo: &str, background: bool) -> Result<(), String> {
         }
     }
     let _ = std::fs::remove_file(&want);
-    let _ = f.set_len(0);
-    let _ = (&f).write_all(format!("{} {}", std::process::id(), if background { "background" } else { "project" }).as_bytes());
+    // who holds it goes in a file of its own: Windows locks are mandatory, so nobody else can read the locked one
+    let owner = per_repo("team-owner", repo);
+    let _ = std::fs::create_dir_all(owner.parent().unwrap_or(&owner));
+    let _ = std::fs::write(&owner, format!("{} {}", std::process::id(), if background { "background" } else { "project" }));
     LOCKS.lock().unwrap().get_or_insert_with(HashMap::new).insert(repo.to_string(), f);
     Ok(())
 }
@@ -2889,7 +2891,7 @@ fn release(repo: &str) {
 
 /// We hold `repo` in the background and the qh opened in that project asked for it.
 fn wanted_elsewhere(repo: &str) -> bool {
-    let mine = std::fs::read_to_string(per_repo("team-lock", repo)).unwrap_or_default();
+    let mine = std::fs::read_to_string(per_repo("team-owner", repo)).unwrap_or_default();
     mine.ends_with(" background") && mine.starts_with(&format!("{} ", std::process::id())) && per_repo("team-want", repo).exists()
 }
 
@@ -3586,7 +3588,7 @@ mod tests {
         assert!(wanted_elsewhere(&repo), "the background holder is asked to give it up");
         release(&repo); // what its sync loop does when it sees that
         fg.join().unwrap().unwrap();
-        assert!(!wanted_elsewhere(&repo) && std::fs::read_to_string(per_repo("team-lock", &repo)).unwrap().ends_with(" project"));
+        assert!(!wanted_elsewhere(&repo) && std::fs::read_to_string(per_repo("team-owner", &repo)).unwrap().ends_with(" project"));
         release(&repo);
     }
 

@@ -143,7 +143,7 @@ struct Relay {
     swept: Instant,
     passed: u64,
     dropped: u64,
-    tcp: HashMap<SocketAddr, std::net::TcpStream>, // open TCP ends, to write their packets to
+    tcp: HashMap<SocketAddr, Arc<crate::tls::Wire>>, // open TCP ends, to write their packets to
 }
 
 impl Relay {
@@ -247,10 +247,10 @@ impl Relay {
             match to {
                 End::Udp(a) => { let _ = sock.send_to(&b, a); }
                 End::Tcp(a) => {
-                    let Some(s) = self.tcp.get_mut(&a) else { continue };
-                    if crate::link::write_frame(s, &b).is_err() {
+                    let Some(s) = self.tcp.get(&a) else { continue };
+                    if s.send(&b).is_err() {
                         // a stalled reader isn't waited for: it loses its connection
-                        let _ = s.shutdown(std::net::Shutdown::Both);
+                        s.shutdown();
                         self.tcp.remove(&a);
                     }
                 }
@@ -300,29 +300,34 @@ pub fn serve_with(sock: &UdpSocket, tcp: Option<TcpListener>, secret: Option<[u8
 
 fn accept(l: TcpListener, relay: Arc<Mutex<Relay>>, sock: UdpSocket, stop: Arc<AtomicBool>) {
     let sock = Arc::new(sock);
+    let handshaking = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     while !stop.load(Ordering::Relaxed) {
         let Ok((s, from)) = l.accept() else {
             std::thread::sleep(Duration::from_millis(50));
             continue;
         };
         {
-            let mut r = lock(&relay);
-            if r.tcp.len() >= TCP_CONNS || r.tcp.keys().filter(|a| a.ip() == from.ip()).count() >= TCP_PER_IP {
+            let r = lock(&relay);
+            if r.tcp.len() + handshaking.load(Ordering::Relaxed) >= TCP_CONNS
+                || r.tcp.keys().filter(|a| a.ip() == from.ip()).count() >= TCP_PER_IP {
                 continue;
             }
+        }
+        let (relay, stop, sock, handshaking) = (relay.clone(), stop.clone(), sock.clone(), handshaking.clone());
+        handshaking.fetch_add(1, Ordering::Relaxed);
+        std::thread::spawn(move || {
             let _ = s.set_nonblocking(false);
             let _ = s.set_nodelay(true);
             let _ = s.set_write_timeout(Some(Duration::from_millis(500)));
-            let Ok(w) = s.try_clone() else { continue };
-            r.tcp.insert(from, w);
-        }
-        let (relay, stop, sock) = (relay.clone(), stop.clone(), sock.clone());
-        std::thread::spawn(move || {
-            let mut s = s;
-            // one read waits at most IDLE: a connection that went quiet that long is dropped
+            // the TLS handshake gets 10 s; after it one read waits at most IDLE
+            let _ = s.set_read_timeout(Some(Duration::from_secs(10)));
+            let got = crate::tls::accept(s.try_clone().expect("tcp"));
+            handshaking.fetch_sub(1, Ordering::Relaxed);
+            let Ok((w, mut rd)) = got else { return };
             let _ = s.set_read_timeout(Some(IDLE));
+            lock(&relay).tcp.insert(from, w);
             while !stop.load(Ordering::Relaxed) {
-                let Ok(pkt) = crate::link::read_frame(&mut s) else { break };
+                let Ok(pkt) = rd.recv() else { break };
                 let mut out = vec![];
                 let mut r = lock(&relay);
                 r.packet(&pkt, End::Tcp(from), &mut out);

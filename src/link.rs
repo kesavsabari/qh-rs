@@ -452,7 +452,7 @@ pub struct Link {
 /// How we reach one relay server. UDP until it stays silent, then TCP.
 #[derive(Default)]
 struct Lane {
-    tcp: Option<TcpStream>,
+    tcp: Option<Arc<crate::tls::Wire>>,
     sent: Option<Instant>,  // first UDP packet to it that hasn't been answered yet
     heard: Option<Instant>, // its last packet to us
     failed: Option<Instant>, // the last TCP attempt that failed or dropped
@@ -742,8 +742,8 @@ impl Link {
         if bytes.first() == Some(&RELAYED) {
             let mut lanes = lock(&self.lanes);
             let lane = lanes.entry(to).or_default();
-            if let Some(s) = lane.tcp.as_mut() {
-                if write_frame(s, bytes).is_ok() {
+            if let Some(s) = lane.tcp.as_ref() {
+                if s.send(bytes).is_ok() {
                     return;
                 }
                 lane.tcp = None;
@@ -790,21 +790,21 @@ impl Link {
             s.set_nodelay(true).is_ok() && s.set_read_timeout(Some(Duration::from_secs(45))).is_ok()
                 && s.set_write_timeout(Some(Duration::from_secs(2))).is_ok()
         });
-        let r = s.as_ref().and_then(|s| s.try_clone().ok());
-        {
+        let s = s.and_then(|s| crate::tls::connect(s).ok());
+        let r = {
             let mut lanes = lock(&self.lanes);
             let lane = lanes.entry(srv.addr).or_default();
             lane.connecting = false;
-            match (s, &r) {
-                (Some(s), Some(_)) => { lane.tcp = Some(s); lane.sent = None; }
-                _ => { lane.failed = Some(Instant::now()); return }
+            match s {
+                Some((w, r)) => { lane.tcp = Some(w); lane.sent = None; r }
+                None => { lane.failed = Some(Instant::now()); return }
             }
-        }
+        };
         lock(&self.inner).over_tcp.push(srv.addr);
-        let mut r = r.unwrap();
+        let mut r = r;
         let mut gate = Gate { window: Instant::now(), per_ip: HashMap::new(), strangers: 0 };
         while !self.stop.load(Ordering::Relaxed) {
-            let Ok(pkt) = read_frame(&mut r) else { break };
+            let Ok(pkt) = r.recv() else { break };
             self.packet(&pkt, srv.addr, &mut gate);
         }
         let mut lanes = lock(&self.lanes);

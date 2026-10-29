@@ -35,12 +35,15 @@ const STUN_SERVERS: &[&str] = &["stun.l.google.com:19302", "stun.cloudflare.com:
 
 const FRAG: u8 = 1;
 const ACK: u8 = 2;
+#[allow(dead_code)] // the keepalive older qh sends (now ECHO); the tests send it
 const PING: u8 = 3;
 const FWD: u8 = 5; // "please pass this packet to <id>"
 const FWDED: u8 = 6; // "this packet was passed to you by me"
 const ADDRS: u8 = 7; // "my addresses changed"
 const CHECK: u8 = 8; // "is this really you, on this path?" (nonce): the line moves only when it comes back
 const CHECKED: u8 = 9; // the answer, sent back the way the check came
+const ECHO: u8 = 10; // a keepalive that asks for its 8 bytes back (round-trip time); older qh ignores it
+const ECHOED: u8 = 11; // the 8 bytes, back
 
 const PART: usize = 900; // fragment size: a relayed fragment still fits in 1200 bytes
 const MAX_MSG: usize = 256 * 1024;
@@ -92,6 +95,18 @@ pub enum Event {
     Msg { from: String, data: Vec<u8> },
     Delivered { peer: String, id: u64 },
     Failed { peer: String, id: u64 },
+}
+
+/// One teammate's line as `Link::lines` reports it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LineInfo {
+    pub public: String,
+    pub path: Option<String>,   // "lan 192.168.1.4:7001", "via <key>", "relay ovh-ca"; None: no line
+    pub rtt_ms: Option<u64>,    // None until the first echo comes back (or they run an older qh)
+    pub trying_secs: Option<u64>,
+    pub why: Option<String>,    // why there's no line, when there isn't
+    pub addrs: Vec<String>,     // where they said they are
+    pub relays: Vec<String>,    // relay servers we could meet them on
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -287,6 +302,7 @@ struct Session {
     announced: bool,
     heard_addrs: bool, // they sent their addresses this session (we answer the first with ours)
     probe: Option<(Path, [u8; 8], Instant)>, // a path we'd move to, once our check comes back on it
+    rtt: Option<Duration>, // smoothed round trip, from ECHO
 }
 
 impl Session {
@@ -636,6 +652,33 @@ impl Link {
         i.peers.iter().map(|p| (p.public.clone(), p.sess.as_ref().map(|s| describe(&i, &s.path)))).collect()
     }
 
+    /// Every teammate's line in detail, for `/team link`.
+    pub fn lines(&self) -> Vec<LineInfo> {
+        let i = lock(&self.inner);
+        let strict = i.stun_seen.windows(2).any(|w| w[0].ip() == w[1].ip() && w[0].port() != w[1].port());
+        i.peers.iter().enumerate().map(|(k, p)| {
+            let s = p.sess.as_ref();
+            let why = match s {
+                Some(_) => None,
+                None if p.addrs.is_empty() && p.known.is_empty() && servers_for(&i, k).is_empty() =>
+                    Some("no address for them yet and no relay: waiting for their card by git".into()),
+                None if servers_for(&i, k).is_empty() && strict =>
+                    Some("your router changes ports per destination (strict NAT) and no relay is set: /relay".into()),
+                None if strict => Some("your router changes ports per destination (strict NAT): trying the relay".into()),
+                None => Some("no answer on any address yet (offline, or their network blocks it)".into()),
+            };
+            LineInfo {
+                public: p.public.clone(),
+                path: s.map(|s| describe(&i, &s.path)),
+                rtt_ms: s.and_then(|s| s.rtt).map(|r| r.as_millis() as u64),
+                trying_secs: p.trying_since.map(|t| t.elapsed().as_secs()),
+                why,
+                addrs: p.addrs.iter().map(|a| a.to_string()).collect(),
+                relays: servers_for(&i, k).iter().map(|r| relay_name(&r.addr)).collect(),
+            }
+        }).collect()
+    }
+
     /// Tests: act as if `public` can't be reached directly (so the relay gets used).
     #[cfg(test)]
     fn block(&self, public: &str) {
@@ -762,8 +805,10 @@ impl Link {
                 events.push(Event::Failed { peer: p.public.clone(), id });
             }
             let s = p.sess.as_ref().unwrap();
-            if frames.is_empty() && now - s.last_tx > KEEPALIVE {
-                frames.push(vec![PING]);
+            if frames.is_empty() && now - s.last_tx > KEEPALIVE || s.rtt.is_none() && now - s.last_tx > Duration::from_secs(3) {
+                let mut f = vec![ECHO];
+                f.extend(now_ms().to_be_bytes());
+                frames.push(f);
             }
             // Re-punch after a move until the line hears from them again on its path.
             if p.punch.is_some_and(|t| (matches!(s.path, Path::Direct(_)) && s.path_rx > t) || now - t > PUNCH_FOR) {
@@ -914,8 +959,13 @@ fn describe(i: &Inner, p: &Path) -> String {
     match p {
         Path::Direct(a) => format!("{} {a}", kind(a)),
         Path::Via(r) => format!("via {}", i.peers.iter().find(|p| p.id == *r).map_or("?", |p| p.public.as_str())),
-        Path::Server(a) => format!("relay {a}"),
+        Path::Server(a) => format!("relay {}", relay_name(a)),
     }
+}
+
+/// "ovh-ca" for qh's default relay, else its address.
+fn relay_name(a: &SocketAddr) -> String {
+    if DEFAULT_RELAY.is_some_and(|d| d.parse() == Ok(*a)) { "ovh-ca (qh's default)".into() } else { a.to_string() }
 }
 
 /// Teammates with a direct line that could pass packets on to peer `k`.
@@ -1102,7 +1152,7 @@ fn on_hello(i: &mut Inner, k: usize, pkt: &[u8], plain: &[u8; 17], from: Path, s
         }
         p.sess = Some(Session {
             their_eph: eph, send, recv, tx_tag, rx_tag, counter: 0, rx_top: 0, rx_seen: 0, path: from, path_rx: now,
-            last_rx: now, last_tx: now, announced: false, heard_addrs: false, probe: None,
+            last_rx: now, last_tx: now, announced: false, heard_addrs: false, probe: None, rtt: None,
         });
     }
     let p = &mut i.peers[k];
@@ -1227,6 +1277,7 @@ fn on_data(i: &mut Inner, k: usize, pkt: &[u8], from: Path, sends: &mut Vec<(Soc
             s.probe = None;
             s.path = from;
             s.path_rx = now;
+            s.rtt = None; // measured again on the new path
             s.announced = false;
             announce(i, k, events);
         }
@@ -1238,6 +1289,18 @@ fn on_data(i: &mut Inner, k: usize, pkt: &[u8], from: Path, sends: &mut Vec<(Soc
     let Some(&kind) = f.first() else { return };
     let body = &f[1..];
     match kind {
+        ECHO if body.len() == 8 => {
+            let mut back = vec![ECHOED];
+            back.extend(body);
+            seal_on(i, k, Some(from), &back, sends);
+        }
+        ECHOED if body.len() == 8 => {
+            let sent = u64::from_be_bytes(body.try_into().unwrap());
+            let took = Duration::from_millis(now_ms().saturating_sub(sent).min(60_000));
+            if let Some(s) = i.peers[k].sess.as_mut().filter(|s| s.path == from) {
+                s.rtt = Some(s.rtt.map_or(took, |r| (r * 7 + took) / 8));
+            }
+        }
         CHECK if body.len() == 8 => {
             let mut back = vec![CHECKED];
             back.extend(body);
@@ -1485,8 +1548,9 @@ pub fn cli(args: &[String]) -> i32 {
         } else if t == "/card" {
             card(&link);
         } else if t == "/status" {
-            for (p, path) in link.status() {
-                println!("{} {}", &p[..6], path.unwrap_or_else(|| "no line".into()));
+            for x in link.lines() {
+                let rtt = x.rtt_ms.map(|ms| format!(" · {ms}ms")).unwrap_or_default();
+                println!("{} {}{rtt}", &x.public[..6], x.path.or(x.why).unwrap_or_else(|| "no line".into()));
             }
         } else if !t.is_empty() {
             for (p, _) in link.status() {
@@ -1635,6 +1699,30 @@ mod tests {
         b.stop();
     }
 
+    #[test]
+    fn a_line_reports_its_round_trip_and_no_line_says_why() {
+        let ((a, ra), (b, _rb)) = (node(), node());
+        meet(&a, &b);
+        wait(&ra, 5, |e| matches!(e, Event::Up { .. })).expect("line comes up");
+        let end = Instant::now() + Duration::from_secs(8);
+        let x = loop {
+            let x = a.lines().into_iter().find(|x| x.public == b.me()).unwrap();
+            if x.rtt_ms.is_some() || Instant::now() > end { break x }
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        assert!(x.path.as_deref().is_some_and(|p| p.starts_with("lan 127.0.0.1")), "{x:?}");
+        assert!(x.rtt_ms.is_some_and(|ms| ms < 1000), "an echo came back: {x:?}");
+        assert_eq!(x.why, None);
+        let ((c, _), (d, _)) = (node(), node());
+        let (k, _) = card(&d);
+        d.stop();
+        c.peer(&k, &["lan=127.0.0.1:9".into()], 0);
+        let x = c.lines().into_iter().find(|x| x.public == k).unwrap();
+        assert_eq!((x.path.as_deref(), x.rtt_ms), (None, None));
+        assert!(x.why.is_some(), "{x:?}");
+        for l in [a, b, c] { l.stop() }
+    }
+
     /// A relay server on localhost for `secs`; returns its port.
     fn relay_server(secret: Option<[u8; 32]>, secs: u64) -> u16 {
         let sock = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -1678,7 +1766,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(300));
         meet(&a, &b);
         let up = wait(&ra, 15, |e| matches!(e, Event::Up { peer, .. } if *peer == b.me())).expect("through the relay");
-        assert_eq!(up, Event::Up { peer: b.me(), path: format!("relay {spec}") });
+        assert_eq!(up, Event::Up { peer: b.me(), path: "relay ovh-ca (qh's default)".into() });
         a.send(&b.me(), b"via the default relay").unwrap();
         assert!(wait(&rb, 10, |e| matches!(e, Event::Msg { data, .. } if data == b"via the default relay")).is_some());
         a.stop();
@@ -1865,7 +1953,7 @@ mod tests {
         assert!(s[0].1.as_deref().is_some_and(|p| p.starts_with("lan")), "line to b untouched: {s:?}");
         let mut sess = Session {
             their_eph: [0; 32], send: aead(&[1; 32]), recv: aead(&[1; 32]), tx_tag: [0; 8], rx_tag: [0; 8], counter: 0, rx_top: 0, rx_seen: 0,
-            path: Path::Via([0; 8]), path_rx: Instant::now(), last_rx: Instant::now(), last_tx: Instant::now(), announced: true, heard_addrs: false, probe: None,
+            path: Path::Via([0; 8]), path_rx: Instant::now(), last_rx: Instant::now(), last_tx: Instant::now(), announced: true, heard_addrs: false, probe: None, rtt: None,
         };
         assert!(sess.fresh(5) && sess.fresh(3) && !sess.fresh(5) && !sess.fresh(3) && sess.fresh(4));
         assert!(sess.fresh(200) && !sess.fresh(100), "too old");

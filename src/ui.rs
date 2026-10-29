@@ -117,6 +117,7 @@ const SUBCOMMANDS: &[(&str, &str)] = &[
     ("/dm <login> <text>", "a private message: only the two of you can read it"),
     ("/team group <name> <login> <login>…", "a private group chat: only its members can read it"),
     ("/team group", "your groups"),
+    ("/team link", "how each teammate is reached: lan, relay or git, round trip, and why not"),
     ("/answers auto", "teammates' agents ask yours; up to 20 answers an hour"),
     ("/answers ask", "you allow each question first"),
     ("/answers off", "they only see your fact sheet"),
@@ -1961,6 +1962,7 @@ Type /team create to put it on GitHub (private) and invite friends by their GitH
                         _ => self.err(&a, "usage: /team send <who> <session> <text>"),
                     }
                 }
+                "link" => self.note(&a, crate::team::link_report()),
                 "group" => {
                     let g = crate::team::groups();
                     self.note(&a, if g.is_empty() { "no groups yet: /team group <name> <login> <login>…".to_string() } else {

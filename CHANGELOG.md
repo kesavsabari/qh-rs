@@ -2,6 +2,31 @@
 
 Each version starts with a one-line summary; the website shows it once the version is no longer recent.
 
+## 0.2.3 — 2026-10-29
+
+Memory that knows you, team notes, and review before a teammate's code is pushed.
+
+- **Memory.** qh remembers what you tell it about yourself and the project, in the same turn,
+  without being asked. **Team notes** are shared with the team after you approve them, and every
+  teammate's agent knows them.
+- **Review requests.** Before a push touches a teammate's code, their agent reviews it. APPROVE
+  lets it go. CHANGES holds the push, and you pick: push anyway, hand it to the owner in team
+  chat, or hold and fix. Product and pricing calls go to the owner. A retried push of the same
+  commit reuses its review, and a push waits (5 min at most) while the owner is online.
+- **Team chat** goes over the direct line first: #team lines, DMs and groups arrive in ~100 ms.
+  Handed-off pushes become decision cards (approve / send back).
+- **Team repos:** one qh per repo holds the connection, and the project's own window takes it
+  over. A team that lost its keys starts a new key generation after 30 min instead of waiting
+  forever.
+- **Killed mid-reply:** a reply that is still streaming is saved when qh is killed.
+- **Map:** a file shows as being edited only while an agent is working on it.
+- **Models:** `/model` lists recently picked models first, and the last pick becomes the default
+  for new tabs. A bare provider name ("chatgpt") is refused with how to pick a model.
+- **Browser:** a click scrolls instantly, so pages with smooth scrolling get the real target.
+- **Apps:** review-hold and DM review cards on Mac and Linux; one project switcher on Mac;
+  traffic lights always visible; closed tabs can reopen; the model picker no longer shows stale
+  rows.
+
 ## 0.2.2 — 2026-10-20
 
 Checks its own work; spend caps; cheaper long sessions; qh serve for the desktop apps.

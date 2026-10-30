@@ -288,7 +288,12 @@ fn config_json(body: &str, local: &str) -> String {
 
 /// nuget.org JSON with every api.nuget.org link pointed at the mirror on `local` (host:port).
 fn nuget_json(body: &str, local: &str) -> String {
-    body.replace(NUGET, &format!("http://{local}/qh-mirror/nuget/"))
+    let body = body.replace(NUGET, &format!("http://{local}/qh-mirror/nuget/"));
+    // NuGet refuses a repository-signatures resource that isn't HTTPS; without one it skips that check
+    let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&body) else { return body };
+    let Some(res) = v.get_mut("resources").and_then(|r| r.as_array_mut()) else { return body };
+    res.retain(|r| !r["@type"].as_str().unwrap_or("").starts_with("RepositorySignatures"));
+    v.to_string()
 }
 
 /// A NuGet config with nuget.org replaced by the mirror, whose address NuGet reads from
@@ -522,6 +527,8 @@ mod tests {
         }
         let m = mirror_request(b"GET /qh-mirror/nuget/v3/index.json HTTP/1.1\r\nHost: 127.0.0.1:47610\r\n\r\n").unwrap();
         assert_eq!((m.url.as_str(), m.host.as_str()), ("https://api.nuget.org/v3/index.json", "api.nuget.org"));
+        assert_eq!(nuget_json(r#"{"resources":[{"@id":"https://api.nuget.org/v3-flatcontainer/","@type":"PackageBaseAddress/3.0.0"},{"@id":"https://api.nuget.org/v3-index/repository-signatures/5.0.0/index.json","@type":"RepositorySignatures/5.0.0"}]}"#, "h:1"),
+            r#"{"resources":[{"@id":"http://h:1/qh-mirror/nuget/v3-flatcontainer/","@type":"PackageBaseAddress/3.0.0"}]}"#);
         assert_eq!(nuget_json(r#"{"@id":"https://api.nuget.org/v3-flatcontainer/","x":"https://azuresearch-usnc.nuget.org/query"}"#, "127.0.0.1:47610"),
             r#"{"@id":"http://127.0.0.1:47610/qh-mirror/nuget/v3-flatcontainer/","x":"https://azuresearch-usnc.nuget.org/query"}"#);
         let c = config_json(r#"{"dl":"https://static.crates.io/crates","api":"https://crates.io"}"#, "127.0.0.1:47610");

@@ -2767,6 +2767,43 @@ fn scan_unmerged(root: &Path, old: &Claims) -> Claims {
     out
 }
 
+/// Where our unmerged work and a teammate's change the same function (or both change a file
+/// outside any function): (login, file, function), sorted. Both would conflict at merge.
+fn overlaps(s: &State) -> Vec<(String, String, String)> {
+    let mut v: Vec<(String, String, String)> = vec![];
+    for p in s.peers.values().filter(|p| p.joined) {
+        for (f, fns) in &s.unmerged {
+            let Some(theirs) = p.unmerged.get(f) else { continue };
+            v.extend(fns.keys().filter(|n| theirs.contains_key(*n)).map(|n| (p.login.clone(), f.clone(), n.clone())));
+        }
+    }
+    v.sort();
+    v
+}
+
+fn overlap_text(v: &[(String, String, String)]) -> String {
+    v.iter().map(|(who, f, n)| if n.is_empty() { format!("{who}: {f}") } else { format!("{who}: {n} in {f}") }).collect::<Vec<_>>().join("; ")
+}
+
+/// Before an agent's `git push`: does what we push collide with a teammate's work that isn't on
+/// main yet? Rescans first, so a commit made a second ago counts. Held once per set of overlaps.
+pub fn push_overlap(cwd: &Path) -> Option<(String, String)> {
+    let (root, repo) = repo_of(cwd)?;
+    if !running_for(&repo) { return None }
+    let old = with(&repo, |s| s.unmerged.clone())?;
+    let fresh = scan_unmerged(&root, &old);
+    let v = with(&repo, |s| { if s.unmerged != fresh { s.unmerged = fresh; s.dirty = true } overlaps(s) })?;
+    if v.is_empty() { return None }
+    let list = overlap_text(&v);
+    let key = format!("push:{list}");
+    if !with(&repo, |s| if s.warned.contains(&key) { false } else { s.warned.push(key); true }).unwrap_or(false) { return None }
+    log_to(&repo, &format!("push held: it overlaps work not on main yet ({list})"));
+    Some((format!("push held: teammates changed the same code, not on main yet ({list}) · push again to go ahead"),
+          format!("error: push NOT run. Teammates changed the same functions and it isn't on main yet: {list}. Whoever merges \
+second gets a conflict. Stop and tell the user so they can agree the order with them (or message them). If the user wants to push \
+anyway, run the same push again: this is said once.")))
+}
+
 /// Every few seconds: let go of claims on what we pushed (or that went stale), and wake our
 /// sessions whose function is free again.
 fn wake_check(repo: &str, root: &Path, hooks: &Hooks) {
@@ -2788,7 +2825,15 @@ fn wake_check(repo: &str, root: &Path, hooks: &Hooks) {
     if scan {
         let old = with(repo, |s| s.unmerged.clone()).unwrap_or_default();
         let p = scan_unmerged(root, &old);
-        with(repo, |s| if s.unmerged != p { s.unmerged = p; s.dirty = true });
+        // however the change was made (by hand in an editor too), say once when it overlaps a teammate's
+        let v = with(repo, |s| { if s.unmerged != p { s.unmerged = p; s.dirty = true } overlaps(s) }).unwrap_or_default();
+        let fresh: Vec<_> = with(repo, |s| v.iter().filter(|o| {
+            let k = format!("overlap:{}:{}:{}", o.0, o.1, o.2);
+            !s.warned.contains(&k) && { s.warned.push(k); true }
+        }).cloned().collect()).unwrap_or_default();
+        if !fresh.is_empty() {
+            say(repo, hooks, format!("heads-up: you and a teammate both changed code that isn't on main yet ({}); agree who merges first", overlap_text(&fresh)));
+        }
     }
     if due {
         // a file that matches what's upstream again was pushed (or put back): it's free
@@ -3950,6 +3995,19 @@ mod tests {
         assert!(line.contains("bob also changed get_user") && err.contains("NOT made") && err.contains("first seen 3d ago"), "{line} / {err}");
         assert!(check_edit("main", &t("get_user")).is_none(), "said once; a retry goes ahead");
         STATES.lock().unwrap().as_mut().unwrap().remove(repo);
+    }
+
+    #[test]
+    fn overlaps_are_the_same_function_in_both_unmerged_copies() {
+        let mut s = state("alice");
+        s.unmerged = HashMap::from([("a.rs".into(), HashMap::from([("one".to_string(), 1), ("two".to_string(), 1)])),
+                                    ("new.txt".into(), HashMap::from([(String::new(), 1)]))]);
+        let mut bob = peer("bob", &[], false);
+        bob.unmerged = HashMap::from([("a.rs".into(), HashMap::from([("two".to_string(), 1), ("three".to_string(), 1)])),
+                                      ("new.txt".into(), HashMap::from([(String::new(), 1)]))]);
+        s.peers.insert("bob".into(), bob);
+        let v = overlaps(&s);
+        assert_eq!(overlap_text(&v), "bob: two in a.rs; bob: new.txt");
     }
 
     #[test]

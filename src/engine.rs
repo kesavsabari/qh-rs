@@ -1016,6 +1016,13 @@ relevant files first, then call ask_model again with the code, error or plan pas
         && !hub.confirm(m, name, &args, None) {
         return "denied by user".into();
     }
+    // a push that collides with a teammate's work not on main yet: said once, before any review
+    if name == "bash" && crate::review::is_push(args["cmd"].as_str().unwrap_or("")) {
+        if let Some((notice, msg)) = crate::team::push_overlap(&cwd) {
+            hub.emit(&m.name, Event::Notice(notice));
+            return msg;
+        }
+    }
     // a push in a team project: the owners of the changed code get to review it first (bounded wait)
     let review = if name == "bash" && crate::review::is_push(args["cmd"].as_str().unwrap_or("")) && crate::team::running_here(&cwd) {
         crate::review::before_push(&m.name, &cwd, &hub.cfg, &|t| hub.emit(&m.name, Event::Notice(t)), &|| m.cancel.load(Relaxed))

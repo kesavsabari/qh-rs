@@ -240,6 +240,7 @@ struct Person {
     label: String,
     online: bool,
     sessions: Vec<Session>,
+    unmerged: Vec<(String, Vec<String>)>, // not on main yet (from git), shown even while they're away
 }
 
 fn people(hub: &Hub, root: &Path) -> Vec<Person> {
@@ -249,7 +250,7 @@ fn people(hub: &Hub, root: &Path) -> Vec<Person> {
         let (edits, waiting, uses) = crate::team::mine(&m.name);
         Session { who: String::new(), name: m.name.clone(), status: m.status().to_string(), topic, now, files, branch: branch(&m.cwd()), edits, waiting, uses }
     }).collect::<Vec<_>>();
-    let mut out = vec![Person { who: String::new(), label: "you".into(), online: true, sessions: mine }];
+    let mut out = vec![Person { who: String::new(), label: "you".into(), online: true, sessions: mine, unmerged: crate::team::my_unmerged() }];
     for p in crate::team::overview() {
         out.push(Person {
             label: format!("{}{}{}", p.login, if p.online { String::new() } else { format!("  {}", p.seen) }, if p.view_only { " · view only" } else { "" }),
@@ -257,6 +258,7 @@ fn people(hub: &Hub, root: &Path) -> Vec<Person> {
             sessions: p.sessions.into_iter().map(|s| Session { who: p.login.clone(), name: s.name, status: s.status, topic: s.topic, now: s.now,
                 files: s.files, branch: s.branch, edits: s.edits, waiting: s.waiting, uses: s.uses }).collect(),
             who: p.login,
+            unmerged: p.unmerged,
         });
     }
     // a big team: people sorted by the part of the code they're in, so the map reads by area
@@ -270,6 +272,11 @@ fn group(out: &mut Vec<Person>) {
     let mut rest: Vec<(String, Person)> = rest.into_iter().map(|p| (code_area(&p), p)).collect();
     rest.sort_by(|a, b| ((a.0 == "away"), &a.0, &a.1.who).cmp(&((b.0 == "away"), &b.0, &b.1.who)));
     out.extend(rest.into_iter().map(|x| x.1));
+}
+
+/// "shop.py › discount, total · web.py", for the line under a person on the map.
+fn unmerged_text(u: &[(String, Vec<String>)]) -> String {
+    u.iter().map(|(f, fns)| if fns.is_empty() { f.clone() } else { format!("{f} › {}", fns.join(", ")) }).collect::<Vec<_>>().join(" · ")
 }
 
 const GROUP_AT: usize = 12; // more people than this: the map groups them by area
@@ -789,6 +796,11 @@ impl TeamView {
                 Span::styled(format!("  {:<place_w$}", clip(&place, place_w)), Style::new().fg(Color::DarkGray)),
                 Span::styled(format!("  {when:>when_w$}"), Style::new().fg(if when == "now" { Color::Green } else { Color::DarkGray })),
             ]));
+            if !p.unmerged.is_empty() {
+                let pad = name_w + 2;
+                lines.push(Line::styled(format!("{:pad$}{}", "", clip(&format!("not on main yet: {}", unmerged_text(&p.unmerged)), w.saturating_sub(pad))),
+                                        Style::new().fg(Color::DarkGray)));
+            }
         }
         // who builds on whom: merge the one they build on first
         let c = contracts(ppl);
@@ -1076,7 +1088,13 @@ mod group_tests {
         let s = Session { who: who.into(), name: "main".into(), status: "working".into(), topic: String::new(), now: String::new(),
                           files: vec![], branch: String::new(), edits: if file.is_empty() { vec![] } else { vec![(file.into(), vec![], 0)] },
                           waiting: None, uses: vec![] };
-        Person { who: who.into(), label: who.into(), online, sessions: vec![s] }
+        Person { who: who.into(), label: who.into(), online, sessions: vec![s], unmerged: vec![] }
+    }
+
+    #[test]
+    fn unpushed_work_reads_as_files_and_functions() {
+        let u = vec![("shop.py".to_string(), vec!["discount".to_string(), "total".to_string()]), ("web.py".to_string(), vec![])];
+        assert_eq!(unmerged_text(&u), "shop.py › discount, total · web.py");
     }
 
     #[test]

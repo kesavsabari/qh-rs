@@ -2326,6 +2326,7 @@ pub struct PersonView {
     pub seen: String,
     pub sessions: Vec<SessionView>,
     pub view_only: bool,
+    pub unmerged: Vec<(String, Vec<String>)>, // what their copy changes that isn't on main yet: file, functions
 }
 
 pub fn overview() -> Vec<PersonView> {
@@ -2346,6 +2347,7 @@ pub fn overview() -> Vec<PersonView> {
                 v
             }).collect(),
             view_only: s.roles.get(&p.login).is_some_and(|r| r == "viewer"),
+            unmerged: unmerged_view(&p.unmerged),
         }).collect()
     }).unwrap_or_default()
 }
@@ -2748,7 +2750,9 @@ fn changes_vs_main(root: &Path) -> Vec<(String, String, String)> {
     let Some(base) = ["origin/HEAD", "origin/main", "origin/master", "@{upstream}"].iter()
         .find_map(|r| git(root, &["merge-base", "HEAD", r]).map(|s| s.trim().to_string()).filter(|s| !s.is_empty())) else { return vec![] };
     let mut files: Vec<String> = git(root, &["diff", "--name-only", "--no-renames", &base]).unwrap_or_default().lines().map(String::from).collect();
-    files.extend(git(root, &["ls-files", "--others", "--exclude-standard"]).unwrap_or_default().lines().map(String::from));
+    // untracked: new source files count; build output nobody ignored (.pyc and the like) isn't text, so it doesn't
+    files.extend(git(root, &["ls-files", "--others", "--exclude-standard"]).unwrap_or_default().lines()
+        .filter(|f| std::fs::read_to_string(root.join(f)).is_ok()).map(String::from));
     files.into_iter().filter(|f| !f.is_empty()).take(200).filter_map(|f| {
         let before = git(root, &["show", &format!("{base}:{f}")]).unwrap_or_default();
         let after = std::fs::read_to_string(root.join(&f)).unwrap_or_default();
@@ -2959,6 +2963,22 @@ fn wake_check(repo: &str, root: &Path, hooks: &Hooks) {
 pub fn mine(session: &str) -> (Vec<(String, Vec<String>, u64)>, Option<Wait>, Vec<String>) {
     cur(|s| (claims_view(s.claims.get(session)), s.waiting.iter().find(|w| w.session == session).cloned(), uses_view(s.uses.get(session))))
         .unwrap_or_default()
+}
+
+/// Unmerged work as the map lists it: files in order, the functions in each (empty for a whole file).
+fn unmerged_view(c: &Claims) -> Vec<(String, Vec<String>)> {
+    let mut v: Vec<(String, Vec<String>)> = c.iter().map(|(f, fns)| {
+        let mut n: Vec<String> = fns.keys().filter(|k| !k.is_empty()).cloned().collect();
+        n.sort();
+        (f.clone(), n)
+    }).collect();
+    v.sort();
+    v
+}
+
+/// What our own copy changes that isn't on main yet.
+pub fn my_unmerged() -> Vec<(String, Vec<String>)> {
+    cur(|s| unmerged_view(&s.unmerged)).unwrap_or_default()
 }
 
 /// Names a session's code used in the last hour.
@@ -3850,12 +3870,14 @@ mod tests {
         run(&w, &["commit", "-qam", "b"]);
         std::fs::write(w.join("a.py"), "def one():\n    return 11\n\ndef two():\n    return 22\n").unwrap();
         std::fs::write(w.join("new.txt"), "hi\n").unwrap();
+        std::fs::write(w.join("cache.pyc"), [0xa7u8, 0x0d, 0xff, 0x00]).unwrap();
         let old = std::collections::HashMap::from([("a.py".to_string(), std::collections::HashMap::from([("one".to_string(), 5u64)]))]);
         let p = super::scan_unmerged(&w, &old);
         assert_eq!(p["a.py"].len(), 2);
         assert_eq!(p["a.py"]["one"], 5, "first-seen time kept");
         assert!(p["a.py"].contains_key("two"));
         assert!(p["new.txt"].contains_key(""));
+        assert!(!p.contains_key("cache.pyc"), "untracked build output is not work");
         let _ = std::fs::remove_dir_all(&d);
     }
 

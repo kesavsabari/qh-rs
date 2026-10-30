@@ -1996,7 +1996,7 @@ mod tests {
             if settled || Instant::now() > end { break x }
             std::thread::sleep(Duration::from_millis(100));
         };
-        assert!(x.path.as_deref().is_some_and(|p| p.starts_with("lan 127.0.0.1")), "{x:?}");
+        assert!(x.path.as_deref().is_some_and(|p| p.starts_with("lan ")), "{x:?}"); // loopback, or the machine's own LAN address
         assert!(x.rtt_ms.is_some_and(|ms| ms < 1000), "an echo came back: {x:?}");
         assert_eq!(x.why, None);
         let ((c, _), (d, _)) = (node(), node());

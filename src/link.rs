@@ -23,7 +23,7 @@ use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, CHACHA20_POLY1305};
 use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -121,6 +121,7 @@ pub enum Event {
     Msg { from: String, data: Vec<u8> },
     Delivered { peer: String, id: u64 },
     Failed { peer: String, id: u64 },
+    LanBlocked, // macOS refuses our LAN sends: Local Network access not granted
 }
 
 /// One teammate's line as `Link::lines` reports it.
@@ -461,6 +462,7 @@ pub struct Link {
     mapping: Mutex<Option<Upnp>>, // the router port we asked for, given back at stop
     lanes: Mutex<HashMap<SocketAddr, Lane>>, // per relay server: is UDP getting through, or TCP
     bday: Mutex<Bday>,
+    lan_refused: AtomicU32, // LAN sends refused in a row ("no route to host" with the host right there)
     #[cfg(test)]
     udp_off: Mutex<Vec<SocketAddr>>, // tests: this relay can't be reached over UDP
 }
@@ -549,7 +551,7 @@ impl Link {
         };
         let (tx, rx) = channel();
         let link = Arc::new(Link { inner: Arc::new(Mutex::new(inner)), v4, v6, stop: Arc::new(AtomicBool::new(false)), events: tx, mapping: Mutex::new(None),
-            lanes: Mutex::new(HashMap::new()), bday: Mutex::default(), #[cfg(test)] udp_off: Mutex::new(vec![]) });
+            lanes: Mutex::new(HashMap::new()), bday: Mutex::default(), lan_refused: AtomicU32::new(0), #[cfg(test)] udp_off: Mutex::new(vec![]) });
         link.v4.set_read_timeout(Some(Duration::from_millis(200)))?;
         // The beacon listens on a fixed port; a second qh on this machine finds it taken and goes
         // without (teammates on one machine reach each other by the LAN address anyway).
@@ -793,7 +795,28 @@ impl Link {
             return;
         }
         let sock = if to.is_ipv4() { &self.v4 } else if let Some(s) = &self.v6 { s } else { return };
-        let _ = sock.send_to(bytes, to);
+        let sent = sock.send_to(bytes, to);
+        if cfg!(target_os = "macos") && (to.ip().is_multicast() || kind(&to) == "lan") {
+            self.lan_check(to, sent.err().map(|e| e.kind()));
+        }
+    }
+
+    /// macOS answers "no route to host" for every LAN send when qh lacks Local Network access
+    /// (System Settings > Privacy & Security > Local Network), often after a network change or
+    /// when qh was started over SSH, where there's no one to ask. We then sit on the relay with no
+    /// clue why, so say it once. Multicast never needs the host to be up, so one refusal there is
+    /// enough; a LAN teammate might just be gone, so wait for a run of them.
+    fn lan_check(&self, to: SocketAddr, err: Option<std::io::ErrorKind>) {
+        if err != Some(std::io::ErrorKind::HostUnreachable) {
+            self.lan_refused.store(0, Ordering::Relaxed);
+            return;
+        }
+        let before = self.lan_refused.load(Ordering::Relaxed);
+        let n = if to.ip().is_multicast() { before.max(10) } else { before + 1 };
+        self.lan_refused.store(n, Ordering::Relaxed);
+        if before < 10 && n >= 10 {
+            let _ = self.events.send(Event::LanBlocked);
+        }
     }
 
     /// A relay we keep sending to over UDP that never answers: UDP is blocked on this network (or on
@@ -1839,6 +1862,7 @@ pub fn cli(args: &[String]) -> i32 {
                 Event::Down { peer } => println!("down {}", &peer[..6]),
                 Event::Delivered { peer, id } => println!("delivered #{} to {}", id % 1000, &peer[..6]),
                 Event::Failed { peer, id } => println!("FAILED #{} to {} (would go by git)", id % 1000, &peer[..6]),
+                Event::LanBlocked => println!("macOS blocks our LAN sends: grant Local Network access"),
             }
         }
     });

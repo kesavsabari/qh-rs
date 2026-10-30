@@ -2902,7 +2902,9 @@ fn wake_check(repo: &str, root: &Path, hooks: &Hooks) {
     static LAST_TIPS: Mutex<String> = Mutex::new(String::new());
     // a commit, push or pull moves these: scan now, or a teammate who pulls our push straight
     // away is held for up to a minute on work that is already on main (seen live)
-    let tips = git(root, &["rev-parse", "HEAD", "origin/HEAD"]).unwrap_or_default();
+    // one at a time: a clone of an empty repo has no origin/HEAD, and one bad name fails them all
+    let tips: String = ["HEAD", "origin/HEAD", "origin/main", "origin/master", "@{upstream}"].iter()
+        .filter_map(|r| git(root, &["rev-parse", "--verify", "-q", r])).collect();
     let moved = std::mem::replace(&mut *LAST_TIPS.lock().unwrap(), tips.clone()) != tips;
     let scan = {
         let mut l = LAST_SCAN.lock().unwrap();
@@ -3337,6 +3339,12 @@ fn on_line(e: LinkEvent) {
             LINES.lock().unwrap().get_or_insert_with(HashMap::new).remove(&peer);
             for (repo, login) in who_is(&peer) {
                 log_to(&repo, &format!("line to {login} dropped: their updates come by git again"));
+            }
+        }
+        LinkEvent::LanBlocked => {
+            for repo in LIVE.lock().unwrap().as_ref().map(|m| m.keys().cloned().collect::<Vec<_>>()).unwrap_or_default() {
+                log_to(&repo, "macOS is blocking qh from your local network, so teammates here go by relay: \
+                    allow it in System Settings > Privacy & Security > Local Network, then restart qh");
             }
         }
         LinkEvent::Delivered { .. } | LinkEvent::Failed { .. } => {} // git carries everything anyway

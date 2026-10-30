@@ -10,7 +10,7 @@
 #   cone       both routers keep ports (most home routers): expect a hole-punched public line
 #   symmetric  both routers pick a new port per destination: expect a line via carol
 #   ipv6       symmetric v4 NAT but IPv6 behind stateful firewalls: expect an ipv6 line
-#   mixed      A keeps ports, B is symmetric: unpunchable without port guessing, expect via carol
+#   mixed      A keeps ports, B is symmetric: a birthday punch (B opens 256 holes, A guesses), expect public
 #   norelay    symmetric, no carol, no IPv6: expect no line, messages FAIL (git takes over)
 #   upnp       symmetric, but router A answers UPnP and opens the port: expect public via upnp
 #   openinput  like cone, but routers without an input firewall (some ISP boxes): the first
@@ -310,7 +310,7 @@ scenario() {
   else say alice "$cb"; say bob "$ca"; fi
   local bobid=${cb#qhlink:}; bobid=${bobid:0:6}
   local result="none"
-  local tries=120; [ "$intro" = 1 ] && tries=400
+  local tries=120; [ "$intro" = 1 ] && tries=400; [ "$name" = mixed ] && tries=300   # a birthday punch takes up to ~20 s
   for _ in $(seq $tries); do
     local l; l=$(grep "^up $bobid" "$work/alice.log" | tail -1)
     [ -n "$l" ] && result=$(sed -E 's/^up [^ ]+ \(([^ )]+).*/\1/' <<<"$l")
@@ -398,7 +398,7 @@ case "$1" in
   cone)      scenario cone      cone      cone      0 0 public ;;
   symmetric) scenario symmetric symmetric symmetric 1 0 via ;;
   ipv6)      scenario ipv6      symmetric symmetric 0 1 ipv6 ;;
-  mixed)     scenario mixed     cone      symmetric 1 0 via ;;
+  mixed)     scenario mixed     cone      symmetric 1 0 public ;;
   norelay)   scenario norelay   symmetric symmetric 0 0 none ;;
   openinput) NETSIM_OPEN_INPUT=1 scenario openinput cone cone 1 0 via ;;
   move)      move_scenario ;;

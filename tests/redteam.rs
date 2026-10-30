@@ -330,6 +330,20 @@ fn windows_sandbox_users() {
     let (root, data) = (format!("C:/qh-redteam-{}", std::process::id()), format!("C:/ProgramData/qh-redteam-{}", std::process::id()));
     let (_, out) = l.bash(&format!("mkdir {root}; echo x > {root}.txt; mkdir {data} 2>&1"));
     assert!(![root.clone(), format!("{root}.txt"), data.clone()].iter().any(|p| std::path::Path::new(p).exists()), "wrote in a shared spot: {out}");
+    // nor on other drives, where Windows gives Authenticated Users modify by default: at the root
+    // and in a folder you made there (it inherits that grant)
+    let drives: Vec<char> = ('D'..='Z').filter(|d| std::path::Path::new(&format!("{d}:\\")).is_dir()).collect();
+    eprintln!("other drives: {drives:?}");
+    for d in drives {
+        let mine = format!("{d}:/qh-redteam-mine-{}", std::process::id());
+        if std::fs::create_dir(&mine).is_err() { continue }
+        let top = format!("{d}:/qh-redteam-{}", std::process::id());
+        let (_, out) = l.bash(&format!("mkdir {top}; echo x > {top}.txt; echo x > {mine}/planted; mkdir {mine}/sub 2>&1"));
+        let wrote = [top.clone(), format!("{top}.txt"), format!("{mine}/planted"), format!("{mine}/sub")]
+            .into_iter().filter(|p| std::path::Path::new(p).exists()).collect::<Vec<_>>();
+        let _ = std::fs::remove_dir_all(&mine);
+        assert!(wrote.is_empty(), "wrote on drive {d}: {wrote:?}\n{out}");
+    }
     // on a desktop of its own: your windows (the taskbar here) are out of sight, so out of reach
     let (_, out) = l.bash("powershell -NoProfile -Command \"Add-Type -Namespace W -Name U -MemberDefinition '[DllImport(\\\"user32.dll\\\")] public static extern System.IntPtr FindWindow(string c, string n);'; 'taskbar=' + [W.U]::FindWindow('Shell_TrayWnd', [NullString]::Value)\"");
     assert!(out.contains("taskbar=0"), "sees your desktop's windows: {out}");
@@ -347,6 +361,11 @@ python -c \"import urllib.request as u; print('py=%d' % u.urlopen('https://index
     // Git for Windows' curl is Schannel-only: it fails, and the hint says what to use instead
     let (_, out) = l.bash("curl -sS -m 20 -o /dev/null https://index.crates.io/config.json && echo curl-ok");
     assert!(out.contains("curl-ok") || out.contains("Windows' own TLS"), "curl's TLS failure gets the Windows hint: {out}");
+    // .NET's TLS is Schannel too: dotnet restore gets nuget.org through qh's plain-HTTP mirror
+    let (_, out) = l.bash("if dotnet --list-sdks | grep -q .; then mkdir n && cd n && \
+printf '<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>netstandard2.0</TargetFramework></PropertyGroup><ItemGroup><PackageReference Include=\"Newtonsoft.Json\" Version=\"13.0.3\" /></ItemGroup></Project>' > n.csproj && \
+dotnet restore 2>&1 | tail -5 && ls \"$NUGET_PACKAGES/newtonsoft.json\" && echo restore-ok; else echo no-sdk; fi");
+    assert!(out.contains("restore-ok") || out.contains("no-sdk"), "dotnet restore through the mirror: {out}");
     // a server of yours on loopback (Ollama, a debug port) is out of reach: only the proxy's ports are open
     let host = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = host.local_addr().unwrap().port();

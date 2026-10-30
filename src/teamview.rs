@@ -901,16 +901,18 @@ impl TeamView {
             let dot = if p.online { "●" } else { "○" };
             let color = if p.who.is_empty() { Color::Cyan } else if p.online { Color::Green } else { Color::DarkGray };
             // how their updates reach us: a direct line (instant) or git (every few seconds)
-            let how = match (p.online && !p.who.is_empty()).then(|| crate::team::line_to(&p.who)) {
-                Some(Some(l)) if l.starts_with("via ") => format!("  line {l}"),
-                Some(Some(l)) => format!("  direct line ({l})"),
-                Some(None) => "  by git".to_string(),
+            let how = match (p.online && !p.who.is_empty()).then(|| crate::team::line_detail(&p.who)) {
+                Some((Some(l), _)) if l.starts_with("via ") => format!("  line {l}"),
+                Some((Some(l), _)) => format!("  direct line ({l})"),
+                Some((None, Some(_))) => "  by git · /team link says why".to_string(),
+                Some((None, None)) => "  by git".to_string(),
                 None => String::new(),
             };
-            lines.push(Line::from(vec![
-                Span::styled(format!(" {dot} {}", p.label), Style::new().fg(color).add_modifier(Modifier::BOLD)),
-                Span::styled(how, Style::new().fg(Color::DarkGray)),
-            ]));
+            lines.push(Line::styled(format!(" {dot} {}", p.label), Style::new().fg(color).add_modifier(Modifier::BOLD)));
+            // its own line: beside the name it gets clipped in the narrow column
+            if !how.is_empty() {
+                lines.push(Line::styled(format!("  {}", clip(how.trim_start(), w.saturating_sub(2))), Style::new().fg(Color::DarkGray)));
+            }
             if p.sessions.is_empty() {
                 lines.push(Line::styled("    no sessions", Style::new().fg(Color::DarkGray)));
             }

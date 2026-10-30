@@ -594,7 +594,7 @@ pub fn hint(out: &str) -> Option<&'static str> {
         || (cfg!(windows) && out.contains("Unable to connect to the remote server")) {
         return Some("[qh sandbox] Windows' own TLS (Schannel: curl.exe, PowerShell's Invoke-WebRequest, .NET, winget) \
 can't run inside the sandbox. Download with python (urllib), node (fetch) or git instead: they bring their own TLS \
-and go through the allowlist proxy; cargo already uses qh's mirror. If only this tool will do, call bash again with \
+and go through the allowlist proxy; cargo and NuGet (dotnet restore from nuget.org) already use qh's mirrors. If only this tool will do, call bash again with \
 the same cmd and \"unsandboxed\": true; the user is asked first.");
     }
     static BLOCKED: LazyLock<Regex> = LazyLock::new(|| Regex::new(

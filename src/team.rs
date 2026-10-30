@@ -2780,6 +2780,27 @@ fn uses_view(u: Option<&HashMap<String, u64>>) -> Vec<String> {
     u.into_iter().flatten().filter(|(_, t)| now.saturating_sub(**t) < 3600).map(|(n, _)| n.clone()).collect()
 }
 
+/// What online teammates are editing right now (the state behind the conflict warnings):
+/// "rahul/api: server.js (handle, route)", most recent first.
+pub fn editing() -> Vec<String> {
+    cur(|s| editing_in(&s.peers)).unwrap_or_default()
+}
+
+fn editing_in(peers: &HashMap<String, Peer>) -> Vec<String> {
+    let now = now();
+    let mut v: Vec<(u64, String)> = vec![];
+    for p in peers.values().filter(|p| p.online) {
+        for (session, c) in &p.claims {
+            for (f, fns, ts) in claims_view(Some(c)).into_iter().filter(|x| now.saturating_sub(x.2) < CLAIM_HOT) {
+                let fns = if fns.is_empty() { String::new() } else { format!(" ({})", fns.join(", ")) };
+                v.push((ts, format!("{}/{session}: {f}{fns}", p.login)));
+            }
+        }
+    }
+    v.sort_by_key(|x| std::cmp::Reverse(x.0));
+    v.into_iter().map(|x| x.1).collect()
+}
+
 /// A session's claims as (file, functions, latest edit), most recent first.
 fn claims_view(c: Option<&Claims>) -> Vec<(String, Vec<String>, u64)> {
     let mut v: Vec<(String, Vec<String>, u64)> = c.into_iter().flatten().map(|(f, fns)| {
@@ -3107,11 +3128,39 @@ fn describe_line(path: &str) -> String {
     }
 }
 
-/// How we reach `login` right now ("lan", "ipv6", "public", "via carol"); None = git only.
-pub fn line_to(login: &str) -> Option<String> {
-    let key = cur(|s| s.peers.get(login).map(|p| p.pub_key.clone())).flatten()?;
-    let path = LINES.lock().unwrap().as_ref()?.get(&key)?.clone();
-    Some(describe_line(&path))
+/// The line to `login` for the team screen: ("lan · 3ms", None) when up, (None, why) when not.
+pub fn line_detail(login: &str) -> (Option<String>, Option<String>) {
+    let Some(key) = cur(|s| s.peers.get(login).map(|p| p.pub_key.clone())).flatten() else { return (None, None) };
+    let Some(Some(l)) = LINK.get() else { return (None, Some("the direct line is off on this machine".into())) };
+    match l.lines().into_iter().find(|x| x.public == key) {
+        Some(x) => (x.path.as_deref().map(|p| with_rtt(describe_line(p), x.rtt_ms)), x.why),
+        None => (None, None),
+    }
+}
+
+fn with_rtt(how: String, rtt: Option<u64>) -> String {
+    match rtt { Some(ms) => format!("{how} · {ms}ms"), None => how }
+}
+
+/// `/team link`: how each teammate is reached, in full: path, round trip, addresses, relays, and
+/// why not when there's no line.
+pub fn link_report() -> String {
+    let Some(Some(l)) = LINK.get() else { return "the direct line isn't running (QH_LINK=off, or team mode hasn't started it yet): updates go by git".into() };
+    let mut out = format!("this machine: {}{}\n", if l.addrs().is_empty() { "no addresses found yet".into() } else { l.addrs().join(", ") },
+        if l.strict_nat() { " · strict NAT (a relay is the likely path)" } else { "" });
+    let lines = l.lines();
+    if lines.is_empty() { return out + "no teammates on the line yet" }
+    for x in lines {
+        let who = who_is(&x.public).into_iter().next().map_or_else(|| x.public[..8.min(x.public.len())].to_string(), |(_, l)| l);
+        match &x.path {
+            Some(p) => out += &format!("\n{who}: {}\n  path {p}\n", with_rtt(describe_line(p), x.rtt_ms)),
+            None => out += &format!("\n{who}: by git{}\n  {}\n", x.trying_secs.map(|t| format!(" (trying for {t}s)")).unwrap_or_default(),
+                x.why.as_deref().unwrap_or("")),
+        }
+        out += &format!("  their addresses: {}\n  relays: {}\n", if x.addrs.is_empty() { "none known".into() } else { x.addrs.join(", ") },
+            if x.relays.is_empty() { "none".into() } else { x.relays.join(", ") });
+    }
+    out.trim_end().to_string()
 }
 
 /// What went over the line last, and to whom.
@@ -3547,6 +3596,21 @@ pub fn list_team_files(cwd: &Path, to: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn editing_lists_only_hot_claims_of_online_teammates() {
+        use std::collections::HashMap;
+        let t = super::now();
+        let claim = |f: &str, func: &str, ts: u64| -> super::Claims { HashMap::from([(f.to_string(), HashMap::from([(func.to_string(), ts)]))]) };
+        let peer = |login: &str, online: bool, c: super::Claims| super::Peer {
+            login: login.into(), online, claims: HashMap::from([("api".to_string(), c)]), ..Default::default() };
+        let peers = HashMap::from([
+            ("rahul".to_string(), peer("rahul", true, claim("server.js", "route", t))),
+            ("anu".to_string(), peer("anu", false, claim("db.js", "save", t))),
+            ("old".to_string(), peer("old", true, claim("x.js", "", t - super::CLAIM_HOT - 5))),
+        ]);
+        assert_eq!(super::editing_in(&peers), vec!["rahul/api: server.js (route)".to_string()]);
+    }
+
     #[test]
     fn a_team_in_the_background_shows_how_to_open_it() {
         assert_eq!(super::background_hint("", &["kesav/shop".into()]).as_deref(), Some("team shop · Ctrl+] to open"));

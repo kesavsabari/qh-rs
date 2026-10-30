@@ -9,6 +9,17 @@ use std::path::PathBuf;
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::{Arc, Mutex};
 
+/// The `qh serve` protocol major this app speaks (src/serve.rs PROTOCOL, docs/serve-protocol.md).
+pub const PROTOCOL: u64 = 1;
+
+/// A different major on the listening/running line means the two can't talk: say which to update.
+/// No protocol field at all is a qh from before 0.2.4, which still speaks 1.
+pub fn protocol_mismatch(v: &Value) -> Option<String> {
+    let p = v.get("protocol")?.as_u64().unwrap_or(0);
+    (p != PROTOCOL).then(|| format!("qh serve speaks protocol {p}, this app speaks {PROTOCOL}; update {}",
+        if p > PROTOCOL { "the app" } else { "qh" }))
+}
+
 pub enum Msg {
     Event(String, Value),
     Closed(String, String),
@@ -62,6 +73,10 @@ impl Client {
             let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
             let t = v["type"].as_str().unwrap_or("");
             if t == "listening" || t == "running" {
+                if let Some(e) = protocol_mismatch(&v) {
+                    if t == "listening" { let _ = child.kill(); let _ = child.wait(); }
+                    return Err(e);
+                }
                 break (v["socket"].as_str().unwrap_or("").to_string(), v["token_file"].as_str().unwrap_or("").to_string(), t == "listening");
             }
         };
@@ -72,10 +87,12 @@ impl Client {
             g.sock = Some(s.try_clone().map_err(|e| e.to_string())?);
             if ours { g.child = Some(child); g._out = Some(out.into_inner()); }
         }
-        self.send(json!({"type": "hello", "token": token}));
+        self.send(json!({"type": "hello", "token": token, "protocol": PROTOCOL}));
         for line in BufReader::new(s).lines() {
             let Ok(line) = line else { break };
             if let Ok(v) = serde_json::from_str::<Value>(&line) {
+                // the server refused our hello: its message says which side to update
+                if v["type"] == "error" && v["code"] == "protocol" { return Err(v["message"].as_str().unwrap_or("protocol mismatch").into()) }
                 if tx.send_blocking(Msg::Event(path.to_string(), v)).is_err() { break }
             }
         }
@@ -102,4 +119,17 @@ fn hash(s: &str) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     s.hash(&mut h);
     h.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn refuses_other_major() {
+        assert!(protocol_mismatch(&json!({"type": "listening"})).is_none());
+        assert!(protocol_mismatch(&json!({"type": "running", "protocol": PROTOCOL, "protocol_minor": 7})).is_none());
+        assert!(protocol_mismatch(&json!({"protocol": PROTOCOL + 1})).unwrap().ends_with("update the app"));
+        assert!(protocol_mismatch(&json!({"protocol": 0})).unwrap().ends_with("update qh"));
+    }
 }

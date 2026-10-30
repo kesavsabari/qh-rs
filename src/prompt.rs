@@ -124,23 +124,46 @@ pub fn instructions(cwd: &Path) -> Option<(String, String)> {
     std::fs::read_to_string(&g).ok().map(|t| (g.display().to_string(), t))
 }
 
+fn git(cwd: &Path, args: &[&str]) -> Option<String> {
+    std::process::Command::new("git").current_dir(cwd).args(args)
+        .stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output().ok()
+        .filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim_end().to_string())
+}
+
+/// "Git: branch work; 2 uncommitted: a.rs, b.rs." read now; None outside a repo.
+pub fn git_line(cwd: &Path) -> Option<String> {
+    let branch = git(cwd, &["branch", "--show-current"])?;
+    let changed: Vec<String> = git(cwd, &["status", "--porcelain"]).unwrap_or_default().lines()
+        .filter_map(|l| l.get(3..)).map(|p| p.trim_matches('"').to_string()).collect();
+    let shown: Vec<&str> = changed.iter().take(8).map(String::as_str).collect();
+    let changes = match changed.len() {
+        0 => "nothing uncommitted".to_string(),
+        n => format!("{n} uncommitted: {}{}", shown.join(", "), if n > 8 { ", …" } else { "" }),
+    };
+    Some(format!("Git: branch {}; {changes}.", if branch.is_empty() { "(detached)" } else { &branch }))
+}
+
+/// The git line plus how far the branch is from its upstream, for qh_status.
+pub fn git_status(cwd: &Path) -> Option<String> {
+    let line = git_line(cwd)?;
+    let up = git(cwd, &["rev-list", "--left-right", "--count", "@{upstream}...HEAD"])
+        .and_then(|c| c.split_once('\t').map(|(b, a)| format!(" {a} ahead, {b} behind upstream.")))
+        .unwrap_or_else(|| " No upstream.".into());
+    Some(line + &up)
+}
+
+/// The system prompt with its git line read again, so it doesn't go stale across commits;
+/// None when nothing changed (the prompt stays byte-identical and cacheable).
+pub fn refresh_git(sys: &str, cwd: &Path) -> Option<String> {
+    let old = sys.lines().find(|l| l.starts_with("Git: branch "))?;
+    let new = git_line(cwd)?;
+    (old != new).then(|| sys.replacen(old, &new, 1))
+}
+
 /// What the model would otherwise guess: the git branch, what's uncommitted, and the commands
 /// that build and test this project (so the first test run is the right one).
 fn facts(cwd: &Path) -> String {
-    let git = |args: &[&str]| std::process::Command::new("git").current_dir(cwd).args(args)
-        .stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output().ok()
-        .filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim_end().to_string());
-    let mut out = vec![];
-    if let Some(branch) = git(&["branch", "--show-current"]) {
-        let changed: Vec<String> = git(&["status", "--porcelain"]).unwrap_or_default().lines()
-            .filter_map(|l| l.get(3..)).map(|p| p.trim_matches('"').to_string()).collect();
-        let shown: Vec<&str> = changed.iter().take(8).map(String::as_str).collect();
-        let changes = match changed.len() {
-            0 => "nothing uncommitted".to_string(),
-            n => format!("{n} uncommitted: {}{}", shown.join(", "), if n > 8 { ", …" } else { "" }),
-        };
-        out.push(format!("Git: branch {}; {changes}.", if branch.is_empty() { "(detached)" } else { &branch }));
-    }
+    let mut out: Vec<String> = git_line(cwd).into_iter().collect();
     let cmds = commands(cwd);
     if !cmds.is_empty() {
         out.push(format!("Build and test with: {}.", cmds.join(", ")));
@@ -211,7 +234,8 @@ or online instead of saying you lack access. Answer directly when no tool is nee
         format!("You are a terse coding agent working in {}.
 Use tools to inspect before editing. Prefer edit_file over write_file.
 Keep replies short. When done, say what changed in one or two lines.
-past_sessions lists, searches and reads this folder's earlier sessions (\"last session\", \"what did we do yesterday\").", cwd.display())
+past_sessions lists, searches and reads this folder's earlier sessions (\"last session\", \"what did we do yesterday\").
+qh_status shows live context left, tokens and cost, teammates and what they're editing, and git state.", cwd.display())
     };
     if cfg!(windows) {
         text += &format!("\nThis is Windows; the bash tool runs {}. Use Windows paths.", crate::platform::shell_name());
@@ -272,6 +296,14 @@ mod tests {
         let f = facts(&d);
         assert!(f.contains("Git: branch work; 3 uncommitted: "), "{f}");
         assert!(f.contains("Build and test with: pnpm run build, pnpm test, make test, make lint."), "{f}");
+        // the header's git line follows commits
+        let sys = format!("x\n{f}\ny");
+        assert!(refresh_git(&sys, &d).is_none());
+        run(&["add", "-A"]);
+        run(&["-c", "user.email=a@b", "-c", "user.name=a", "commit", "-qm", "init"]);
+        let fresh = refresh_git(&sys, &d).unwrap();
+        assert!(fresh.contains("Git: branch work; nothing uncommitted.\n") && fresh.ends_with("\ny"), "{fresh}");
+        assert!(git_status(&d).unwrap().ends_with("No upstream."));
         let _ = std::fs::remove_dir_all(&d);
         assert_eq!(facts(&std::env::temp_dir().join("qh-no-such-dir")), "");
         // a bare folder of Python files with unittest tests

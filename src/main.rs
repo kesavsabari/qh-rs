@@ -38,6 +38,7 @@ mod session;
 mod setup;
 mod skills;
 mod team;
+mod tls;
 mod teamcrypto;
 mod teamsetup;
 mod teamview;

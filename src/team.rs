@@ -85,6 +85,7 @@ pub struct Peer {
     gmsgs: Vec<(u64, u64, String, String)>, // their group lines: id, ts, group id, box (sealed with that group's key)
     notes: Vec<(u64, String, String, Vec<String>)>, // their change notes: id, text, file, functions/names changed
     pub claims: HashMap<String, Claims>,    // session -> what it changed lately
+    pub unmerged: Claims,                    // what their copy changes that isn't on main yet, however it got changed
     pub uses: HashMap<String, HashMap<String, u64>>, // session -> names its fresh code uses -> when
     pub waiting: Vec<Wait>,                 // their sessions paused on someone
     sheets: HashMap<String, Sheet>,         // session -> what it decided and does next
@@ -205,6 +206,7 @@ struct State {
     my_notes: Vec<Value>,           // change notes for teammates' agents, published: {id, ts, file, text}
     notes_seen: HashMap<String, u64>, // highest note id taken in, per person
     claims: HashMap<String, Claims>,  // our sessions' recent changes, published
+    unmerged: Claims,                 // what our copy changes that isn't on main yet (from git), published
     uses: HashMap<String, HashMap<String, u64>>, // names our sessions' fresh code uses, published
     waiting: Vec<Wait>,               // our sessions paused on a teammate
     sheets: HashMap<String, Sheet>,   // our sessions' decided/next lines, published
@@ -614,10 +616,12 @@ fn parse_data(p: &mut Peer, d: &Value) {
         g["boxes"].as_array().into_iter().flatten().filter_map(|b| b.as_str().map(String::from)).collect())).collect();
     p.gmsgs = d["gmsgs"].as_array().into_iter().flatten().map(|c| (c["id"].as_u64().unwrap_or(0), c["ts"].as_u64().unwrap_or(0),
         c["g"].as_str().unwrap_or("").to_string(), c["box"].as_str().unwrap_or("").to_string())).collect();
+    let claims_of = |files: &Value| -> Claims { files.as_object().into_iter().flatten().map(|(f, fns)| (f.clone(),
+        fns.as_object().into_iter().flatten().map(|(n, t)| (n.clone(), t.as_u64().unwrap_or(0))).collect())).collect() };
     if let Some(c) = d["claims"].as_object() {
-        p.claims = c.iter().map(|(sess, files)| (sess.clone(), files.as_object().into_iter().flatten().map(|(f, fns)| (f.clone(),
-            fns.as_object().into_iter().flatten().map(|(n, t)| (n.clone(), t.as_u64().unwrap_or(0))).collect())).collect())).collect();
+        p.claims = c.iter().map(|(sess, files)| (sess.clone(), claims_of(files))).collect();
     }
+    p.unmerged = claims_of(&d["unmerged"]);
     if let Some(u) = d["uses"].as_object() {
         p.uses = u.iter().map(|(sess, names)| (sess.clone(), names.as_object().into_iter().flatten()
             .map(|(n, t)| (n.clone(), t.as_u64().unwrap_or(0))).collect())).collect();
@@ -781,7 +785,7 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks, background: bool) -> Re
         removed: load_list("team-removed", &repo), admins: HashMap::new(),
         pins: serde_json::from_str(&std::fs::read_to_string(per_repo("team-pins", &repo)).unwrap_or_default()).unwrap_or_default(),
         gh_login: gh_login.clone(), git_ms: HashMap::new(), asked_github: HashMap::new(), warned: vec![], my_sha: String::new(), my_chat, chat_seen: HashMap::new(), unread: 0,
-        my_notes: vec![], notes_seen: HashMap::new(), claims: HashMap::new(), waiting: vec![], uses: HashMap::new(),
+        my_notes: vec![], notes_seen: HashMap::new(), claims: HashMap::new(), unmerged: HashMap::new(), waiting: vec![], uses: HashMap::new(),
         sheets: HashMap::new(), asked: vec![], answered: vec![], answerer: Some(hooks.answer.clone()),
         promises: serde_json::from_str::<Vec<Value>>(&std::fs::read_to_string(per_repo("team-promises", &repo)).unwrap_or_default())
             .unwrap_or_default().iter().map(promise_of).collect(),
@@ -839,6 +843,7 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks, background: bool) -> Re
                     d["notes"] = Value::from(s.my_notes.clone());
                     d["team_notes"] = json!(std::fs::read_to_string(team_notes_file(&s.repo)).unwrap_or_default());
                     d["claims"] = json!(s.claims);
+                    d["unmerged"] = json!(s.unmerged);
                     d["uses"] = json!(s.uses);
                     d["promises"] = promises_json(&s.promises);
                     d["sheets"] = s.sheets.iter().map(|(k, v)| (k.clone(), json!({"decided": v.decided, "next": v.next, "ts": v.ts})))
@@ -2628,13 +2633,30 @@ pub fn check_edit(session: &str, t: &Touched) -> Option<(String, String)> {
         }
         None
     }).flatten();
-    let Some((who, sess, func, ts, why)) = hit else { return check_contract(t) };
+    let Some((who, sess, func, ts, why)) = hit else { return check_unmerged(t).or_else(|| check_contract(t)) };
     log_to(&t.repo, &format!("your {session} waits for {who} · {func} in {}", t.file));
     Some((format!("paused: {who}/{sess} is changing {func} in {}. You'll be told when it's free · /anyway goes ahead", t.file),
           format!("error: paused, your edit was NOT made. {who}/{sess} is changing {func} in {} right now (last edit {}){why}. \
 Meanwhile work on something that doesn't touch {func}, or stop and tell the user you're waiting for {who}; you'll get a message the \
 moment {func} is free. Don't get around this by editing it another way. If the user wants you to go ahead anyway, they type /anyway.",
         t.file, ago(ts))))
+}
+
+/// A teammate's copy changes this function too and it isn't on main yet (online or not, however
+/// they changed it): both changes would collide at merge. Held once per function, not paused:
+/// nothing wakes it but their merge, so the agent hears it and the user decides.
+fn check_unmerged(t: &Touched) -> Option<(String, String)> {
+    let (who, func, since) = with(&t.repo, |s| s.peers.values().filter(|p| p.joined).find_map(|p| {
+        let fns = p.unmerged.get(&t.file)?;
+        t.funcs.iter().find_map(|f| fns.get(f).map(|ts| (p.login.clone(), f.clone(), *ts)))
+    })).flatten()?;
+    let key = format!("{}:{}:{who}", t.file, func);
+    if !with(&t.repo, |s| if s.warned.contains(&key) { false } else { s.warned.push(key); true }).unwrap_or(false) { return None }
+    log_to(&t.repo, &format!("{who} also changed {func} in {} (not on main yet)", t.file));
+    Some((format!("held: {who} also changed {func} in {}, not on main yet. Talk to them first · /anyway goes ahead", t.file),
+          format!("error: held, your edit was NOT made. {who} (a teammate) has changed {func} in {} too (first seen {}) and it isn't on main yet, \
+so both changes would conflict when merged. Stop and tell the user, so they can agree it with {who}, or work on something else. \
+If the user wants it anyway, they type /anyway (or retry: this is said once).", t.file, ago(since))))
 }
 
 /// Teammates' fresh code that uses a name, within the last hour: (login, session) pairs.
@@ -2716,6 +2738,35 @@ fn note_change(session: &str, topic: &str, t: &Touched, warn: &str) {
     });
 }
 
+/// What this copy changes that isn't on main yet, however it was changed (qh's agents, a shell,
+/// an editor, a merge): committed or not, pushed to a branch or not. file -> function -> since
+/// when ("" = the file, outside any function). Compared with the merge base of main, so a branch
+/// that sits unmerged for days still shows. `old` keeps each function's first-seen time.
+fn scan_unmerged(root: &Path, old: &Claims) -> Claims {
+    let Some(base) = ["origin/HEAD", "origin/main", "origin/master", "@{upstream}"].iter()
+        .find_map(|r| git(root, &["merge-base", "HEAD", r]).map(|s| s.trim().to_string()).filter(|s| !s.is_empty())) else { return HashMap::new() };
+    let mut files: Vec<String> = git(root, &["diff", "--name-only", "--no-renames", &base]).unwrap_or_default().lines().map(String::from).collect();
+    files.extend(git(root, &["ls-files", "--others", "--exclude-standard"]).unwrap_or_default().lines().map(String::from));
+    let now = now();
+    let mut out: Claims = HashMap::new();
+    for f in files.into_iter().filter(|f| !f.is_empty()).take(200) {
+        let before = git(root, &["show", &format!("{base}:{f}")]).unwrap_or_default();
+        let after = std::fs::read_to_string(root.join(&f)).unwrap_or_default();
+        if before.len().max(after.len()) > 1 << 20 { continue }
+        let (a, b): (Vec<&str>, Vec<&str>) = (before.lines().collect(), after.lines().collect());
+        let (del, add) = changed_lines(&a, &b);
+        let (oa, ob) = (owners(&before), owners(&after));
+        let real = |lines: &[&str], i: usize| lines.get(i).is_some_and(|l| !l.trim().is_empty());
+        let mut fns: Vec<String> = del.iter().filter(|&&i| real(&a, i)).map(|&i| oa.get(i).cloned().flatten().unwrap_or_default())
+            .chain(add.iter().filter(|&&i| real(&b, i)).map(|&i| ob.get(i).cloned().flatten().unwrap_or_default())).collect();
+        if fns.is_empty() { fns.push(String::new()) } // whitespace-only or binary: still the file
+        let was = old.get(&f);
+        let e = out.entry(f.clone()).or_default();
+        for n in fns { let since = was.and_then(|w| w.get(&n)).copied().unwrap_or(now); e.insert(n, since); }
+    }
+    out
+}
+
 /// Every few seconds: let go of claims on what we pushed (or that went stale), and wake our
 /// sessions whose function is free again.
 fn wake_check(repo: &str, root: &Path, hooks: &Hooks) {
@@ -2727,6 +2778,18 @@ fn wake_check(repo: &str, root: &Path, hooks: &Hooks) {
         due
     };
     let now = now();
+    static LAST_SCAN: Mutex<Option<Instant>> = Mutex::new(None);
+    let scan = {
+        let mut l = LAST_SCAN.lock().unwrap();
+        let due = l.is_none_or(|t| t.elapsed() >= Duration::from_secs(60));
+        if due { *l = Some(Instant::now()) }
+        due
+    };
+    if scan {
+        let old = with(repo, |s| s.unmerged.clone()).unwrap_or_default();
+        let p = scan_unmerged(root, &old);
+        with(repo, |s| if s.unmerged != p { s.unmerged = p; s.dirty = true });
+    }
     if due {
         // a file that matches what's upstream again was pushed (or put back): it's free
         let files: Vec<String> = with(repo, |s| s.claims.values().flat_map(|c| c.keys().cloned()).collect()).unwrap_or_default();
@@ -2789,6 +2852,19 @@ pub fn editing() -> Vec<String> {
 fn editing_in(peers: &HashMap<String, Peer>) -> Vec<String> {
     let now = now();
     let mut v: Vec<(u64, String)> = vec![];
+    for p in peers.values().filter(|p| p.joined) {
+        for (f, fns) in &p.unmerged {
+            // what's also a hot claim is listed below with its session; show the rest
+            let hot = |n: Option<&String>| p.online && p.claims.values().filter_map(|c| c.get(f))
+                .any(|x| x.iter().any(|(k, ts)| n.is_none_or(|n| n == k) && now.saturating_sub(*ts) < CLAIM_HOT));
+            let named: Vec<&String> = fns.keys().filter(|n| !n.is_empty()).collect();
+            let mut names: Vec<&String> = named.iter().copied().filter(|n| !hot(Some(n))).collect();
+            if if named.is_empty() { hot(None) } else { names.is_empty() } { continue }
+            names.sort();
+            let list = if names.is_empty() { String::new() } else { format!(" ({})", names.iter().map(|n| n.as_str()).collect::<Vec<_>>().join(", ")) };
+            v.push((fns.values().copied().min().unwrap_or(0), format!("{}: {f}{list} · not on main yet", p.login)));
+        }
+    }
     for p in peers.values().filter(|p| p.online) {
         for (session, c) in &p.claims {
             for (f, fns, ts) in claims_view(Some(c)).into_iter().filter(|x| now.saturating_sub(x.2) < CLAIM_HOT) {
@@ -3612,6 +3688,54 @@ mod tests {
     }
 
     #[test]
+    fn unmerged_work_shows_even_offline_without_repeating_hot_claims() {
+        use std::collections::HashMap;
+        let t = super::now();
+        let mut anu = super::Peer { login: "anu".into(), joined: true, online: false, ..Default::default() };
+        anu.unmerged = HashMap::from([("db.js".to_string(), HashMap::from([("save".to_string(), t - 86400)]))]);
+        let mut rahul = super::Peer { login: "rahul".into(), joined: true, online: true, ..Default::default() };
+        rahul.claims = HashMap::from([("api".to_string(), HashMap::from([("server.js".to_string(), HashMap::from([("route".to_string(), t)]))]))]);
+        rahul.unmerged = HashMap::from([("server.js".to_string(), HashMap::from([("route".to_string(), t), ("listen".to_string(), t)]))]);
+        let peers = HashMap::from([("anu".to_string(), anu), ("rahul".to_string(), rahul)]);
+        let mut got = super::editing_in(&peers);
+        got.sort();
+        assert_eq!(got, vec!["anu: db.js (save) · not on main yet", "rahul/api: server.js (route)", "rahul: server.js (listen) · not on main yet"]);
+    }
+
+    #[test]
+    fn unmerged_comes_from_git_whatever_made_the_change() {
+        let d = std::env::temp_dir().join(format!("qh-pending-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let run = |dir: &std::path::Path, a: &[&str]| assert!(std::process::Command::new("git").current_dir(dir).args(a)
+            .env("GIT_AUTHOR_NAME", "t").env("GIT_AUTHOR_EMAIL", "t@t").env("GIT_COMMITTER_NAME", "t").env("GIT_COMMITTER_EMAIL", "t@t")
+            .output().unwrap().status.success(), "{a:?}");
+        let (up, w) = (d.join("up.git"), d.join("w"));
+        std::fs::create_dir_all(&w).unwrap();
+        run(&d, &["init", "-q", "--bare", "-b", "main", up.to_str().unwrap()]);
+        run(&w, &["init", "-q", "-b", "main"]);
+        std::fs::write(w.join("a.py"), "def one():\n    return 1\n\ndef two():\n    return 2\n").unwrap();
+        run(&w, &["add", "."]);
+        run(&w, &["commit", "-qm", "a"]);
+        run(&w, &["remote", "add", "origin", up.to_str().unwrap()]);
+        run(&w, &["push", "-q", "origin", "main"]);
+        run(&w, &["remote", "set-head", "origin", "main"]);
+        assert!(super::scan_unmerged(&w, &Default::default()).is_empty(), "nothing off main");
+        // a branch with a committed change (as a merge or another tool would leave it), plus a shell edit and a new file
+        run(&w, &["checkout", "-qb", "side"]);
+        std::fs::write(w.join("a.py"), "def one():\n    return 11\n\ndef two():\n    return 2\n").unwrap();
+        run(&w, &["commit", "-qam", "b"]);
+        std::fs::write(w.join("a.py"), "def one():\n    return 11\n\ndef two():\n    return 22\n").unwrap();
+        std::fs::write(w.join("new.txt"), "hi\n").unwrap();
+        let old = std::collections::HashMap::from([("a.py".to_string(), std::collections::HashMap::from([("one".to_string(), 5u64)]))]);
+        let p = super::scan_unmerged(&w, &old);
+        assert_eq!(p["a.py"].len(), 2);
+        assert_eq!(p["a.py"]["one"], 5, "first-seen time kept");
+        assert!(p["a.py"].contains_key("two"));
+        assert!(p["new.txt"].contains_key(""));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
     fn a_team_in_the_background_shows_how_to_open_it() {
         assert_eq!(super::background_hint("", &["kesav/shop".into()]).as_deref(), Some("team shop · Ctrl+] to open"));
         assert_eq!(super::background_hint("kesav/shop", &["kesav/shop".into()]), None, "on screen: the full line shows instead");
@@ -3732,7 +3856,7 @@ mod tests {
             seen: HashMap::new(), pending: vec![], roles: HashMap::new(), approved: vec![], asking: vec![], invites: HashMap::new(),
             epoch: 0, removed: vec![], admins: HashMap::new(), pins: HashMap::new(), gh_login: me.into(), git_ms: HashMap::new(),
             asked_github: HashMap::new(), warned: vec![], my_sha: String::new(),
-            chat: vec![], my_chat: vec![], chat_seen: HashMap::new(), my_notes: vec![], notes_seen: HashMap::new(), claims: HashMap::new(),
+            chat: vec![], my_chat: vec![], chat_seen: HashMap::new(), my_notes: vec![], notes_seen: HashMap::new(), claims: HashMap::new(), unmerged: HashMap::new(),
             uses: HashMap::new(), waiting: vec![], sheets: HashMap::new(), asked: vec![], answered: vec![], answers: "auto".into(),
             answerer: None, promises: vec![], last_answer: HashMap::new(), unread: 0, dirty: false, running: Default::default(), finished: Default::default(),
             secret: None, my_dms: vec![], my_groups: vec![], my_gmsgs: vec![], groups: HashMap::new(), msgs: vec![],
@@ -3808,6 +3932,24 @@ mod tests {
     fn peer(login: &str, sessions: &[&str], online: bool) -> Peer {
         Peer { login: login.into(), online, joined: true, ts: now(),
                sessions: sessions.iter().map(|s| (s.to_string(), "idle".into(), String::new())).collect(), ..Default::default() }
+    }
+
+    #[test]
+    fn an_edit_is_held_once_when_an_offline_teammate_changed_the_same_function() {
+        let repo = "o/held-unmerged";
+        let mut s = state("alice");
+        s.repo = repo.into();
+        let mut bob = peer("bob", &[], false);
+        bob.unmerged = HashMap::from([("api/user.rs".into(), HashMap::from([("get_user".to_string(), now() - 3 * 86400)]))]);
+        s.peers.insert("bob".into(), bob);
+        STATES.lock().unwrap().get_or_insert_with(HashMap::new).insert(repo.into(), s);
+        let t = |f: &str| Touched { repo: repo.into(), root: std::env::temp_dir(), file: "api/user.rs".into(), funcs: vec![f.into()],
+            removed: vec![], uses: vec![], bodies: vec![] };
+        assert!(check_edit("main", &t("list_users")).is_none(), "another function: fine");
+        let (line, err) = check_edit("main", &t("get_user")).expect("held");
+        assert!(line.contains("bob also changed get_user") && err.contains("NOT made") && err.contains("first seen 3d ago"), "{line} / {err}");
+        assert!(check_edit("main", &t("get_user")).is_none(), "said once; a retry goes ahead");
+        STATES.lock().unwrap().as_mut().unwrap().remove(repo);
     }
 
     #[test]

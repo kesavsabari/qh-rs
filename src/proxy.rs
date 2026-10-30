@@ -293,6 +293,7 @@ fn nuget_json(body: &str, local: &str) -> String {
 
 /// A NuGet config with nuget.org replaced by the mirror, whose address NuGet reads from
 /// QH_NUGET_INDEX (it expands %VARS% in config values), so one file serves every qh's port.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub const NUGET_CONFIG: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 <!-- added by qh for its Windows sandbox -->
 <configuration>

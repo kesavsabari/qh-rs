@@ -361,6 +361,11 @@ python -c \"import urllib.request as u; print('py=%d' % u.urlopen('https://index
     // Git for Windows' curl is Schannel-only: it fails, and the hint says what to use instead
     let (_, out) = l.bash("curl -sS -m 20 -o /dev/null https://index.crates.io/config.json && echo curl-ok");
     assert!(out.contains("curl-ok") || out.contains("Windows' own TLS"), "curl's TLS failure gets the Windows hint: {out}");
+    // .NET's TLS is Schannel too: dotnet restore gets nuget.org through qh's plain-HTTP mirror
+    let (_, out) = l.bash("if dotnet --list-sdks | grep -q .; then mkdir n && cd n && \
+printf '<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>netstandard2.0</TargetFramework></PropertyGroup><ItemGroup><PackageReference Include=\"Newtonsoft.Json\" Version=\"13.0.3\" /></ItemGroup></Project>' > n.csproj && \
+dotnet restore 2>&1 | tail -5 && ls \"$NUGET_PACKAGES/newtonsoft.json\" && echo restore-ok; else echo no-sdk; fi");
+    assert!(out.contains("restore-ok") || out.contains("no-sdk"), "dotnet restore through the mirror: {out}");
     // a server of yours on loopback (Ollama, a debug port) is out of reach: only the proxy's ports are open
     let host = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = host.local_addr().unwrap().port();

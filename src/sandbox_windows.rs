@@ -217,6 +217,12 @@ fn mirror_index(port: u16) -> String {
     format!("sparse+http://127.0.0.1:{port}/qh-mirror/crates-io/")
 }
 
+/// The NuGet mirror's service index, through the proxy on `port` (the sandbox's NuGet config
+/// reads it from QH_NUGET_INDEX).
+fn nuget_index(port: u16) -> String {
+    format!("http://127.0.0.1:{port}/qh-mirror/nuget/v3/index.json")
+}
+
 #[cfg(not(windows))]
 pub fn ready() -> bool {
     false
@@ -518,15 +524,22 @@ Windows asks for admin once to add two hidden sandbox users. Until then qh asks 
         let yours = ["config.toml", "config"].iter().find_map(|f| fs::read_to_string(home.join(".cargo").join(f)).ok()).unwrap_or_default();
         let conf = cargo_config(&yours);
         if fs::read_to_string(cargo.join("config.toml")).ok().as_deref() != Some(conf.as_str()) { fs::write(cargo.join("config.toml"), &conf)? }
+        // NuGet's package folder and caches, and dotnet's first-run files: writable, unlike yours
+        let (nuget, dotnet) = (dir().join("nuget"), dir().join("dotnet"));
+        for d in [&nuget, &dotnet] { fs::create_dir_all(d)? }
         let mut p = p.clone();
-        p.write.push(cargo.clone());
+        p.write.extend([cargo.clone(), nuget.clone(), dotnet.clone()]);
         grant(&p, sid.0)?;
         let mut cmd = std::process::Command::new(std::env::current_exe()?);
         cmd.arg("__winsbx").arg(if p.net == Net::Off { "off" } else { "on" }).arg(program).args(args);
         cmd.envs(git_config(std::env::var("GIT_CONFIG_COUNT").ok().as_deref()));
         // curl as Git for Windows ships it can use OpenSSL too
         cmd.env("CURL_SSL_BACKEND", "openssl").env("CARGO_HOME", &cargo);
-        if let Some(port) = port { cmd.env("CARGO_REGISTRIES_QH_MIRROR_INDEX", mirror_index(port)); }
+        cmd.env("NUGET_PACKAGES", nuget.join("packages")).env("NUGET_HTTP_CACHE_PATH", nuget.join("http"))
+            .env("NUGET_PLUGINS_CACHE_PATH", nuget.join("plugins")).env("DOTNET_CLI_HOME", &dotnet).env("DOTNET_NOLOGO", "1");
+        if let Some(port) = port {
+            cmd.env("CARGO_REGISTRIES_QH_MIRROR_INDEX", mirror_index(port)).env("QH_NUGET_INDEX", nuget_index(port));
+        }
         Ok(cmd)
     }
 
@@ -670,6 +683,12 @@ Windows asks for admin once to add two hidden sandbox users. Until then qh asks 
         // the command runs as the same user: without this it could open this (unrestricted) process
         // and write through it. OWNER RIGHTS limits the owner to reading the DACL, so it can't be undone.
         if let Err(e) = lock_self() { return fail("can't protect the runner", e) }
+        // NuGet reads the user config from the sandbox user's own profile (not %APPDATA%): written
+        // here, before the token is restricted, so the command itself can't change it
+        let nuget = profile().join(r"AppData\Roaming\NuGet");
+        if fs::read_to_string(nuget.join("NuGet.Config")).ok().as_deref() != Some(crate::proxy::NUGET_CONFIG) {
+            let _ = fs::create_dir_all(&nuget).and_then(|_| fs::write(nuget.join("NuGet.Config"), crate::proxy::NUGET_CONFIG));
+        }
         let token = match restricted(&group.to_string_lossy()) { Ok(t) => t, Err(e) => return fail("can't make the restricted token", e) };
         let mut cmdline = command_line(prog, &a[2..]);
         let p = PathBuf::from(prog);
@@ -1169,5 +1188,6 @@ mod tests {
         assert_eq!(toml["source"]["crates-io"]["replace-with"].as_str(), Some("qh-mirror"));
         assert_eq!(cargo_config("[source.crates-io]\nreplace-with = \"corp\"\n"), "[source.crates-io]\nreplace-with = \"corp\"");
         assert_eq!(mirror_index(47610), "sparse+http://127.0.0.1:47610/qh-mirror/crates-io/");
+        assert_eq!(nuget_index(47610), "http://127.0.0.1:47610/qh-mirror/nuget/v3/index.json");
     }
 }

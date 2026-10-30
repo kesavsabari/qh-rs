@@ -207,9 +207,12 @@ fn parse(head: &[u8]) -> Option<(String, u16, Option<Vec<u8>>)> {
     Some((host, port, Some(out)))
 }
 
-/// Path prefix → upstream: the crates.io sparse index and its crate downloads.
-const MIRRORS: [(&str, &str); 2] = [("/qh-mirror/crates-io/", "https://index.crates.io/"),
-                                     ("/qh-mirror/crates-dl/", "https://static.crates.io/crates/")];
+/// Path prefix → upstream: the crates.io sparse index and its crate downloads, and nuget.org's v3
+/// feed (service index, registrations, package downloads all live on api.nuget.org).
+const MIRRORS: [(&str, &str); 3] = [("/qh-mirror/crates-io/", "https://index.crates.io/"),
+                                     ("/qh-mirror/crates-dl/", "https://static.crates.io/crates/"),
+                                     ("/qh-mirror/nuget/", NUGET)];
+const NUGET: &str = "https://api.nuget.org/";
 
 /// A request for one of the mirrors, in origin-form (sent straight to the proxy, not through it).
 struct MirrorReq { method: String, url: String, host: String, local: String, headers: Vec<(String, String)> }
@@ -240,8 +243,9 @@ fn mirror_request(head: &[u8]) -> Option<MirrorReq> {
 }
 
 /// Fetch a mirror request upstream (no redirects: they could lead off the allowlist) and pass the
-/// response back, closing the connection after it. The index's config.json is rewritten so crate
-/// downloads come back through the mirror too.
+/// response back, closing the connection after it. The index's config.json and nuget.org's JSON
+/// are rewritten so the links in them (crate downloads, registrations, packages) come back through
+/// the mirror too.
 fn mirror(c: &mut dyn Stream, m: MirrorReq, decide: &(dyn Fn(&str, u16) -> bool + Send + Sync)) {
     if !decide(&m.host, 443) {
         return reply(c, "403 Forbidden", &format!("qh sandbox: {} is not on the network allowlist (the user declined or wasn't asked)", m.host));
@@ -260,8 +264,10 @@ fn mirror(c: &mut dyn Stream, m: MirrorReq, decide: &(dyn Fn(&str, u16) -> bool 
         if let Some(v) = r.header(k) { head += &format!("{k}: {v}\r\n") }
     }
     let config = m.method == "GET" && m.url == "https://index.crates.io/config.json" && r.status() == 200;
-    if config {
-        let body = r.into_string().map(|b| config_json(&b, &m.local)).unwrap_or_default();
+    let nuget = m.method == "GET" && m.url.starts_with(NUGET) && r.status() == 200
+        && r.header("content-type").is_some_and(|t| t.contains("json"));
+    if config || nuget {
+        let body = r.into_string().map(|b| if config { config_json(&b, &m.local) } else { nuget_json(&b, &m.local) }).unwrap_or_default();
         let _ = write!(c, "{head}content-length: {}\r\nconnection: close\r\n\r\n{body}", body.len());
     } else {
         // no content-length: the body may have been decompressed on the way; the close ends it
@@ -279,6 +285,23 @@ fn config_json(body: &str, local: &str) -> String {
     v["dl"] = format!("http://{local}/qh-mirror/crates-dl").into();
     v.to_string()
 }
+
+/// nuget.org JSON with every api.nuget.org link pointed at the mirror on `local` (host:port).
+fn nuget_json(body: &str, local: &str) -> String {
+    body.replace(NUGET, &format!("http://{local}/qh-mirror/nuget/"))
+}
+
+/// A NuGet config with nuget.org replaced by the mirror, whose address NuGet reads from
+/// QH_NUGET_INDEX (it expands %VARS% in config values), so one file serves every qh's port.
+pub const NUGET_CONFIG: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<!-- added by qh for its Windows sandbox -->
+<configuration>
+  <packageSources>
+    <clear />
+    <add key="qh-mirror" value="%QH_NUGET_INDEX%" protocolVersion="3" allowInsecureConnections="true" />
+  </packageSources>
+</configuration>
+"#;
 
 /// host[:port] or [v6][:port] → (lowercase host without brackets or trailing dot, port).
 fn authority(s: &str, default: Option<u16>) -> Option<(String, u16)> {
@@ -496,6 +519,10 @@ mod tests {
                     b"GET /qh-mirror/crates-io/ HTTP/1.1\r\nHost: 127.0.0.1:1\r\n\r\n"] {
             assert!(mirror_request(bad).is_none(), "{}", String::from_utf8_lossy(bad));
         }
+        let m = mirror_request(b"GET /qh-mirror/nuget/v3/index.json HTTP/1.1\r\nHost: 127.0.0.1:47610\r\n\r\n").unwrap();
+        assert_eq!((m.url.as_str(), m.host.as_str()), ("https://api.nuget.org/v3/index.json", "api.nuget.org"));
+        assert_eq!(nuget_json(r#"{"@id":"https://api.nuget.org/v3-flatcontainer/","x":"https://azuresearch-usnc.nuget.org/query"}"#, "127.0.0.1:47610"),
+            r#"{"@id":"http://127.0.0.1:47610/qh-mirror/nuget/v3-flatcontainer/","x":"https://azuresearch-usnc.nuget.org/query"}"#);
         let c = config_json(r#"{"dl":"https://static.crates.io/crates","api":"https://crates.io"}"#, "127.0.0.1:47610");
         let v: serde_json::Value = serde_json::from_str(&c).unwrap();
         assert_eq!((v["dl"].as_str(), v["api"].as_str()), (Some("http://127.0.0.1:47610/qh-mirror/crates-dl"), Some("https://crates.io")));
@@ -534,6 +561,46 @@ mod tests {
         let cache: Vec<String> = std::fs::read_dir(home.join("registry/cache")).unwrap().flatten()
             .map(|e| e.file_name().to_string_lossy().into_owned()).collect();
         assert!(!cache.is_empty() && cache.iter().all(|n| n.starts_with("127.0.0.1-")), "{cache:?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Real dotnet restore, real nuget.org, through the mirror only (QH_REALWORK=1: needs internet).
+    #[test]
+    fn dotnet_restores_through_the_mirror() {
+        if std::env::var("QH_REALWORK").is_err() { return }
+        let p = start(Arc::new(|h: &str, _| h == "api.nuget.org")).unwrap();
+        let sdk = Command::new("dotnet").arg("--list-sdks").output().ok().filter(|o| !o.stdout.is_empty());
+        let Some(sdk) = sdk else {
+            // no SDK here: walk what restore fetches (service index → package base → versions →
+            // .nupkg), and every link it follows must lead back to the mirror
+            let get = |u: &str| ureq::get(u).call().unwrap();
+            let json = |u: &str| serde_json::from_str::<serde_json::Value>(&get(u).into_string().unwrap()).unwrap();
+            let mirror = format!("http://127.0.0.1:{}/qh-mirror/nuget/", p.port);
+            let index = json(&format!("{mirror}v3/index.json"));
+            let base = index["resources"].as_array().unwrap().iter()
+                .find(|r| r["@type"] == "PackageBaseAddress/3.0.0").unwrap()["@id"].as_str().unwrap().to_string();
+            assert!(base.starts_with(&mirror), "{base}");
+            let versions = json(&format!("{base}newtonsoft.json/index.json"));
+            assert!(versions["versions"].as_array().unwrap().iter().any(|v| v == "13.0.3"));
+            let mut pkg = vec![];
+            get(&format!("{base}newtonsoft.json/13.0.3/newtonsoft.json.13.0.3.nupkg")).into_reader().read_to_end(&mut pkg).unwrap();
+            assert!(pkg.starts_with(b"PK") && pkg.len() > 100_000, "{} bytes", pkg.len());
+            return;
+        };
+        let major = String::from_utf8_lossy(&sdk.stdout).split('.').next().unwrap_or("8").trim().to_string();
+        let d = std::env::temp_dir().join(format!("qh-nuget-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        // as the Windows sandbox sets it up: a fixed config, the mirror's address per command in the env
+        std::fs::write(d.join("NuGet.Config"), NUGET_CONFIG).unwrap();
+        std::fs::write(d.join("m.csproj"), format!("<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net{major}.0</TargetFramework></PropertyGroup>\
+<ItemGroup><PackageReference Include=\"Newtonsoft.Json\" Version=\"13.0.3\" /></ItemGroup></Project>")).unwrap();
+        let o = Command::new("dotnet").args(["restore", "--configfile", "NuGet.Config"]).current_dir(&d)
+            .env("QH_NUGET_INDEX", format!("http://127.0.0.1:{}/qh-mirror/nuget/v3/index.json", p.port))
+            .env("NUGET_PACKAGES", d.join("pkgs")).env("NUGET_HTTP_CACHE_PATH", d.join("http"))
+            .env("DOTNET_CLI_TELEMETRY_OPTOUT", "1").env_remove("HTTPS_PROXY").env_remove("https_proxy").output().unwrap();
+        assert!(o.status.success(), "{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+        assert!(d.join("pkgs/newtonsoft.json/13.0.3").is_dir());
         let _ = std::fs::remove_dir_all(&d);
     }
 }

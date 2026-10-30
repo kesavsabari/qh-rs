@@ -2855,15 +2855,19 @@ pub fn commit_contracts(cwd: &Path) -> Option<(String, String)> {
     let (root, repo) = repo_of(cwd)?;
     if !running_for(&repo) { return None }
     let (gone, changed) = gone_and_changed(&root);
-    let breaks = with(&repo, |s| contract_breaks(s, &gone, &changed))?;
+    // each break is said once: one already let through (and committed) stays off main until merge,
+    // so without this every later commit would hold on it again and re-ask the teammate
+    let breaks = with(&repo, |s| contract_breaks(s, &gone, &changed).into_iter().filter(|b| {
+        let k = format!("contract:{}:{}", b.0, b.1);
+        !s.warned.contains(&k) && { s.warned.push(k); true }
+    }).collect::<Vec<_>>())?;
     if breaks.is_empty() { return None }
     let list = breaks.iter().map(|b| b.1.as_str()).collect::<Vec<_>>().join("; ");
-    let key = format!("contract:{list}");
-    if !with(&repo, |s| if s.warned.contains(&key) { false } else { s.warned.push(key); true }).unwrap_or(false) { return None }
     // the request: each teammate whose code it breaks hears it now, from us
     let sent: Vec<String> = with(&repo, |s| {
         let me = s.me.clone();
         let mut who: Vec<String> = breaks.iter().map(|b| b.0.clone()).collect();
+        who.sort();
         who.dedup();
         who.into_iter().filter(|l| {
             let mine: Vec<&str> = breaks.iter().filter(|b| b.0 == *l).map(|b| b.1.as_str()).collect();

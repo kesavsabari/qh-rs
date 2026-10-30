@@ -1865,6 +1865,35 @@ fn accepted_text(inc: &Incoming) -> String {
     format!("[accepted request from {}]: {}", inc.from, inc.text)
 }
 
+/// What the requester reads when we accept (the chat already shows it's from us).
+fn accepted_note(inc: &Incoming) -> String {
+    format!("accepted your request \"{}\": it's running in their {}", clip_to(bare(&inc.text), 80), inc.session)
+}
+
+/// What the requester reads when the work we accepted is over: the agent's last words, or that it stopped.
+fn done_text(text: &str, fin: &str) -> String {
+    let what = clip_to(bare(text), 80);
+    if fin == "interrupted" || fin.starts_with("error") { format!("stopped your request \"{what}\" before it finished") }
+    else { format!("finished your request \"{what}\": {}", clip_to(fin.trim(), 400)) }
+}
+
+/// A DM sent now over the direct line; a failure only goes in the team log.
+fn dm_now(repo: &str, to: &str, text: &str) {
+    match with(repo, |s| dm_locked(s, to, text)) {
+        Some(Ok(q)) => quick_send(repo, &q),
+        Some(Err(e)) => log_to(repo, &format!("couldn't tell {to}: {e}")),
+        None => {}
+    }
+}
+
+/// A session's turn on an accepted request ended: the requester hears how it went.
+pub fn request_done(cwd: &Path, request: &str, fin: &str) {
+    let Some((from, text)) = request.strip_prefix("[accepted request from ").and_then(|r| r.split_once("]: ")) else { return };
+    let Some((_, repo)) = repo_of(cwd) else { return };
+    if !running_for(&repo) { return }
+    dm_now(&repo, from, &done_text(text.split("\n\n[from ").next().unwrap_or(text), fin));
+}
+
 /// What the requester reads when we decline.
 fn declined_text(me: &str, inc: &Incoming) -> String {
     format!("{me} declined: \"{}\"", clip_to(bare(&inc.text), 120))
@@ -1913,6 +1942,8 @@ pub fn decide(from: &str, id: u64, answer: &str) -> Option<(String, String)> {
         let session = q.session.clone();
         return run.map(|f| { f(q); (String::new(), format!("your {session} is answering {}'s question (read-only)", inc.from)) });
     }
+    // the requester's side otherwise only ever sees "asked", never that it started
+    dm_now(&repo, &inc.from, &accepted_note(&inc));
     Some((inc.session.clone(), accepted_text(&inc)))
 }
 
@@ -2834,16 +2865,18 @@ fn gone_and_changed(root: &Path) -> (Vec<String>, Vec<String>) {
     (gone, changed)
 }
 
-/// What those break for teammates: (login, what), sorted. A gone name their code from the last
-/// day uses, or a changed function they hold a promise on.
-fn contract_breaks(s: &State, gone: &[String], changed: &[String]) -> Vec<(String, String)> {
-    let mut v: Vec<(String, String)> = vec![];
+/// What those break for teammates: (login, what, the same said to them), sorted. A gone name their
+/// code from the last day uses, or a changed function they hold a promise on.
+fn contract_breaks(s: &State, gone: &[String], changed: &[String]) -> Vec<(String, String, String)> {
+    let mut v: Vec<(String, String, String)> = vec![];
     for n in gone {
-        v.extend(users_within(s, n, 86400).into_iter().map(|(l, sess)| (l.clone(), format!("{n} is removed or renamed and {l}/{sess}'s code uses it"))));
+        v.extend(users_within(s, n, 86400).into_iter().map(|(l, _)| (l.clone(), format!("{n} is removed or renamed and {l}'s code uses it"),
+            format!("{n} is removed or renamed and your code uses it"))));
     }
     for p in s.peers.values().filter(|p| p.joined) {
         v.extend(p.promises.iter().filter(|x| changed.contains(&x.name))
-            .map(|x| (p.login.clone(), format!("{} changed and {}/{} counts on: \"{}\"", x.name, p.login, x.session, x.text))));
+            .map(|x| (p.login.clone(), format!("{} changed and {} counts on: \"{}\"", x.name, p.login, x.text),
+                      format!("{} changed and you count on: \"{}\"", x.name, x.text))));
     }
     v.sort();
     v.dedup();
@@ -2869,13 +2902,12 @@ pub fn commit_contracts(cwd: &Path) -> Option<(String, String)> {
     let list = breaks.iter().map(|b| b.1.as_str()).collect::<Vec<_>>().join("; ");
     // the request: each teammate whose code it breaks hears it now, from us
     let sent: Vec<String> = with(&repo, |s| {
-        let me = s.me.clone();
         let mut who: Vec<String> = breaks.iter().map(|b| b.0.clone()).collect();
         who.sort();
         who.dedup();
         who.into_iter().filter(|l| {
-            let mine: Vec<&str> = breaks.iter().filter(|b| b.0 == *l).map(|b| b.1.as_str()).collect();
-            dm_locked(s, l, &format!("{me} is about to commit a change that breaks what your code counts on: {}. Reply if it has to \
+            let mine: Vec<&str> = breaks.iter().filter(|b| b.0 == *l).map(|b| b.2.as_str()).collect();
+            dm_locked(s, l, &format!("I'm about to commit a change that breaks what your code counts on: {}. Reply if it has to \
 stay as it was; otherwise update your side to match.", mine.join("; "))).is_ok()
         }).collect()
     }).unwrap_or_default();
@@ -2890,28 +2922,26 @@ the user wants it anyway, run the same command again: this is said once.")))
 /// Every few seconds: let go of claims on what we pushed (or that went stale), and wake our
 /// sessions whose function is free again.
 fn wake_check(repo: &str, root: &Path, hooks: &Hooks) {
-    static LAST_RELEASE: Mutex<Option<Instant>> = Mutex::new(None);
-    let due = {
-        let mut l = LAST_RELEASE.lock().unwrap();
-        let due = l.is_none_or(|t| t.elapsed() >= Duration::from_secs(20));
-        if due { *l = Some(Instant::now()) }
+    // per repo: with two team projects open, one's check mustn't push back the other's
+    static LAST_RELEASE: Mutex<Option<HashMap<String, Instant>>> = Mutex::new(None);
+    static LAST_SCAN: Mutex<Option<HashMap<String, Instant>>> = Mutex::new(None);
+    static LAST_TIPS: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
+    let every = |m: &Mutex<Option<HashMap<String, Instant>>>, secs: u64, now: bool| {
+        let mut l = m.lock().unwrap();
+        let l = l.get_or_insert_with(HashMap::new);
+        let due = now || l.get(repo).is_none_or(|t| t.elapsed() >= Duration::from_secs(secs));
+        if due { l.insert(repo.to_string(), Instant::now()); }
         due
     };
+    let due = every(&LAST_RELEASE, 20, false);
     let now = now();
-    static LAST_SCAN: Mutex<Option<Instant>> = Mutex::new(None);
-    static LAST_TIPS: Mutex<String> = Mutex::new(String::new());
     // a commit, push or pull moves these: scan now, or a teammate who pulls our push straight
     // away is held for up to a minute on work that is already on main (seen live)
     // one at a time: a clone of an empty repo has no origin/HEAD, and one bad name fails them all
     let tips: String = ["HEAD", "origin/HEAD", "origin/main", "origin/master", "@{upstream}"].iter()
         .filter_map(|r| git(root, &["rev-parse", "--verify", "-q", r])).collect();
-    let moved = std::mem::replace(&mut *LAST_TIPS.lock().unwrap(), tips.clone()) != tips;
-    let scan = {
-        let mut l = LAST_SCAN.lock().unwrap();
-        let due = moved || l.is_none_or(|t| t.elapsed() >= Duration::from_secs(60));
-        if due { *l = Some(Instant::now()) }
-        due
-    };
+    let moved = LAST_TIPS.lock().unwrap().get_or_insert_with(HashMap::new).insert(repo.to_string(), tips.clone()) != Some(tips);
+    let scan = every(&LAST_SCAN, 60, moved);
     if scan {
         let old = with(repo, |s| s.unmerged.clone()).unwrap_or_default();
         let p = scan_unmerged(root, &old);
@@ -3929,7 +3959,7 @@ mod tests {
         let b = super::contract_breaks(&st, &gone, &changed);
         assert_eq!(b.len(), 2, "{b:?}");
         assert!(b.iter().all(|x| x.0 == "bob"));
-        assert!(b.iter().any(|x| x.1.contains("get_user is removed") && x.1.contains("bob/w1")));
+        assert!(b.iter().any(|x| x.1.contains("get_user is removed") && x.1.contains("bob's code") && x.2.contains("your code")));
         assert!(b.iter().any(|x| x.1.contains("rate changed") && x.1.contains("a fraction")));
         assert!(super::contract_breaks(&st, &[], &["other".into()]).is_empty());
         assert!(crate::review::is_commit("git add . && git -C x commit -m hi") && !crate::review::is_commit("git log"));
@@ -4443,6 +4473,9 @@ mod tests {
         // accept: delivered with the tag, nothing sent back
         let inc = decide_locked(&mut s, "bob", 1, "once").unwrap();
         assert_eq!(accepted_text(&inc), "[accepted request from bob]: [from bob's agent] build the backend");
+        assert_eq!(accepted_note(&inc), "accepted your request \"build the backend\": it's running in their main");
+        assert_eq!(done_text(&inc.text, " built it "), "finished your request \"build the backend\": built it");
+        assert!(done_text(&inc.text, "interrupted").contains("stopped your request"));
         assert!(s.my_dms.is_empty());
         // reply: a private line back; the request still waits
         let r = reply_request_locked(&mut s, "bob", 2, "which framework?").unwrap();

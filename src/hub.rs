@@ -634,6 +634,8 @@ session tests). Messages from other sessions start with [from <name>]. qh saves 
             let request = text.clone();
             let fin = engine::run(&hub, &m, text);
             hub.release_files(&m.name);
+            // a teammate's request we accepted: they hear it's done (or stopped)
+            crate::team::request_done(&m.cwd(), &request, &fin);
             // in a team project: refresh this session's fact sheet (decided / next) for teammates
             if crate::team::running_here(&m.cwd()) && !fin.starts_with("error") && fin != "interrupted" {
                 let (hub, m, fin) = (hub.clone(), m.clone(), fin.clone());

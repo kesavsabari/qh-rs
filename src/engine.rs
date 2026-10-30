@@ -1010,18 +1010,8 @@ relevant files first, then call ask_model again with the code, error or plan pas
             }
         }
     }
-    // a secret, a write outside the project, a protected path, an unsandboxed run: asked in every mode
-    let mut approved = None; // the agent never sees the card, so it's told the user approved
-    if let Some(why) = crate::sandbox::guard(name, &args, &cwd, &m.root, &hub.cfg) {
-        if !hub.confirm(m, name, &args, Some(&why)) {
-            return format!("denied by user: it {why}. Don't try another way around it; ask the user if it's needed.");
-        }
-        approved = Some(why);
-    } else if tools::risky(name, &args, &hub.cfg) && !allowed(&lock(&m.set).allow, name, &args)
-        && !hub.confirm(m, name, &args, None) {
-        return "denied by user".into();
-    }
-    // a commit or push that breaks what a teammate's code counts on: said once, and they're asked
+    // a commit or push that breaks what a teammate's code counts on: said once, and they're asked;
+    // before the allow prompt, so the user never approves a command that is then held
     if name == "bash" && { let c = args["cmd"].as_str().unwrap_or(""); crate::review::is_push(c) || crate::review::is_commit(c) } {
         if let Some((notice, msg)) = crate::team::commit_contracts(&cwd) {
             hub.emit(&m.name, Event::Notice(notice));
@@ -1034,6 +1024,17 @@ relevant files first, then call ask_model again with the code, error or plan pas
             hub.emit(&m.name, Event::Notice(notice));
             return msg;
         }
+    }
+    // a secret, a write outside the project, a protected path, an unsandboxed run: asked in every mode
+    let mut approved = None; // the agent never sees the card, so it's told the user approved
+    if let Some(why) = crate::sandbox::guard(name, &args, &cwd, &m.root, &hub.cfg) {
+        if !hub.confirm(m, name, &args, Some(&why)) {
+            return format!("denied by user: it {why}. Don't try another way around it; ask the user if it's needed.");
+        }
+        approved = Some(why);
+    } else if tools::risky(name, &args, &hub.cfg) && !allowed(&lock(&m.set).allow, name, &args)
+        && !hub.confirm(m, name, &args, None) {
+        return "denied by user".into();
     }
     // a push in a team project: the owners of the changed code get to review it first (bounded wait)
     let review = if name == "bash" && crate::review::is_push(args["cmd"].as_str().unwrap_or("")) && crate::team::running_here(&cwd) {

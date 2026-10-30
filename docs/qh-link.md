@@ -141,8 +141,10 @@ a packet and sent it on from elsewhere can't move the line.
    direct line to both. A relaying teammate passes only packets that came to it directly, never
    one that was already passed on (one hop). It allows 2 MiB a minute per teammate. It can't read
    what it passes.
-5. **Relay server.** After 3 s, hellos also go to our relay servers and the ones the teammate
-   published (see below). The default is `ovh-ca` (`15.235.127.134:47232`).
+5. **Relay server.** After 6 s (3 s when no teammate could pass it on), hellos also go to our
+   relay servers and the ones the teammate published (see below). The head start lets a teammate's
+   path come up first. A line that is up through a relay server tries teammates again every 30 s,
+   and moves to one as soon as it answers. The default is `ovh-ca` (`15.235.127.134:47232`).
 6. **TCP 443.** A relay that stays silent on UDP for 5 s is tried over TCP (443 unless the server
    line says `/port`), and TCP is retried every 60 s after that. Each packet on the stream is a
    2-byte length followed by the packet. The client opens TLS on the stream, so the lane looks
@@ -213,7 +215,7 @@ wire doesn't try to hide either.
 | Fragment size / message cap | 900 B / 256 KiB |
 | Give up on a message | 10 s |
 | Keepalive / line dead | 15 s / 40 s |
-| Teammate relay / relay server after | 3 s |
+| Teammate relay / relay server after | 3 s / 6 s (3 s with no teammate to pass it on) |
 | TCP after a silent relay / TCP retry | 5 s / 60 s |
 | STUN again / network check | 60 s / 2 s |
 | Birthday: sockets, rate, length, every | 256, 100/s, 20 s, 5 min |

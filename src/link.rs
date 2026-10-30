@@ -54,6 +54,9 @@ const GIVE_UP: Duration = Duration::from_secs(10);
 const DEAD: Duration = Duration::from_secs(40);
 const KEEPALIVE: Duration = Duration::from_secs(15);
 const TRY_RELAY_AFTER: Duration = Duration::from_secs(3);
+// A teammate who reaches both is preferred over a relay server: the server waits a little longer
+// when there's one, so the teammate's path usually comes up first.
+const TRY_SERVER_AFTER: Duration = Duration::from_secs(6);
 const REDISCOVER: Duration = Duration::from_secs(60); // STUN again: the router may have a new public address
 const NET_CHECK: Duration = Duration::from_secs(2); // a new local address means we moved networks
 const UPNP_RENEW: Duration = Duration::from_secs(1800); // mappings are asked for an hour
@@ -932,7 +935,8 @@ impl Link {
                 if now >= i.peers[k].next_hello {
                     let since = *i.peers[k].trying_since.get_or_insert(now);
                     let tried = now - since;
-                    hello_everywhere(&mut i, k, tried >= TRY_RELAY_AFTER, &mut sends);
+                    let servers = tried >= TRY_SERVER_AFTER || tried >= TRY_RELAY_AFTER && relays(&i, k).is_empty();
+                    hello_everywhere(&mut i, k, tried >= TRY_RELAY_AFTER, servers, &mut sends);
                     // Fast while both sides are likely punching at once, then back off.
                     let gap = if tried < Duration::from_secs(15) { Duration::from_secs(1) }
                         else if tried < Duration::from_secs(60) { Duration::from_secs(5) }
@@ -985,7 +989,9 @@ impl Link {
             }
             if better {
                 i.peers[k].last_upgrade = now;
-                hello_everywhere(&mut i, k, false, &mut sends);
+                // on a relay server: a teammate who reaches both of us now is a better path
+                let on_server = matches!(i.peers[k].sess.as_ref().map(|s| &s.path), Some(Path::Server(_)));
+                hello_everywhere(&mut i, k, on_server, false, &mut sends);
             }
         }
         drop(i);
@@ -1287,8 +1293,8 @@ fn hello(i: &Inner, k: usize, reply: bool) -> Vec<u8> {
 }
 
 /// Say hello on every published address (both sides doing this at once is the hole punch), and,
-/// when asked, through every teammate who could relay.
-fn hello_everywhere(i: &mut Inner, k: usize, via_relays: bool, sends: &mut Vec<(SocketAddr, Vec<u8>)>) {
+/// when asked, through every teammate who could relay and through the relay servers.
+fn hello_everywhere(i: &mut Inner, k: usize, via_relays: bool, via_servers: bool, sends: &mut Vec<(SocketAddr, Vec<u8>)>) {
     let h = hello(i, k, false);
     if !i.blocked.contains(&i.peers[k].id) {
         let p = &i.peers[k];
@@ -1301,10 +1307,12 @@ fn hello_everywhere(i: &mut Inner, k: usize, via_relays: bool, sends: &mut Vec<(
             sends.push((SocketAddr::new(IpAddr::V4(BEACON_GROUP), BEACON_PORT), h.clone()));
         }
     }
-    if via_relays {
+    if via_servers {
         for srv in servers_for(i, k) {
             via_server(i, k, &srv, &h, sends);
         }
+    }
+    if via_relays {
         let target = i.peers[k].id;
         for r in relays(i, k) {
             let mut f = vec![FWD];
@@ -2203,6 +2211,51 @@ mod tests {
         a.stop();
         b.stop();
         c.stop();
+    }
+
+    #[test]
+    fn a_teammate_who_reaches_both_is_used_before_the_relay_server() {
+        let key: [u8; 32] = random();
+        let port = relay_server(Some(key), 60);
+        let spec = format!("127.0.0.1:{port}#{}", b64url(&key));
+        let ((a, ra), (b, _rb), (c, _rc)) = (with_relay(spec.clone()), node(), with_relay(spec));
+        a.block(&c.me());
+        c.block(&a.me());
+        std::thread::sleep(Duration::from_millis(300)); // the relay setting is resolved
+        meet(&a, &b);
+        meet(&b, &c);
+        meet(&a, &c);
+        let up = wait(&ra, 10, |e| matches!(e, Event::Up { peer, .. } if *peer == c.me())).expect("a reaches c");
+        assert_eq!(up, Event::Up { peer: c.me(), path: format!("via {}", b.me()) }, "the teammate, not the server");
+        for l in [a, b, c] { l.stop() }
+    }
+
+    #[test]
+    fn a_line_on_the_relay_server_moves_to_a_teammate_who_can_pass_it() {
+        let key: [u8; 32] = random();
+        let port = relay_server(Some(key), 90);
+        let spec = format!("127.0.0.1:{port}#{}", b64url(&key));
+        let ((a, ra), (c, _rc)) = (with_relay(spec.clone()), with_relay(spec));
+        a.block(&c.me());
+        c.block(&a.me());
+        std::thread::sleep(Duration::from_millis(300));
+        meet(&a, &c);
+        let up = wait(&ra, 15, |e| matches!(e, Event::Up { peer, .. } if *peer == c.me())).expect("through the server");
+        assert_eq!(up, Event::Up { peer: c.me(), path: format!("relay 127.0.0.1:{port}") });
+        // a teammate who reaches both turns up later: the line moves to them
+        let (b, _rb) = node();
+        meet(&a, &b);
+        meet(&b, &c);
+        let end = Instant::now() + Duration::from_secs(50);
+        let via = format!("via {}", b.me());
+        loop {
+            let p = a.lines().into_iter().find(|x| x.public == c.me()).and_then(|x| x.path);
+            if p.as_deref() == Some(via.as_str()) { break }
+            assert!(Instant::now() < end, "still {p:?}");
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        a.send(&c.me(), b"now through b").unwrap();
+        for l in [a, b, c] { l.stop() }
     }
 
     #[test]

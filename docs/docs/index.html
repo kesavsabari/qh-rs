@@ -220,7 +220,7 @@ jobs:
     <tr><th>System</th><th>How commands are confined</th></tr>
     <tr><td>Linux</td><td>Landlock (kernel 5.13+) and seccomp, plus private network and mount namespaces where the kernel allows them. Nothing to install.</td></tr>
     <tr><td>macOS</td><td>Seatbelt (<code>sandbox-exec</code>), built in.</td></tr>
-    <tr><td>Windows</td><td>Run <code>qh sandbox setup</code> once (it asks for admin): commands then run as hidden sandbox users with write-restricted tokens on their own desktop, and firewall filters send them only through qh's allowlist. <code>qh sandbox remove</code> undoes it all. Until then commands run with your access; the secret and write guards and the withheld variables still apply. Tools that use Windows' own TLS (<code>curl.exe</code>, PowerShell's web commands, .NET, winget) can't make HTTPS connections inside; git, cargo, Python, Node and npm can.</td></tr>
+    <tr><td>Windows</td><td>Run <code>qh sandbox setup</code> once (it asks for admin): commands then run as hidden sandbox users with write-restricted tokens on their own desktop, and firewall filters send them only through qh's allowlist. <code>qh sandbox remove</code> undoes it all. Until then commands run with your access; the secret and write guards and the withheld variables still apply. Sandboxed commands can't write to other drives either. Tools that use Windows' own TLS (<code>curl.exe</code>, PowerShell's web commands, winget) can't make HTTPS connections inside; git, cargo, Python, Node and npm can, and <code>dotnet restore</code> gets packages through qh's own NuGet mirror.</td></tr>
   </table>
   <div class="note">Where the system can't sandbox commands (an old Linux kernel, say), <code>/sandbox</code> says so. The secret and write guards still apply.</div>
 </section>
@@ -298,6 +298,8 @@ jobs:
   </ul>
   <p>Or type directly: <code>/team open alex api</code> and <code>/team send alex api add rate limiting to login</code>.</p>
   <p>When a teammate (or their agent, with <code>tell_team</code>) asks one of your sessions to do something, it lands in the <b>Requests</b> tab of the team room (Ctrl+T), never straight in the session, whatever their role and whatever mode the session runs in, auto included. The status bar says <code>· 1 request (Ctrl+T)</code> and you get a notification. Pick it and press <b>Enter</b> or <b>a</b> to accept (it goes into that session as <code>[accepted request from alex]: …</code>), <b>r</b> to reply without starting anything (the request keeps waiting), or <b>d</b> to decline (alex is told privately). Questions their agents ask yours are still answered on their own from a read-only copy, unless <code>/answers ask</code>, which puts them in Requests too.</p>
+  <h3>How you're connected</h3>
+  <p>Teammates who are both online talk over an encrypted direct line: on the same network if they can, otherwise straight across the internet, and through a relay only when neither works. A strict router on one side still gets a direct line. Where UDP is blocked (some offices and campuses), qh reaches the relay over TCP on port 443, which looks like ordinary HTTPS. <code>/team link</code> shows, for each teammate, which path is in use, the round trip, and why a better one didn't work.</p>
   <h3>Chat, private messages and groups</h3>
   <p>The room's <b>Chat</b> tab lists channels on the left: <code># team</code> for everyone, <code>@login</code> for a private conversation with each teammate, and your groups. Pick one and press Enter to write; <code>p</code> on the map writes privately to the person you picked. From the prompt: <code>/dm alex the staging password changed</code>, and <code>/team group backend alex sam</code> to make a group (<code>/team group</code> lists yours).</p>
   <p>Write <code>@alex</code> in any message to ping alex (a notification, the line highlighted, and an <code>@</code> on the channel's unread count); <code>@team</code> pings everyone. An email address like <code>me@alex.dev</code> doesn't ping anyone.</p>
@@ -416,6 +418,7 @@ trusted = false   <span class="c"># true: run its tools without asking</span></c
     <tr><td>ChatGPT "allowance used up"</td><td>Raise qh's cap in ChatGPT settings, wait for the reset, or switch model</td></tr>
     <tr><td>"isn't on GitHub yet"</td><td><code>/team create</code> puts the project on GitHub</td></tr>
     <tr><td>"no GitHub login found"</td><td>Install the GitHub CLI and run <code>gh auth login</code></td></tr>
+    <tr><td>A teammate is online but messages are slow</td><td><code>/team link</code> shows how they're reached; "over relay" or "over tcp" means no direct path, usually a strict or UDP-blocking network</td></tr>
     <tr><td>🔒 "waiting to be let in"</td><td>A teammate who's already in needs to run qh once</td></tr>
     <tr><td>Slow, or forgets things</td><td>Your GPU fits a small context; <code>/tier</code> explains. A cloud model avoids the limit</td></tr>
   </table>

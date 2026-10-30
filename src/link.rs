@@ -1992,7 +1992,8 @@ mod tests {
         let end = Instant::now() + Duration::from_secs(8);
         let x = loop {
             let x = a.lines().into_iter().find(|x| x.public == b.me()).unwrap();
-            if x.rtt_ms.is_some() || Instant::now() > end { break x }
+            let settled = x.rtt_ms.is_some() && x.path.as_deref().is_some_and(|p| p.starts_with("lan "));
+            if settled || Instant::now() > end { break x }
             std::thread::sleep(Duration::from_millis(100));
         };
         assert!(x.path.as_deref().is_some_and(|p| p.starts_with("lan 127.0.0.1")), "{x:?}");

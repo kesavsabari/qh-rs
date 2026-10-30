@@ -342,6 +342,7 @@ struct Headless<'a> {
 fn killed() {
     session::save_partials();
     bg::kill_all();
+    team::stop_and_flush(); // teammates see us leave now, not 5 minutes later (seen live: a closed window)
 }
 
 fn killed_tui() {

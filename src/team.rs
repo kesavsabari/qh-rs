@@ -2899,9 +2899,14 @@ fn wake_check(repo: &str, root: &Path, hooks: &Hooks) {
     };
     let now = now();
     static LAST_SCAN: Mutex<Option<Instant>> = Mutex::new(None);
+    static LAST_TIPS: Mutex<String> = Mutex::new(String::new());
+    // a commit, push or pull moves these: scan now, or a teammate who pulls our push straight
+    // away is held for up to a minute on work that is already on main (seen live)
+    let tips = git(root, &["rev-parse", "HEAD", "origin/HEAD"]).unwrap_or_default();
+    let moved = std::mem::replace(&mut *LAST_TIPS.lock().unwrap(), tips.clone()) != tips;
     let scan = {
         let mut l = LAST_SCAN.lock().unwrap();
-        let due = l.is_none_or(|t| t.elapsed() >= Duration::from_secs(60));
+        let due = moved || l.is_none_or(|t| t.elapsed() >= Duration::from_secs(60));
         if due { *l = Some(Instant::now()) }
         due
     };
@@ -3107,7 +3112,10 @@ fn hold_connection(repo: &str, background: bool) -> Result<(), String> {
                 let held = std::fs::read_to_string(per_repo("team-owner", repo)).unwrap_or_default();
                 let (pid, mode) = held.split_once(' ').unwrap_or((held.trim(), ""));
                 // a window opened in the project itself takes the team from one keeping it in the background
-                if background || mode.trim() != "background" || t0.elapsed() > Duration::from_secs(15) {
+                // one that is quitting still holds it while it tells teammates (up to 5 s): wait that out,
+                // or a quick restart comes up without the team (seen live)
+                let wait = if mode.trim() == "background" { 15 } else { 7 };
+                if background || t0.elapsed() > Duration::from_secs(wait) {
                     let _ = std::fs::remove_file(&want);
                     return Err(format!("team {repo} is connected in another qh (pid {pid}); close that one first"));
                 }
@@ -3143,7 +3151,9 @@ pub fn stop() {
 /// Disconnect every project and wait (up to 5 s) for the "offline" writes, at quit.
 pub fn stop_and_flush() {
     let flags: Vec<std::sync::Arc<AtomicBool>> = STATES.lock().unwrap().get_or_insert_with(HashMap::new).values()
-        .filter(|s| s.running.swap(false, Relaxed)).map(|s| s.finished.clone()).collect();
+        // every one not yet finished, not just those this call stopped: a closed window runs this
+        // twice at once (the kill handler and the main loop), and the one that returns early exits
+        .filter(|s| { s.running.store(false, Relaxed); !s.finished.load(Relaxed) }).map(|s| s.finished.clone()).collect();
     let t0 = Instant::now();
     while flags.iter().any(|f| !f.load(Relaxed)) && t0.elapsed() < Duration::from_secs(5) {
         std::thread::sleep(Duration::from_millis(50));

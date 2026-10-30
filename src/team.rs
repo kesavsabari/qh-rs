@@ -3518,7 +3518,7 @@ fn take_quick(s: &mut State, login: &str, body: &Value) -> bool {
 const FILE_WAIT: Duration = Duration::from_secs(10);
 const FILE_MAX_BYTES: usize = 200 * 1024;
 const FILE_MAX_LINES: usize = 2000;
-const FILE_PART: usize = 24 * 1024; // bytes of text per line message: sealed and escaped it stays under link's 256 KB
+const FILE_PART: usize = 24 * 1024; // bytes of text per line message: small parts keep a relayed line responsive
 const LIST_MAX: usize = 400;
 
 type FileWait = (String, std::sync::mpsc::Sender<Value>); // who must answer, where the parts go

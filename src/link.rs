@@ -47,10 +47,13 @@ const ECHO: u8 = 10; // a keepalive that asks for its 8 bytes back (round-trip t
 const ECHOED: u8 = 11; // the 8 bytes, back
 
 const PART: usize = 900; // fragment size: a relayed fragment still fits in 1200 bytes
-const MAX_MSG: usize = 256 * 1024;
+const MAX_MSG: usize = 16 * 1024 * 1024; // diffs, files, handoff context
 const MAX_PARTIAL: usize = 16; // messages half-received from one teammate at a time
 const MAX_PARTIAL_BYTES: usize = 2 * MAX_MSG; // and what they may hold
-const GIVE_UP: Duration = Duration::from_secs(10);
+const GIVE_UP: Duration = Duration::from_secs(10); // with no line, or with nothing acked for this long
+// Parts of one message in flight at once; each ack lets the next one go, so a big message streams
+// at the line's pace instead of landing all at once, and a small one is never stuck behind it.
+const WINDOW: usize = 128;
 const DEAD: Duration = Duration::from_secs(40);
 const KEEPALIVE: Duration = Duration::from_secs(15);
 const TRY_RELAY_AFTER: Duration = Duration::from_secs(3);
@@ -361,7 +364,18 @@ struct Out {
     bytes: Vec<u8>,
     next: Instant,
     wait: Duration,
-    since: Instant,
+    since: Instant, // queued, then (once sent) the last time this message made progress
+    sent: bool,
+}
+
+/// The FRAG frame for a part.
+fn frag_of(o: &Out) -> Vec<u8> {
+    let mut f = vec![FRAG];
+    f.extend(o.id.to_be_bytes());
+    f.extend(o.part.to_be_bytes());
+    f.extend(o.count.to_be_bytes());
+    f.extend(&o.bytes);
+    f
 }
 
 struct Peer {
@@ -380,7 +394,7 @@ struct Peer {
     addrs_ms: u64,          // when the peer's own clock said `addrs` were current (0: unknown)
     hello_ts: u64,
     out: VecDeque<Out>,
-    parts: HashMap<u64, (Vec<Option<Vec<u8>>>, Instant)>,
+    parts: HashMap<u64, (Vec<Option<Vec<u8>>>, Instant, usize)>, // parts, last one in, bytes held
     done: VecDeque<u64>,
     resync_at: Instant,
     relayed: (Instant, usize),
@@ -706,7 +720,7 @@ impl Link {
         for (n, c) in chunks.iter().enumerate() {
             p.out.push_back(Out {
                 id, part: n as u16, count: chunks.len() as u16, bytes: c.to_vec(), next: now,
-                wait: Duration::from_millis(300), since: now,
+                wait: Duration::from_millis(300), since: now, sent: false,
             });
         }
         Some(id)
@@ -950,16 +964,16 @@ impl Link {
             let mut frames = vec![];
             let p = &mut i.peers[k];
             let mut gone = vec![];
+            let mut flying: HashMap<u64, usize> = HashMap::new();
             for o in p.out.iter_mut() {
-                if now - o.since > GIVE_UP {
+                let n = flying.entry(o.id).or_default();
+                if *n >= WINDOW { continue }
+                *n += 1;
+                if o.sent && now - o.since > GIVE_UP {
                     gone.push(o.id);
                 } else if now >= o.next {
-                    let mut f = vec![FRAG];
-                    f.extend(o.id.to_be_bytes());
-                    f.extend(o.part.to_be_bytes());
-                    f.extend(o.count.to_be_bytes());
-                    f.extend(&o.bytes);
-                    frames.push(f);
+                    if !o.sent { o.sent = true; o.since = now }
+                    frames.push(frag_of(o));
                     o.next = now + o.wait;
                     o.wait = (o.wait * 3 / 2).min(Duration::from_secs(2));
                 }
@@ -1603,7 +1617,7 @@ fn on_data(i: &mut Inner, k: usize, pkt: &[u8], from: Path, sends: &mut Vec<(Soc
             let part = u16::from_be_bytes(body[8..10].try_into().unwrap());
             let count = u16::from_be_bytes(body[10..12].try_into().unwrap());
             let p = &i.peers[k];
-            let held: usize = p.parts.values().flat_map(|(v, _)| v.iter().flatten()).map(|b| b.len()).sum();
+            let held: usize = p.parts.values().map(|e| e.2).sum();
             if !p.parts.contains_key(&id) && !p.done.contains(&id) && (p.parts.len() >= MAX_PARTIAL || held >= MAX_PARTIAL_BYTES) {
                 return; // too much half-received from them: no ack, so it comes again later (or by git)
             }
@@ -1614,29 +1628,44 @@ fn on_data(i: &mut Inner, k: usize, pkt: &[u8], from: Path, sends: &mut Vec<(Soc
             if count == 0 || part >= count || count as usize * PART > MAX_MSG + PART || p.done.contains(&id) {
                 return;
             }
-            let entry = p.parts.entry(id).or_insert_with(|| (vec![None; count as usize], now));
+            let entry = p.parts.entry(id).or_insert_with(|| (vec![None; count as usize], now, 0));
             if entry.0.len() != count as usize {
                 return;
             }
-            entry.0[part as usize] = Some(body[12..].to_vec());
+            entry.1 = now;
+            if entry.0[part as usize].is_none() {
+                entry.2 += body.len() - 12;
+                entry.0[part as usize] = Some(body[12..].to_vec());
+            }
             if entry.0.iter().all(Option::is_some) {
-                let (parts, _) = p.parts.remove(&id).unwrap();
+                let (parts, _, _) = p.parts.remove(&id).unwrap();
                 p.done.push_back(id);
                 if p.done.len() > 512 {
                     p.done.pop_front();
                 }
                 events.push(Event::Msg { from: p.public.clone(), data: parts.into_iter().flatten().flatten().collect() });
             }
-            p.parts.retain(|_, (_, t)| now - *t < Duration::from_secs(60));
+            p.parts.retain(|_, (_, t, _)| now - *t < Duration::from_secs(60));
         }
         ACK if body.len() >= 10 => {
             let id = u64::from_be_bytes(body[..8].try_into().unwrap());
             let part = u16::from_be_bytes(body[8..10].try_into().unwrap());
             let p = &mut i.peers[k];
             let had = p.out.iter().any(|o| o.id == id);
+            let before = p.out.len();
             p.out.retain(|o| !(o.id == id && o.part == part));
             if had && !p.out.iter().any(|o| o.id == id) {
                 events.push(Event::Delivered { peer: p.public.clone(), id });
+            } else if p.out.len() < before {
+                // progress: the message isn't stuck, and the next part waiting outside the window goes now
+                let mut n = 0;
+                let mut next = None;
+                for o in p.out.iter_mut().filter(|o| o.id == id) {
+                    if o.sent { o.since = now } else if next.is_none() && n < WINDOW { o.sent = true; o.since = now; o.next = now + o.wait; next = Some(frag_of(o)) }
+                    n += 1;
+                    if n >= WINDOW { break }
+                }
+                if let Some(f) = next { seal_to(i, k, &f, sends) }
             }
         }
         FWD if body.len() > 8 && depth == 0 => {
@@ -1988,6 +2017,33 @@ mod tests {
         assert!(wait(&ra, 5, |e| *e == Event::Delivered { peer: b.me(), id }).is_some(), "sender hears it arrived");
         b.send(&a.me(), b"hi back").unwrap();
         assert!(wait(&ra, 5, |e| matches!(e, Event::Msg { data, .. } if data == b"hi back")).is_some());
+        a.stop();
+        b.stop();
+    }
+
+    #[test]
+    fn a_big_message_streams_and_a_small_one_isnt_stuck_behind_it() {
+        let ((a, ra), (b, rb)) = (node(), node());
+        meet(&a, &b);
+        wait(&ra, 5, |e| matches!(e, Event::Up { .. })).expect("line comes up");
+        let big: Vec<u8> = (0..3_000_000u32).map(|i| (i % 253) as u8).collect();
+        let id = a.send(&b.me(), &big).unwrap();
+        let small = a.send(&b.me(), b"meanwhile").unwrap();
+        // the small one arrives first: it has its own window
+        let first = wait(&rb, 10, |e| matches!(e, Event::Msg { .. })).expect("a message arrives");
+        assert_eq!(first, Event::Msg { from: a.me(), data: b"meanwhile".to_vec() });
+        let got = wait(&rb, 60, |e| matches!(e, Event::Msg { .. })).expect("the big one arrives");
+        assert_eq!(got, Event::Msg { from: a.me(), data: big });
+        let mut done = vec![];
+        while done.len() < 2 {
+            match wait(&ra, 10, |e| matches!(e, Event::Delivered { .. })) {
+                Some(Event::Delivered { id, .. }) => done.push(id),
+                _ => panic!("not delivered: {done:?}"),
+            }
+        }
+        done.sort();
+        assert_eq!(done, vec![id.min(small), id.max(small)]);
+        assert!(a.send(&b.me(), &vec![0u8; MAX_MSG + 1]).is_none(), "past the cap: the caller uses git");
         a.stop();
         b.stop();
     }

@@ -95,9 +95,12 @@ The first byte of the plaintext is the frame type.
 
 Unknown frame types are ignored, which is how new frames stay compatible with older qh.
 
-**Messages.** A message is at most 256 KiB, split into FRAGs. Every fragment is acked. Unacked
-fragments are resent with backoff (×1.5, up to 2 s), and the whole message gives up after 10 s
-with Failed. A receiver holds at most 16 half-received messages, or 512 KiB, per teammate. Past
+**Messages.** A message is at most 16 MiB, split into FRAGs. Every fragment is acked. At most 128
+fragments of one message are in flight at once, and each ack lets the next one go, so a big message
+streams at the line's pace and a small one sent after it isn't stuck behind it. Unacked fragments
+are resent with backoff (×1.5, up to 2 s). A message gives up with Failed after 10 s with no line,
+or after 10 s in which none of its fragments was acked. A receiver holds at most 16 half-received
+messages, or 32 MiB, per teammate. Past
 that it doesn't ack, so the sender tries again later or uses git. Received message ids are
 remembered (the last 512), so a resent message isn't delivered twice.
 
@@ -139,7 +142,8 @@ a packet and sent it on from elsewhere can't move the line.
    of the hole stays open for a teammate who left.
 4. **Teammate relay.** After 3 s with no line, hellos also go through every teammate who has a
    direct line to both. A relaying teammate passes only packets that came to it directly, never
-   one that was already passed on (one hop). It allows 2 MiB a minute per teammate. It can't read
+   one that was already passed on (one hop). It allows 2 MiB a minute per teammate, so a big
+   message only goes at full speed on a direct line. It can't read
    what it passes.
 5. **Relay server.** After 6 s (3 s when no teammate could pass it on), hellos also go to our
    relay servers and the ones the teammate published (see below). The head start lets a teammate's
@@ -212,8 +216,9 @@ wire doesn't try to hide either.
 
 | Constant | Value |
 |---|---|
-| Fragment size / message cap | 900 B / 256 KiB |
-| Give up on a message | 10 s |
+| Fragment size / message cap | 900 B / 16 MiB |
+| Fragments in flight per message | 128 |
+| Give up on a message | 10 s with no line or no progress |
 | Keepalive / line dead | 15 s / 40 s |
 | Teammate relay / relay server after | 3 s / 6 s (3 s with no teammate to pass it on) |
 | TCP after a silent relay / TCP retry | 5 s / 60 s |

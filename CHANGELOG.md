@@ -2,6 +2,23 @@
 
 Each version starts with a one-line summary; the website shows it once the version is no longer recent.
 
+## 0.2.4 — 2026-10-30
+
+Teammates connect through strict networks, and the Windows sandbox gets NuGet.
+
+- **qh link through blocked networks.** Where UDP is blocked, qh reaches the relay over TCP on
+  443, wrapped in TLS so it looks like HTTPS. When only one side's router is strict, a birthday
+  punch still connects the two directly (~3 s).
+- **See the path.** `/team link` shows how each teammate is reached (direct, LAN or relay, UDP or
+  TCP), the round trip, and why a direct path didn't work.
+- **Windows sandbox:** `dotnet restore` works through qh's own NuGet mirror, and sandboxed commands
+  can't write to other drives.
+- **Agent tools:** `grep` shows long lines around the match and pages through results;
+  `edit_file` can pick which repeated match to change; a new `qh_status` tool tells the agent its
+  context, cost, team and git state; browser clicks and typing return only what changed.
+- **qh serve** versions its protocol in the handshake. The protocol and the qh link wire format
+  are documented in `docs/`.
+
 ## 0.2.3 — 2026-10-29
 
 Memory that knows you, team notes, and review before a teammate's code is pushed.

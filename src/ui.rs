@@ -649,6 +649,7 @@ fn tool_title(tool: &str, a: &Value) -> String {
         "tell_team" => format!("→ @{}: {}", s("to").trim_start_matches('@'), one(s("text"), 90)),
         "read_team_file" => format!("▤ @{}:{}", s("to").trim_start_matches('@'), s("path")),
         "qh_status" => "· status".to_string(),
+        "promise" => format!("⚑ counts on {}: {}", s("name"), one(s("text"), 80)),
         "list_team_files" => format!("▤ @{} changed files", s("to").trim_start_matches('@')),
         "ask" => format!("? {}: {}", s("to"), one(s("question"), 90)),
         "spawn" => format!("+ spawn {}: {}", s("name"), one(s("task"), 80)),

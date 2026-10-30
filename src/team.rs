@@ -2661,9 +2661,13 @@ If the user wants it anyway, they type /anyway (or retry: this is said once).", 
 
 /// Teammates' fresh code that uses a name, within the last hour: (login, session) pairs.
 fn users_of(s: &State, name: &str) -> Vec<(String, String)> {
+    users_within(s, name, 3600)
+}
+
+fn users_within(s: &State, name: &str, secs: u64) -> Vec<(String, String)> {
     let now = now();
     s.peers.values().filter(|p| p.joined).flat_map(|p| p.uses.iter()
-        .filter(|(_, u)| u.get(name).is_some_and(|ts| now.saturating_sub(*ts) < 3600))
+        .filter(|(_, u)| u.get(name).is_some_and(|ts| now.saturating_sub(*ts) < secs))
         .map(|(sess, _)| (p.login.clone(), sess.clone()))).collect()
 }
 
@@ -2738,21 +2742,28 @@ fn note_change(session: &str, topic: &str, t: &Touched, warn: &str) {
     });
 }
 
+/// Each file this copy changes against the merge base of main (commits, uncommitted edits and
+/// untracked files; at most 200, none over 1 MB): (file, text before, text now).
+fn changes_vs_main(root: &Path) -> Vec<(String, String, String)> {
+    let Some(base) = ["origin/HEAD", "origin/main", "origin/master", "@{upstream}"].iter()
+        .find_map(|r| git(root, &["merge-base", "HEAD", r]).map(|s| s.trim().to_string()).filter(|s| !s.is_empty())) else { return vec![] };
+    let mut files: Vec<String> = git(root, &["diff", "--name-only", "--no-renames", &base]).unwrap_or_default().lines().map(String::from).collect();
+    files.extend(git(root, &["ls-files", "--others", "--exclude-standard"]).unwrap_or_default().lines().map(String::from));
+    files.into_iter().filter(|f| !f.is_empty()).take(200).filter_map(|f| {
+        let before = git(root, &["show", &format!("{base}:{f}")]).unwrap_or_default();
+        let after = std::fs::read_to_string(root.join(&f)).unwrap_or_default();
+        (before.len().max(after.len()) <= 1 << 20).then_some((f, before, after))
+    }).collect()
+}
+
 /// What this copy changes that isn't on main yet, however it was changed (qh's agents, a shell,
 /// an editor, a merge): committed or not, pushed to a branch or not. file -> function -> since
 /// when ("" = the file, outside any function). Compared with the merge base of main, so a branch
 /// that sits unmerged for days still shows. `old` keeps each function's first-seen time.
 fn scan_unmerged(root: &Path, old: &Claims) -> Claims {
-    let Some(base) = ["origin/HEAD", "origin/main", "origin/master", "@{upstream}"].iter()
-        .find_map(|r| git(root, &["merge-base", "HEAD", r]).map(|s| s.trim().to_string()).filter(|s| !s.is_empty())) else { return HashMap::new() };
-    let mut files: Vec<String> = git(root, &["diff", "--name-only", "--no-renames", &base]).unwrap_or_default().lines().map(String::from).collect();
-    files.extend(git(root, &["ls-files", "--others", "--exclude-standard"]).unwrap_or_default().lines().map(String::from));
     let now = now();
     let mut out: Claims = HashMap::new();
-    for f in files.into_iter().filter(|f| !f.is_empty()).take(200) {
-        let before = git(root, &["show", &format!("{base}:{f}")]).unwrap_or_default();
-        let after = std::fs::read_to_string(root.join(&f)).unwrap_or_default();
-        if before.len().max(after.len()) > 1 << 20 { continue }
+    for (f, before, after) in changes_vs_main(root) {
         let (a, b): (Vec<&str>, Vec<&str>) = (before.lines().collect(), after.lines().collect());
         let (del, add) = changed_lines(&a, &b);
         let (oa, ob) = (owners(&before), owners(&after));
@@ -2802,6 +2813,70 @@ pub fn push_overlap(cwd: &Path) -> Option<(String, String)> {
           format!("error: push NOT run. Teammates changed the same functions and it isn't on main yet: {list}. Whoever merges \
 second gets a conflict. Stop and tell the user so they can agree the order with them (or message them). If the user wants to push \
 anyway, run the same push again: this is said once.")))
+}
+
+/// Across the change against main: names defined before that are gone now, and functions changed.
+fn gone_and_changed(root: &Path) -> (Vec<String>, Vec<String>) {
+    let (mut gone, mut changed): (Vec<String>, Vec<String>) = (vec![], vec![]);
+    for (_, before, after) in changes_vs_main(root) {
+        let (a, b): (Vec<&str>, Vec<&str>) = (before.lines().collect(), after.lines().collect());
+        let (del, add) = changed_lines(&a, &b);
+        let kept = defines(&b, &(0..b.len()).collect::<Vec<_>>());
+        gone.extend(defines(&a, &del).into_iter().filter(|n| !kept.contains(n)));
+        let (oa, ob) = (owners(&before), owners(&after));
+        changed.extend(del.iter().filter_map(|&i| oa.get(i).cloned().flatten())
+            .chain(add.iter().filter_map(|&i| ob.get(i).cloned().flatten())));
+    }
+    (gone, changed)
+}
+
+/// What those break for teammates: (login, what), sorted. A gone name their code from the last
+/// day uses, or a changed function they hold a promise on.
+fn contract_breaks(s: &State, gone: &[String], changed: &[String]) -> Vec<(String, String)> {
+    let mut v: Vec<(String, String)> = vec![];
+    for n in gone {
+        v.extend(users_within(s, n, 86400).into_iter().map(|(l, sess)| (l.clone(), format!("{n} is removed or renamed and {l}/{sess}'s code uses it"))));
+    }
+    for p in s.peers.values().filter(|p| p.joined) {
+        v.extend(p.promises.iter().filter(|x| changed.contains(&x.name))
+            .map(|x| (p.login.clone(), format!("{} changed and {}/{} counts on: \"{}\"", x.name, p.login, x.session, x.text))));
+    }
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// Before an agent's `git commit` or `git push`: the contracts, checked on the whole change however
+/// it was made (an editor or a shell edit never went through the per-edit check). A name that's
+/// gone which a teammate's code from the last day uses, or a changed function a teammate holds a
+/// promise on, holds it once, and each of those teammates is sent a request to agree it, so the
+/// break reaches them before it lands rather than at merge.
+pub fn commit_contracts(cwd: &Path) -> Option<(String, String)> {
+    let (root, repo) = repo_of(cwd)?;
+    if !running_for(&repo) { return None }
+    let (gone, changed) = gone_and_changed(&root);
+    let breaks = with(&repo, |s| contract_breaks(s, &gone, &changed))?;
+    if breaks.is_empty() { return None }
+    let list = breaks.iter().map(|b| b.1.as_str()).collect::<Vec<_>>().join("; ");
+    let key = format!("contract:{list}");
+    if !with(&repo, |s| if s.warned.contains(&key) { false } else { s.warned.push(key); true }).unwrap_or(false) { return None }
+    // the request: each teammate whose code it breaks hears it now, from us
+    let sent: Vec<String> = with(&repo, |s| {
+        let me = s.me.clone();
+        let mut who: Vec<String> = breaks.iter().map(|b| b.0.clone()).collect();
+        who.dedup();
+        who.into_iter().filter(|l| {
+            let mine: Vec<&str> = breaks.iter().filter(|b| b.0 == *l).map(|b| b.1.as_str()).collect();
+            dm_locked(s, l, &format!("{me} is about to commit a change that breaks what your code counts on: {}. Reply if it has to \
+stay as it was; otherwise update your side to match.", mine.join("; "))).is_ok()
+        }).collect()
+    }).unwrap_or_default();
+    let told = if sent.is_empty() { String::new() } else { format!(" {} {} been sent a request about it.", sent.join(", "), if sent.len() == 1 { "has" } else { "have" }) };
+    log_to(&repo, &format!("commit held: it breaks what teammates count on ({list})"));
+    Some((format!("held: this breaks what teammates count on ({list}) · run it again to go ahead"),
+          format!("error: NOT run. The change breaks what teammates' code counts on: {list}.{told} Either keep what they use \
+(for a rename: keep the old name too, delegating to the new one), or stop and tell the user so they can agree it with them. If \
+the user wants it anyway, run the same command again: this is said once.")))
 }
 
 /// Every few seconds: let go of claims on what we pushed (or that went stale), and wake our
@@ -3777,6 +3852,43 @@ mod tests {
         assert_eq!(p["a.py"]["one"], 5, "first-seen time kept");
         assert!(p["a.py"].contains_key("two"));
         assert!(p["new.txt"].contains_key(""));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_commit_that_breaks_what_a_teammate_counts_on_is_found_however_the_edit_was_made() {
+        let d = std::env::temp_dir().join(format!("qh-contract-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let run = |dir: &std::path::Path, a: &[&str]| assert!(std::process::Command::new("git").current_dir(dir).args(a)
+            .env("GIT_AUTHOR_NAME", "t").env("GIT_AUTHOR_EMAIL", "t@t").env("GIT_COMMITTER_NAME", "t").env("GIT_COMMITTER_EMAIL", "t@t")
+            .output().unwrap().status.success(), "{a:?}");
+        let (up, w) = (d.join("up.git"), d.join("w"));
+        std::fs::create_dir_all(&w).unwrap();
+        run(&d, &["init", "-q", "--bare", "-b", "main", up.to_str().unwrap()]);
+        run(&w, &["init", "-q", "-b", "main"]);
+        std::fs::write(w.join("a.py"), "def get_user(i):\n    return i\n\ndef rate():\n    return 0.5\n").unwrap();
+        run(&w, &["add", "."]);
+        run(&w, &["commit", "-qm", "a"]);
+        run(&w, &["remote", "add", "origin", up.to_str().unwrap()]);
+        run(&w, &["push", "-q", "origin", "main"]);
+        run(&w, &["remote", "set-head", "origin", "main"]);
+        // by hand: get_user renamed, rate changed
+        std::fs::write(w.join("a.py"), "def fetch_user(i):\n    return i\n\ndef rate():\n    return 50\n").unwrap();
+        let (gone, changed) = super::gone_and_changed(&w);
+        assert_eq!(gone, vec!["get_user".to_string()]);
+        assert!(changed.contains(&"rate".to_string()));
+        let mut st = state("kesav");
+        let mut bob = Peer { login: "bob".into(), joined: true, ..Default::default() };
+        bob.uses.insert("w1".into(), HashMap::from([("get_user".to_string(), now() - 7200)])); // two hours ago: still counts here
+        bob.promises.push(Promise { session: "w2".into(), name: "rate".into(), text: "a fraction".into(), ts: 0 });
+        st.peers.insert("bob".into(), bob);
+        let b = super::contract_breaks(&st, &gone, &changed);
+        assert_eq!(b.len(), 2, "{b:?}");
+        assert!(b.iter().all(|x| x.0 == "bob"));
+        assert!(b.iter().any(|x| x.1.contains("get_user is removed") && x.1.contains("bob/w1")));
+        assert!(b.iter().any(|x| x.1.contains("rate changed") && x.1.contains("a fraction")));
+        assert!(super::contract_breaks(&st, &[], &["other".into()]).is_empty());
+        assert!(crate::review::is_commit("git add . && git -C x commit -m hi") && !crate::review::is_commit("git log"));
         let _ = std::fs::remove_dir_all(&d);
     }
 

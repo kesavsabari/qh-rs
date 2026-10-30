@@ -355,13 +355,22 @@ fn base(root: &Path) -> Option<String> {
 
 /// Whether a bash command pushes with git (`git push`, `git -C dir push …`, in a chain too).
 pub fn is_push(cmd: &str) -> bool {
+    is_git(cmd, "push")
+}
+
+/// Whether a shell command runs `git commit`.
+pub fn is_commit(cmd: &str) -> bool {
+    is_git(cmd, "commit")
+}
+
+fn is_git(cmd: &str, sub: &str) -> bool {
     cmd.split(['&', ';', '|', '\n']).any(|seg| {
         let w: Vec<&str> = seg.split_whitespace().collect();
         let Some(g) = w.iter().position(|x| *x == "git" || x.ends_with("/git")) else { return false };
         // skip git's own options (and -C/-c's argument) to find the subcommand
         let mut i = g + 1;
         while i < w.len() && w[i].starts_with('-') { i += if matches!(w[i], "-C" | "-c") { 2 } else { 1 } }
-        w.get(i) == Some(&"push")
+        w.get(i) == Some(&sub)
     })
 }
 

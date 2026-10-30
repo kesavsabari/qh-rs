@@ -949,6 +949,11 @@ fn dispatch(hub: &Arc<Hub>, m: &Arc<Member>, name: &str, args: &Value) -> String
             Err(e) => format!("error: {e}"),
         };
     }
+    if name == "promise" {
+        let (func, text) = (args["name"].as_str().unwrap_or("").trim(), args["text"].as_str().unwrap_or("").trim());
+        if func.is_empty() || text.is_empty() { return "error: promise needs name and text".into() }
+        return crate::team::promise(&m.name, &format!("{func} {text}")).unwrap_or_else(|e| format!("error: {e}"));
+    }
     if name == "read_team_file" {
         return crate::team::read_team_file(&m.cwd(), args["to"].as_str().unwrap_or(""), args["path"].as_str().unwrap_or(""),
                                            args["start_line"].as_u64(), args["end_line"].as_u64());
@@ -1015,6 +1020,13 @@ relevant files first, then call ask_model again with the code, error or plan pas
     } else if tools::risky(name, &args, &hub.cfg) && !allowed(&lock(&m.set).allow, name, &args)
         && !hub.confirm(m, name, &args, None) {
         return "denied by user".into();
+    }
+    // a commit or push that breaks what a teammate's code counts on: said once, and they're asked
+    if name == "bash" && { let c = args["cmd"].as_str().unwrap_or(""); crate::review::is_push(c) || crate::review::is_commit(c) } {
+        if let Some((notice, msg)) = crate::team::commit_contracts(&cwd) {
+            hub.emit(&m.name, Event::Notice(notice));
+            return msg;
+        }
     }
     // a push that collides with a teammate's work not on main yet: said once, before any review
     if name == "bash" && crate::review::is_push(args["cmd"].as_str().unwrap_or("")) {

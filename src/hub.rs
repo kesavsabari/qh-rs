@@ -283,7 +283,7 @@ session tests). Messages from other sessions start with [from <name>]. qh saves 
         let team = crate::team::running_here(&m.cwd());
         tools.into_iter().filter(|t| {
             let n = t["function"]["name"].as_str().unwrap_or("");
-            if (n == "screenshot" && !sees) || (matches!(n, "ask_team" | "tell_team" | "read_team_file" | "list_team_files") && !team) {
+            if (n == "screenshot" && !sees) || (matches!(n, "ask_team" | "tell_team" | "promise" | "read_team_file" | "list_team_files") && !team) {
                 return false;
             }
             !(solo && matches!(n, "list_sessions" | "read_session" | "send_message" | "ask"))
@@ -1163,6 +1163,11 @@ their agent answers from its live session; the answer arrives later as a message
 they build on (an API shape, a route, a file layout). It waits in their Requests until the person accepts it, then runs in their session on their machine; they may reply or decline instead. to = \"login\" or \
 \"login/session\" (their first session when no session is named). Be specific: what to build, and the agreed interface. {TEAM_FILES}"),
                &[("to", "string"), ("text", "string")], &["to", "text"]),
+        schema("promise", "Write down what your code counts on in a teammate's function (its interface or behaviour: \
+\"get_user returns None for unknown ids, never panics\", \"Order.total is in cents\"). Whenever anyone on the team changes \
+that function, their edit is checked against it first, and a break is held and sent to you as a request instead of landing \
+silently. Use it when your code relies on a teammate's function in a way a rename alone wouldn't show. name = the function.",
+               &[("name", "string"), ("text", "string")], &["name", "text"]),
         schema("read_team_file", "Read a file live from a teammate's working copy (their clone, on their machine), uncommitted \
 changes included; read-only. Their qh answers within seconds if they're online; secrets, git-ignored files and files outside \
 the project are refused. path is relative to the project root. Lines are numbered; pass start_line/end_line for a range \

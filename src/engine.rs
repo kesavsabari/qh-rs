@@ -995,9 +995,11 @@ relevant files first, then call ask_model again with the code, error or plan pas
     // a teammate is changing the same function right now: wait, before even asking the user
     let touched: Vec<crate::team::Touched> = tools::preview(&cwd, name, &args).into_iter()
         .filter_map(|(full, after)| crate::team::touched(&cwd, &full, &after)).collect();
-    if let Some((notice, msg)) = touched.iter().find_map(|t| crate::team::check_edit(&m.name, t)) {
+    let mut heads_up = None; // claims = "warn": the edit goes ahead and the agent is told after it
+    if let Some((notice, msg, held)) = touched.iter().find_map(|t| crate::team::check_edit(&m.name, t, hub.cfg.claims_lock)) {
         hub.emit(&m.name, Event::Notice(notice));
-        return msg;
+        if held { return msg }
+        heads_up = Some(msg);
     }
     // behaviour promises teammates hold on these functions: a quick model check, paid by the editor
     for t in &touched {
@@ -1077,6 +1079,7 @@ relevant files first, then call ask_model again with the code, error or plan pas
         for t in &touched {
             crate::team::claim(&m.name, &lock(&m.purpose).clone(), t);
         }
+        if let Some(h) = heads_up { out = format!("{out}\n\n{h}") }
     }
     let input = json!({"event": "post_tool", "tool": name, "args": args, "result": out, "session": m.name, "cwd": cwd});
     match hooks::fire(&hub.cfg.hooks, "post_tool", name, &input, &cwd) {

@@ -2645,11 +2645,15 @@ pub fn allow_anyway(session: &str) {
 
 /// Before an edit: is a teammate changing one of these functions right now? Then the edit
 /// doesn't happen, the session is told who has it and why, and it's woken when it's free.
-/// None = go ahead.
-pub fn check_edit(session: &str, t: &Touched) -> Option<(String, String)> {
+/// With `claims = "warn"` (`lock` false) the edit goes ahead and the session is told once instead.
+/// None = go ahead; Some((notice, message, held)): held = the edit is not made and the message is
+/// the tool's answer, otherwise it's a note added to the tool's answer.
+pub fn check_edit(session: &str, t: &Touched, lock: bool) -> Option<(String, String, bool)> {
     let now = now();
     if ANYWAY.lock().unwrap().as_ref().and_then(|m| m.get(session)).is_some_and(|until| *until > now) { return None }
-    if t.funcs.is_empty() { return check_contract(t) }
+    let hold = |x: Option<(String, String)>| x.map(|(a, b)| (a, b, true));
+    if t.funcs.is_empty() { return hold(check_contract(t)) }
+    if !lock { return check_warn(t).or_else(|| hold(check_contract(t))) }
     let hit = with(&t.repo, |s| {
         for p in s.peers.values().filter(|p| p.joined && p.online) {
             for (sess, files) in &p.claims {
@@ -2666,13 +2670,38 @@ pub fn check_edit(session: &str, t: &Touched) -> Option<(String, String)> {
         }
         None
     }).flatten();
-    let Some((who, sess, func, ts, why)) = hit else { return check_unmerged(t).or_else(|| check_contract(t)) };
+    let Some((who, sess, func, ts, why)) = hit else { return hold(check_unmerged(t).or_else(|| check_contract(t))) };
     log_to(&t.repo, &format!("your {session} waits for {who} · {func} in {}", t.file));
-    Some((format!("paused: {who}/{sess} is changing {func} in {}. You'll be told when it's free · /anyway goes ahead", t.file),
+    hold(Some((format!("paused: {who}/{sess} is changing {func} in {}. You'll be told when it's free · /anyway goes ahead", t.file),
           format!("error: paused, your edit was NOT made. {who}/{sess} is changing {func} in {} right now (last edit {}){why}. \
 Meanwhile work on something that doesn't touch {func}, or stop and tell the user you're waiting for {who}; you'll get a message the \
 moment {func} is free. Don't get around this by editing it another way. If the user wants you to go ahead anyway, they type /anyway.",
-        t.file, ago(ts))))
+        t.file, ago(ts)))))
+}
+
+/// `claims = "warn"`: a teammate is changing this function now, or changed it and it isn't on main
+/// yet. The edit is made; the session hears it once per function and teammate.
+fn check_warn(t: &Touched) -> Option<(String, String, bool)> {
+    let now = now();
+    let (who, func, live, ts) = with(&t.repo, |s| s.peers.values().filter(|p| p.joined).find_map(|p| {
+        let hot = p.online.then(|| p.claims.values().find_map(|files| {
+            let fns = files.get(&t.file)?;
+            t.funcs.iter().find_map(|f| fns.get(f).filter(|ts| now.saturating_sub(**ts) < CLAIM_HOT).map(|ts| (f.clone(), *ts)))
+        })).flatten();
+        let (func, live, ts) = match hot {
+            Some((f, ts)) => (f, true, ts),
+            None => { let fns = p.unmerged.get(&t.file)?; t.funcs.iter().find_map(|f| fns.get(f).map(|ts| (f.clone(), false, *ts)))? }
+        };
+        Some((p.login.clone(), func, live, ts))
+    })).flatten()?;
+    let key = format!("warn:{}:{}:{who}", t.file, func);
+    if !with(&t.repo, |s| if s.warned.contains(&key) { false } else { s.warned.push(key); true }).unwrap_or(false) { return None }
+    let what = if live { format!("is changing {func} in {} right now (last edit {})", t.file, ago(ts)) }
+        else { format!("also changed {func} in {}, not on main yet (first seen {})", t.file, ago(ts)) };
+    log_to(&t.repo, &format!("{who} {what} · went ahead (claims = warn)"));
+    Some((format!("heads-up: {who} {what} · edit made (claims = warn)"),
+          format!("note: the edit was made, but {who} (a teammate) {what}, so the two changes may conflict. \
+Tell the user so they can agree it with {who}; this is said once."), false))
 }
 
 /// A teammate's copy changes this function too and it isn't on main yet (online or not, however
@@ -4166,6 +4195,26 @@ mod tests {
     }
 
     #[test]
+    fn claims_warn_lets_the_edit_through_and_says_so_once() {
+        let repo = "o/claims-warn";
+        let mut s = state("alice");
+        s.repo = repo.into();
+        let mut bob = peer("bob", &["api"], true);
+        bob.claims = HashMap::from([("api".to_string(), HashMap::from([("api/user.rs".to_string(), HashMap::from([("get_user".to_string(), now() - 30)]))]))]);
+        s.peers.insert("bob".into(), bob);
+        STATES.lock().unwrap().get_or_insert_with(HashMap::new).insert(repo.into(), s);
+        let t = |f: &str| Touched { repo: repo.into(), root: std::env::temp_dir(), file: "api/user.rs".into(), funcs: vec![f.into()],
+            removed: vec![], uses: vec![], bodies: vec![] };
+        let (line, note, held) = check_edit("main", &t("get_user"), false).expect("told");
+        assert!(!held && line.contains("bob is changing get_user") && note.contains("edit was made"), "{line} / {note}");
+        assert!(check_edit("main", &t("get_user"), false).is_none(), "said once");
+        assert!(with(repo, |s| s.waiting.is_empty()).unwrap(), "warn doesn't queue a wait");
+        let (_, _, held) = check_edit("main", &t("get_user"), true).expect("lock still holds");
+        assert!(held);
+        STATES.lock().unwrap().as_mut().unwrap().remove(repo);
+    }
+
+    #[test]
     fn an_edit_is_held_once_when_an_offline_teammate_changed_the_same_function() {
         let repo = "o/held-unmerged";
         let mut s = state("alice");
@@ -4176,10 +4225,11 @@ mod tests {
         STATES.lock().unwrap().get_or_insert_with(HashMap::new).insert(repo.into(), s);
         let t = |f: &str| Touched { repo: repo.into(), root: std::env::temp_dir(), file: "api/user.rs".into(), funcs: vec![f.into()],
             removed: vec![], uses: vec![], bodies: vec![] };
-        assert!(check_edit("main", &t("list_users")).is_none(), "another function: fine");
-        let (line, err) = check_edit("main", &t("get_user")).expect("held");
+        assert!(check_edit("main", &t("list_users"), true).is_none(), "another function: fine");
+        let (line, err, held) = check_edit("main", &t("get_user"), true).expect("held");
+        assert!(held);
         assert!(line.contains("bob also changed get_user") && err.contains("NOT made") && err.contains("first seen 3d ago"), "{line} / {err}");
-        assert!(check_edit("main", &t("get_user")).is_none(), "said once; a retry goes ahead");
+        assert!(check_edit("main", &t("get_user"), true).is_none(), "said once; a retry goes ahead");
         STATES.lock().unwrap().as_mut().unwrap().remove(repo);
     }
 

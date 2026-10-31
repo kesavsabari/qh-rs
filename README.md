@@ -166,6 +166,7 @@ lsp_wait_ms = 3000  # how long an edit waits for diagnostics
 # live over the encrypted line (read_team_file / list_team_files), uncommitted edits included,
 # never secrets or git-ignored files, and each read shows in your team Activity; or "off"
 team_share_files = "auto"
+claims = "lock"          # "warn": edit a function a teammate is on, and be told once
 
 # run a command after every edit; exit code 2 from a pre_tool hook blocks the action
 [[hooks]]

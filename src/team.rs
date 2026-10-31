@@ -2683,17 +2683,17 @@ moment {func} is free. Don't get around this by editing it another way. If the u
 /// yet. The edit is made; the session hears it once per function and teammate.
 fn check_warn(t: &Touched) -> Option<(String, String, bool)> {
     let now = now();
-    let (who, func, live, ts) = with(&t.repo, |s| s.peers.values().filter(|p| p.joined).find_map(|p| {
-        let hot = p.online.then(|| p.claims.values().find_map(|files| {
+    // someone on it right now comes before someone whose change just sits unmerged
+    let (who, func, live, ts) = with(&t.repo, |s| {
+        let peers = || s.peers.values().filter(|p| p.joined);
+        peers().filter(|p| p.online).find_map(|p| p.claims.values().find_map(|files| {
             let fns = files.get(&t.file)?;
-            t.funcs.iter().find_map(|f| fns.get(f).filter(|ts| now.saturating_sub(**ts) < CLAIM_HOT).map(|ts| (f.clone(), *ts)))
-        })).flatten();
-        let (func, live, ts) = match hot {
-            Some((f, ts)) => (f, true, ts),
-            None => { let fns = p.unmerged.get(&t.file)?; t.funcs.iter().find_map(|f| fns.get(f).map(|ts| (f.clone(), false, *ts)))? }
-        };
-        Some((p.login.clone(), func, live, ts))
-    })).flatten()?;
+            t.funcs.iter().find_map(|f| fns.get(f).filter(|ts| now.saturating_sub(**ts) < CLAIM_HOT).map(|ts| (p.login.clone(), f.clone(), true, *ts)))
+        })).or_else(|| peers().find_map(|p| {
+            let fns = p.unmerged.get(&t.file)?;
+            t.funcs.iter().find_map(|f| fns.get(f).map(|ts| (p.login.clone(), f.clone(), false, *ts)))
+        }))
+    }).flatten()?;
     let key = format!("warn:{}:{}:{who}", t.file, func);
     if !with(&t.repo, |s| if s.warned.contains(&key) { false } else { s.warned.push(key); true }).unwrap_or(false) { return None }
     let what = if live { format!("is changing {func} in {} right now (last edit {})", t.file, ago(ts)) }
@@ -4202,6 +4202,9 @@ mod tests {
         let mut bob = peer("bob", &["api"], true);
         bob.claims = HashMap::from([("api".to_string(), HashMap::from([("api/user.rs".to_string(), HashMap::from([("get_user".to_string(), now() - 30)]))]))]);
         s.peers.insert("bob".into(), bob);
+        let mut ann = peer("ann", &[], false); // an old unmerged change: the person on it now is named first
+        ann.unmerged = HashMap::from([("api/user.rs".into(), HashMap::from([("get_user".to_string(), now() - 86400)]))]);
+        s.peers.insert("ann".into(), ann);
         STATES.lock().unwrap().get_or_insert_with(HashMap::new).insert(repo.into(), s);
         let t = |f: &str| Touched { repo: repo.into(), root: std::env::temp_dir(), file: "api/user.rs".into(), funcs: vec![f.into()],
             removed: vec![], uses: vec![], bodies: vec![] };

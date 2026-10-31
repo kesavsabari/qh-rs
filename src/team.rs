@@ -947,6 +947,7 @@ pub struct Hooks {
 /// Connect this folder's project (or just show it, if it's already connected).
 pub fn start(cwd: &Path, summary: Summary, hooks: Hooks, background: bool) -> Result<String, String> {
     let (root, repo) = github_repo(cwd).ok_or("this folder's git remote isn't on GitHub (other hosts come later)")?;
+    crate::teamsetup::not_a_project(&root)?; // never a team on your home folder, however it got a remote
     if running_for(&repo) {
         set_current(&repo);
         return Ok(format!("team {repo} is connected"));

@@ -66,11 +66,21 @@ fn secrets(dir: &Path) -> Vec<String> {
 
 /// Your home folder (or anything above it) is never a project: it holds your keys and every
 /// other project. Refuse before asking anything.
+/// The git repo a folder belongs to counts too: a folder inside a repo that is your home (an
+/// empty `git init` in ~) would otherwise pass, and committing it means all of ~.
 pub fn not_a_project(cwd: &Path) -> Result<(), String> {
-    let home = crate::platform::home();
-    let (c, h) = (cwd.canonicalize().unwrap_or(cwd.into()), home.canonicalize().unwrap_or(home));
-    if h.starts_with(&c) {
-        return Err(format!("{} is your home folder (or above it), not a project. Pick or make a project folder: /team create in qh opens a folder browser.", cwd.display()));
+    not_a_project_in(cwd, crate::platform::home())
+}
+
+fn not_a_project_in(cwd: &Path, home: PathBuf) -> Result<(), String> {
+    let h = home.canonicalize().unwrap_or(home);
+    let top = git(cwd, &["rev-parse", "--show-toplevel"], &[]).ok().map(|t| PathBuf::from(t.trim()));
+    for d in std::iter::once(cwd.to_path_buf()).chain(top) {
+        let c = d.canonicalize().unwrap_or(d.clone());
+        if h.starts_with(&c) {
+            let why = if c == cwd.canonicalize().unwrap_or(cwd.into()) { String::new() } else { format!(" (it's inside the git repo at {}, which is)", c.display()) };
+            return Err(format!("{} is your home folder (or above it){why}, not a project. Pick or make a project folder: /team create in qh opens a folder browser.", cwd.display()));
+        }
     }
     Ok(())
 }
@@ -276,4 +286,23 @@ pub fn join_inner(repo: &str, invite_code: Option<&str>) -> Result<PathBuf, Stri
     if let Some(c) = invite_code.filter(|c| !c.trim().is_empty()) { crate::team::set_join_code(repo, c) }
     println!("✓ joined {repo}. Start working together:\n\n    cd {name}\n    qh\n\nTeam mode turns on by itself; your teammates see you within seconds.");
     Ok(dir)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_folder_inside_a_repo_at_home_is_not_a_project() {
+        let home = std::env::temp_dir().join(format!("qh-home-{}", std::process::id()));
+        let (sub, proj) = (home.join("Downloads"), home.join("proj"));
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::create_dir_all(&proj).unwrap();
+        let init = |d: &std::path::Path| assert!(std::process::Command::new("git").args(["init", "-q"]).arg(d).status().unwrap().success());
+        init(&home);
+        init(&proj);
+        let err = super::not_a_project_in(&sub, home.clone()).unwrap_err();
+        assert!(err.contains("inside the git repo"), "{err}");
+        assert!(super::not_a_project_in(&home, home.clone()).is_err(), "home itself");
+        assert!(super::not_a_project_in(&proj, home.clone()).is_ok(), "a real project with its own repo under ~");
+        let _ = std::fs::remove_dir_all(&home);
+    }
 }

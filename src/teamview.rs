@@ -313,6 +313,7 @@ enum To {
     Question(String, String), // a question for their agent (answered read-only)
     Reply(String, u64),       // writing back to a waiting request
     SendBack(String, String), // what a held push needs before it goes: (pusher, commit)
+    Decline(String, u64),     // why we're saying no to a request (may be left empty)
 }
 
 /// Pushes handed to you that you haven't decided yet: they head the Requests tab.
@@ -355,13 +356,15 @@ pub struct TeamView {
     scroll: u16,
     person: usize, // the map's selected person
     detail: bool,  // the map opened on one person
+    away_shown: bool, // "while you were away" was on screen on Home
+    away_done: bool,  // ...and you left Home since: it's not shown again this time
 }
 
 impl TeamView {
     pub fn open(cwd: &Path) -> Self {
         if let Some((_, r)) = crate::team::github_repo(cwd) { gh_refresh(&r, false) }
         // a request waiting: open on it
-        let tab = if crate::team::pending().is_empty() && open_holds().is_empty() { 0 } else { REQUESTS };
+        let tab = if crate::team::pending().iter().all(|i| i.snoozed) && open_holds().is_empty() { 0 } else { REQUESTS };
         Self { tab, ..Self::default() }
     }
 
@@ -397,6 +400,13 @@ impl TeamView {
                 KeyCode::Enter => {
                     let (to, text) = (to.clone(), text.trim().to_string());
                     self.typing = None;
+                    if let To::Decline(from, id) = &to {
+                        let why = Some(text.clone()).filter(|t| !t.is_empty());
+                        return match crate::team::act(from, *id, crate::team::Action::Decline(why)) {
+                            Ok(_) => Act::Note(format!("declined {from}'s request; they're told privately{}", if text.is_empty() { "" } else { ", with your reason" })),
+                            Err(e) => Act::Err(e),
+                        };
+                    }
                     if text.is_empty() { return Act::None }
                     let r = match to {
                         To::Chat(c) => crate::team::channel_send(&c, &text),
@@ -404,6 +414,7 @@ impl TeamView {
                         To::Task(who, s) => crate::team::send(&who, &s, &text),
                         To::Reply(from, id) => crate::team::reply_request(&from, id, &text),
                         To::SendBack(from, head) => crate::team::decide_hold(&from, &head, false, &text),
+                        To::Decline(..) => unreachable!(),
                     };
                     return match r { Ok(m) if m.is_empty() => Act::None, Ok(m) => Act::Note(m), Err(e) => Act::Err(e) };
                 }
@@ -440,18 +451,33 @@ impl TeamView {
                 match k.code {
                     KeyCode::Enter | KeyCode::Char('a') => return Self::accept(hub, &i, "once"),
                     KeyCode::Char('A') if i.question.is_some() => return Self::accept(hub, &i, "always"),
-                    KeyCode::Char('d') => {
-                        let q = i.question.is_some();
+                    KeyCode::Char('d') if i.question.is_some() => {
                         crate::team::decide(&i.from, i.id, "deny");
-                        return Act::Note(format!("declined {}'s {}{}", i.from, if q { "question" } else { "request" },
-                                                 if q { "" } else { "; they're told privately" }));
+                        return Act::Note(format!("declined {}'s question", i.from));
                     }
+                    // work: say why (or just Enter); the sender reads it with the no
+                    KeyCode::Char('d') => { self.typing = Some((To::Decline(i.from.clone(), i.id), String::new())); return Act::None }
+                    KeyCode::Char('l') => return match crate::team::act(&i.from, i.id, crate::team::Action::Later) {
+                        Ok(_) => Act::Note(format!("later: {}'s request is off the card, still in Asked you", i.from)),
+                        Err(e) => Act::Err(e),
+                    },
                     KeyCode::Char('r') => { self.typing = Some((To::Reply(i.from.clone(), i.id), String::new())); return Act::None }
                     _ => {}
                 }
             }
         }
+        if self.tab == OUTGOING {
+            let sent = crate::team::outgoing();
+            if let Some(o) = sent.get(self.sel[OUTGOING].min(sent.len().saturating_sub(1))) {
+                match k.code {
+                    KeyCode::Char('s') => return match crate::team::resend(o.id) { Ok(()) => Act::Note(format!("sent to {} again", o.to)), Err(e) => Act::Err(e) },
+                    KeyCode::Char('w') => return match crate::team::withdraw(o.id) { Ok(()) => Act::Note(format!("took back your request to {}; they're told", o.to)), Err(e) => Act::Err(e) },
+                    _ => {}
+                }
+            }
+        }
         let root = Self::root(cwd);
+        if self.tab != 0 && self.away_shown { self.away_done = true }
         if self.tab == 0 && !self.detail {
             let ppl = people(hub, &root);
             let n = ppl.len();
@@ -569,9 +595,12 @@ impl TeamView {
         let [top, inner] = Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(area);
         let head = format!(" {} ", repo.clone().unwrap_or_else(|| "not in a team".into()));
         let right = format!("● {online} online · {} teammates ", ppl.len().saturating_sub(1));
-        let gap = (top.width as usize).saturating_sub(head.chars().count() + 5 + right.chars().count());
+        let need = crate::team::pending().iter().filter(|i| !i.snoozed).count() + open_holds().len();
+        let need_s = if need > 0 { format!("   {need} need{} you", if need == 1 { "s" } else { "" }) } else { String::new() };
+        let gap = (top.width as usize).saturating_sub(head.chars().count() + 5 + need_s.chars().count() + right.chars().count());
         f.render_widget(Paragraph::new(Line::from(vec![
             Span::styled(head, theme::bold(theme::ink())), Span::styled("team", theme::fg(theme::dim())),
+            Span::styled(need_s, theme::bold(theme::orange())),
             Span::raw(" ".repeat(gap)), Span::styled(right, theme::fg(theme::ink2())),
         ])).block(Block::new().borders(Borders::BOTTOM).border_style(theme::fg(theme::line()))), top);
 
@@ -588,7 +617,9 @@ impl TeamView {
 
         let pending = crate::team::pending();
         let joins = crate::team::join_requests();
-        let wait_h = if joins.is_empty() && (pending.is_empty() || self.tab == REQUESTS) { 0 } else { 3 };
+        // the card: the oldest request not put off till later, docked under every page but Asked you
+        let card = pending.iter().find(|i| !i.snoozed).filter(|_| self.tab != REQUESTS).cloned();
+        let wait_h = if !joins.is_empty() { 3 } else if card.is_some() { 4 } else { 0 };
         let input_h = if self.typing.is_some() { 1 } else { 0 };
         let [menu, inner] = Layout::horizontal([Constraint::Length(MENU_W.min(inner.width / 2)), Constraint::Min(10)]).areas(inner);
         let [body, wait, input, hint] = Layout::vertical([
@@ -600,6 +631,24 @@ impl TeamView {
 
         match self.tab {
             0 if self.detail => self.draw_people(f, body, hub, &ppl, &gh),
+            // read live: what was sent while you were offline arrives a few seconds after the screen opens
+            0 if !self.away_done && { let a = crate::team::away(); !a.needs_you.is_empty() || !a.fyi.is_empty() } => {
+                let a = crate::team::away();
+                self.away_shown = true;
+                let mut lines = vec![Line::raw(""), Line::styled(format!("  While you were away · since {}", crate::team::ago(a.since_ts)), theme::bold(theme::ink()))];
+                for i in &a.needs_you {
+                    lines.push(Line::from(vec![Span::styled("  ● ", theme::bold(theme::orange())), Span::styled(i.from.clone(), theme::bold(theme::ink())),
+                        Span::styled(format!("  {}", clip(&i.text.replace('\n', " "), (body.width as usize).saturating_sub(20))), theme::fg(theme::ink2()))]));
+                }
+                for x in &a.fyi {
+                    lines.push(Line::styled(format!("    {} · {}", x.kind, clip(&x.text.replace('\n', " "), (body.width as usize).saturating_sub(16))), theme::fg(theme::dim())));
+                }
+                if !a.needs_you.is_empty() { lines.push(Line::styled(format!("  {} to answer what needs you", menu_pos(REQUESTS) + 1), theme::fg(theme::dim()))) }
+                let h = (lines.len() as u16 + 1).min(body.height / 2);
+                let [top, rest] = Layout::vertical([Constraint::Length(h), Constraint::Min(1)]).areas(body);
+                f.render_widget(Paragraph::new(lines).block(Block::new().borders(Borders::BOTTOM).border_style(theme::fg(theme::line()))), top);
+                self.draw_map(f, rest, &ppl, &root)
+            }
             0 => self.draw_map(f, body, &ppl, &root),
             CHAT => self.draw_chat(f, body),
             REQUESTS => self.draw_requests(f, body, &open_holds(), &pending),
@@ -620,13 +669,17 @@ impl TeamView {
                 Line::styled(format!(" {who} wants to join the team{more}"), Style::new().fg(theme::orange()).add_modifier(Modifier::BOLD)),
                 Line::styled("   l let them in · n not now", Style::new().fg(theme::orange())),
             ]).block(Block::new().borders(Borders::TOP).border_style(Style::new().fg(theme::dim()))), wait);
-        } else if let Some(i) = pending.first().filter(|_| self.tab != REQUESTS) {
-            let n = pending.len();
+        } else if let Some(i) = card {
+            let more = pending.iter().filter(|x| !x.snoozed).count() - 1;
+            let what = if i.question.is_some() { "asks your" } else { "hands you work for your" };
+            let ww = wait.width as usize;
             f.render_widget(Paragraph::new(vec![
-                Line::from(vec![Span::styled(format!(" {n} request{} waiting: ", if n == 1 { "" } else { "s" }), Style::new().fg(theme::orange()).add_modifier(Modifier::BOLD)),
-                                Span::raw(format!("{} → your {}: \"{}\"", i.from, i.session, clip(&i.text, (wait.width as usize).saturating_sub(40))))]),
-                Line::styled(format!("   {} Requests to accept, reply or decline: nothing runs until you accept", REQUESTS + 1), Style::new().fg(theme::orange())),
-            ]).block(Block::new().borders(Borders::TOP).border_style(Style::new().fg(theme::dim()))), wait);
+                Line::from(vec![Span::styled(" ● ", theme::bold(theme::orange())), Span::styled(i.from.clone(), theme::bold(theme::ink())),
+                                Span::styled(format!(" {what} {} · {}", i.session, crate::team::ago(i.ts)), theme::fg(theme::dim())),
+                                Span::styled(if more > 0 { format!("   + {more} more") } else { String::new() }, theme::fg(theme::ink2()))]),
+                Line::styled(format!("   {}", clip(&i.text.replace('\n', " "), ww.saturating_sub(4))), theme::fg(theme::ink())),
+                Line::styled(format!("   {} to answer: accept, reply, decline or later · nothing runs until you accept", menu_pos(REQUESTS) + 1), theme::fg(theme::dim())),
+            ]).block(Block::new().borders(Borders::TOP).border_style(theme::fg(theme::line()))), wait);
         }
         if let Some((to, text)) = &self.typing {
             let label = match to {
@@ -637,6 +690,7 @@ impl TeamView {
                 To::Task(who, s) => format!(" task for {who}'s {s} (runs once they accept it) › "),
                 To::Reply(who, _) => format!(" reply to {who} (no work starts) › "),
                 To::SendBack(who, _) => format!(" send {who}'s push back: what must change › "),
+                To::Decline(who, _) => format!(" why not, {who}? (Enter alone just says no) › "),
             };
             f.render_widget(Paragraph::new(Line::from(vec![
                 Span::styled(label, Style::new().fg(accent).add_modifier(Modifier::BOLD)),
@@ -649,7 +703,8 @@ impl TeamView {
             (_, 0) => "↑↓ sessions · Enter open yours / give their agent a task · m message · Esc back to the map",
             (_, CHAT) => "↑↓ channel · Enter or m write · x clear a private thread · /dm <login> and /team group <name> <logins> from the prompt · ←→ pages · Esc back",
             (_, REQUESTS) if self.sel[REQUESTS] < open_holds().len() => "↑↓ pick · Enter or a approve the push · s send back with a note · r talk it through · ←→ pages · Esc back",
-            (_, REQUESTS) => "↑↓ pick · Enter or a accept · r reply · d decline · A always answer their questions · ←→ pages · Esc back",
+            (_, REQUESTS) => "↑↓ pick · Enter or a accept · r reply · d decline (say why) · l later · A always answer their questions · ←→ pages · Esc back",
+            (_, OUTGOING) => "↑↓ pick · s send again · w take it back · ←→ pages · Esc back",
             (_, ISSUES) => "↑↓ pick · Enter start it in its own branch and session · r refresh · ←→ pages · Esc back",
             (_, PRS) => "↑↓ pick · Enter have your current session review it · r refresh · ←→ pages · Esc back",
             _ => "↑↓ scroll · ←→ pages · Esc back",
@@ -760,7 +815,7 @@ impl TeamView {
             let from = if i.from_session.is_empty() { i.from.clone() } else { format!("{}'s {}", i.from, i.from_session) };
             let kind = if i.question.is_some() { "question for" } else { "work for" };
             let head = format!("{} {from} · {kind} your {} · {}{}", if on { "▸" } else { " " }, i.session, crate::team::ago(i.ts),
-                               if i.replied { " · you replied" } else { "" });
+                               if i.replied { " · you replied" } else if i.snoozed { " · later" } else { "" });
             lines.push(Line::styled(clip(&head, w), if on { theme::hot() }
                                                    else { Style::new().fg(theme::orange()).add_modifier(Modifier::BOLD) }));
             // the whole request, wrapped, on the picked one; two lines on the others

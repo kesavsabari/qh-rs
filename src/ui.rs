@@ -2,6 +2,7 @@
 //! of sessions costs nothing until one is shown. Input and hub events share one
 //! channel; the loop sleeps until something arrives, then drains everything
 //! queued before drawing once.
+use crate::theme;
 use crate::engine;
 use crate::hub::{lock, Answer, Event, Hub, MAX_HOPS};
 use crate::{context, session, tools};
@@ -10,7 +11,7 @@ use ratatui::crossterm::execute;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
@@ -161,9 +162,6 @@ fn icon(status: &str) -> &'static str {
     }
 }
 
-const ACCENT: Color = Color::Cyan;
-const DIM: Color = Color::DarkGray;
-const TEAM: Color = Color::Magenta; // a team space's colour, so you always know where you are
 const MAP_TAB: &str = "\u{0}map"; // the team space's map, as a tab
 
 enum Item {
@@ -2176,7 +2174,7 @@ $ARGUMENTS is replaced by what you type after the command".into()
         self.body = body;
         let panes = if self.show_log {
             let [p, l] = Layout::horizontal([Constraint::Percentage(62), Constraint::Percentage(38)]).areas(body);
-            let block = Block::bordered().title(" message log ").border_style(Style::new().fg(DIM));
+            let block = Block::bordered().title(" message log ").border_style(Style::new().fg(theme::dim()));
             let inner = block.inner(l);
             f.render_widget(block, l);
             let lines: Vec<Line> = self.log.iter().map(|s| Line::raw(s.as_str())).collect();
@@ -2208,18 +2206,18 @@ $ARGUMENTS is replaced by what you type after the command".into()
             let a = self.active.clone();
             self.draw_pane(f, &a, panes);
         }
-        f.render_widget(Paragraph::new(self.status_line()).style(Style::new().fg(DIM)), status);
+        f.render_widget(Paragraph::new(self.status_line()).style(Style::new().fg(theme::dim())), status);
         let prompt = "› ";
-        let pc = if self.in_team_space() { TEAM } else { ACCENT };
+        let pc = if self.in_team_space() { theme::ink() } else { theme::orange() };
         // what the active session is doing, on the input box where the eye already is
         let doing = self.hub.get(&self.active).and_then(|m| match m.status() {
             "working" if m.thinking.load(std::sync::atomic::Ordering::Relaxed) => Some(" ✻ thinking… "),
             "working" | "waiting-model" => Some(" … working "),
             _ => None,
         });
-        let mut input_block = Block::bordered().border_style(Style::new().fg(DIM));
+        let mut input_block = Block::new().borders(Borders::TOP | Borders::BOTTOM).border_style(theme::fg(theme::line()));
         if let Some(d) = doing {
-            input_block = input_block.title(Span::styled(d, Style::new().fg(ACCENT)));
+            input_block = input_block.title(Span::styled(d, Style::new().fg(theme::orange())));
         }
         let input = input_block.inner(input_box);
         // an API key being typed is never drawn
@@ -2238,12 +2236,12 @@ $ARGUMENTS is replaced by what you type after the command".into()
             .map(|(i, c)| format!("[image {}: {}] ", i + 1, crate::image::size(crate::image::bytes_of(c)))).collect();
         let cx = cx + chips.len();
         let line = if !chips.is_empty() {
-            Line::from(vec![Span::styled(prompt, Style::new().fg(pc)), Span::styled(chips, Style::new().fg(ACCENT)), Span::raw(shown_text)])
+            Line::from(vec![Span::styled(prompt, Style::new().fg(pc)), Span::styled(chips, Style::new().fg(theme::orange())), Span::raw(shown_text)])
         } else if self.input.is_empty() {
             Line::from(vec![Span::styled(prompt, Style::new().fg(pc)), Span::styled(match &self.secret {
                 Some(p) => format!("API key for {p} (hidden, Esc cancels)"),
                 None => "message, /help, @file to attach".into(),
-            }, Style::new().fg(DIM))])
+            }, Style::new().fg(theme::dim()))])
         } else {
             Line::from(vec![Span::styled(prompt, Style::new().fg(pc)), Span::raw(shown_text)])
         };
@@ -2259,12 +2257,12 @@ $ARGUMENTS is replaced by what you type after the command".into()
                 let note = format!(" Update available ({v})! Run: {} ", crate::update::how());
                 let w = (note.chars().count() as u16).min(foot.width);
                 let [rest, right] = Layout::horizontal([Constraint::Min(0), Constraint::Length(w)]).areas(foot);
-                f.render_widget(Paragraph::new(note).style(Style::new().fg(Color::Yellow)), right);
+                f.render_widget(Paragraph::new(note).style(Style::new().fg(theme::orange())), right);
                 rest
             }
             None => foot,
         };
-        f.render_widget(Paragraph::new(hints).style(Style::new().fg(DIM)), foot);
+        f.render_widget(Paragraph::new(hints).style(Style::new().fg(theme::dim())), foot);
         let sugg = self.suggestions();
         if !sugg.is_empty() && self.picker.is_none() {
             let rows = sugg.len().min(12) as u16;
@@ -2274,11 +2272,11 @@ $ARGUMENTS is replaced by what you type after the command".into()
             let top = self.sugg_sel.saturating_sub(rows as usize - 1);
             let lines: Vec<Line> = sugg.iter().enumerate().skip(top).take(rows as usize).map(|(i, (c, d))| {
                 let st = if i == self.sugg_sel { Style::new().add_modifier(Modifier::REVERSED) } else { Style::new() };
-                Line::from(vec![Span::styled(format!("{c:<pad$}"), st.fg(ACCENT)), Span::styled(format!(" {d}"), st.fg(DIM))])
+                Line::from(vec![Span::styled(format!("{c:<pad$}"), st.fg(theme::ink()).add_modifier(Modifier::BOLD)), Span::styled(format!(" {d}"), st.fg(theme::dim()))])
             }).collect();
             f.render_widget(Clear, r);
-            f.render_widget(Paragraph::new(lines).block(Block::bordered().border_style(Style::new().fg(DIM))
-                .title_bottom(Line::styled(" ↑↓ · Tab fill · Enter run ", Style::new().fg(DIM)))), r);
+            f.render_widget(Paragraph::new(lines).block(Block::bordered().border_style(Style::new().fg(theme::dim()))
+                .title_bottom(Line::styled(" ↑↓ · Tab fill · Enter run ", Style::new().fg(theme::dim())))), r);
         }
         self.picker_rows = self.picker.as_ref().map(|p| draw_picker(f, p));
         if let Some(c) = self.confirms.front() {
@@ -2288,7 +2286,7 @@ $ARGUMENTS is replaced by what you type after the command".into()
 
     fn draw_tabs(&self, f: &mut Frame, area: Rect) -> Vec<(u16, u16, String)> {
         let team = self.in_team_space();
-        let accent = if team { TEAM } else { ACCENT };
+        let accent = if team { theme::ink() } else { theme::orange() };
         // which space you're in, always in the corner
         let chip = if team {
             format!(" ◆ {} ", crate::team::repo().unwrap_or_default().rsplit('/').next().unwrap_or("team"))
@@ -2298,8 +2296,8 @@ $ARGUMENTS is replaced by what you type after the command".into()
         };
         let chip_w = chip.chars().map(|c| c.width().unwrap_or(0)).sum::<usize>() as u16 + 1;
         f.render_widget(Paragraph::new(Line::styled(chip.as_str(), if team {
-            Style::new().fg(Color::Black).bg(TEAM).add_modifier(Modifier::BOLD)
-        } else { Style::new().fg(DIM) })), Rect { width: chip_w.min(area.width), ..area });
+            theme::inverted()
+        } else { Style::new().fg(theme::dim()) })), Rect { width: chip_w.min(area.width), ..area });
         let area = Rect { x: area.x + chip_w, width: area.width.saturating_sub(chip_w), ..area };
         let mut names = self.tabs();
         if team { names.insert(0, MAP_TAB.to_string()) }
@@ -2320,7 +2318,7 @@ $ARGUMENTS is replaced by what you type after the command".into()
         let mut hits = vec![];
         let mut x = area.x;
         if start > 0 {
-            spans.push(Span::styled("‹", Style::new().fg(DIM)));
+            spans.push(Span::styled("‹", Style::new().fg(theme::dim())));
             x += 1;
         }
         for (i, (label, active, unread)) in labels[start..].iter().enumerate() {
@@ -2332,7 +2330,7 @@ $ARGUMENTS is replaced by what you type after the command".into()
             } else if *unread {
                 Style::new().fg(accent)
             } else {
-                Style::new().fg(DIM)
+                Style::new().fg(theme::dim())
             };
             spans.push(Span::styled(label.as_str(), st));
             spans.push(Span::raw(" "));
@@ -2679,8 +2677,9 @@ then it's `git push -u origin {branch}` and `gh pr create --fill`.");
             let br = crate::worktree::branch(&m.cwd()).map(|b| format!(" · ⎇ {b}")).unwrap_or_default();
             format!(" {}{}{role}{br} · {status} · {model} ", name, icon(m.status()))
         }).unwrap_or_default();
-        let color = if name == self.active { ACCENT } else { DIM };
-        let block = Block::bordered().title(title).border_style(Style::new().fg(color));
+        // no box: a hairline on top carries the title, bold ink on the pane you're in
+        let tst = if name == self.active { theme::bold(theme::ink()) } else { theme::fg(theme::dim()) };
+        let block = Block::new().borders(Borders::TOP).border_style(theme::fg(theme::line())).title(Span::styled(title, tst));
         let inner = block.inner(area);
         f.render_widget(block, area);
         self.draw_chat(f, name, inner);
@@ -2705,7 +2704,7 @@ then it's `git push -u origin {branch}` and `gh pr create --fill`.");
             let mut ls = if replies && matches!(it, Item::Tool { .. }) { vec![] } else { item_lines(it, width, need - lines.len()) };
             if steps > 0 {
                 let s = if steps == 1 { "" } else { "s" };
-                ls.push(Line::styled(format!("  · {steps} step{s}"), Style::new().fg(DIM)));
+                ls.push(Line::styled(format!("  · {steps} step{s}"), Style::new().fg(theme::dim())));
                 steps = 0;
             }
             ls.append(&mut lines);
@@ -2723,7 +2722,7 @@ then it's `git push -u origin {branch}` and `gh pr create --fill`.");
         if v.scroll > 0 {
             let tag = format!(" ↓ {} more ", v.scroll);
             let r = Rect { x: area.right().saturating_sub(tag.len() as u16 + 1), y: area.bottom() - 1, width: tag.len() as u16, height: 1 };
-            f.render_widget(Paragraph::new(tag).style(Style::new().fg(Color::Black).bg(DIM)), r);
+            f.render_widget(Paragraph::new(tag).style(Style::new().fg(Color::Black).bg(theme::dim())), r);
         }
     }
 }
@@ -2741,11 +2740,11 @@ fn item_lines(it: &Item, w: usize, need: usize) -> Vec<Line<'static>> {
         Item::User(s) => {
             let rows = wrap(s, w.saturating_sub(2));
             let shown = if rows.len() > USER_ROWS + 2 { USER_ROWS } else { rows.len() };
-            let bar = || Span::styled("▌ ", Style::new().fg(ACCENT));
+            let bar = || Span::styled("▌ ", Style::new().fg(theme::dim()));
             let mut v = vec![Line::raw("")];
             v.extend(rows[..shown].iter().map(|l| Line::from(vec![bar(), Span::styled(l.clone(), Style::new().add_modifier(Modifier::BOLD))])));
             if shown < rows.len() {
-                v.push(Line::from(vec![bar(), Span::styled(format!("… {} more lines", rows.len() - shown), Style::new().fg(DIM))]));
+                v.push(Line::from(vec![bar(), Span::styled(format!("… {} more lines", rows.len() - shown), Style::new().fg(theme::dim()))]));
             }
             v.push(Line::raw(""));
             v
@@ -2763,13 +2762,13 @@ fn item_lines(it: &Item, w: usize, need: usize) -> Vec<Line<'static>> {
             }
             rows
         }
-        Item::Note(s) => styled(s, Style::new().fg(Color::Blue), 0),
-        Item::Cmd(s) => styled(&format!("› {s}"), Style::new().fg(ACCENT), 0),
-        Item::Err(s) => styled(s, Style::new().fg(Color::Red), 0),
+        Item::Note(s) => styled(s, Style::new().fg(theme::ink2()), 0),
+        Item::Cmd(s) => styled(&format!("› {s}"), Style::new().fg(theme::dim()), 0),
+        Item::Err(s) => styled(s, theme::bold(theme::orange()), 0),
         Item::Tool { title, args, result, open } => {
             let n = result.lines().count();
             let size = if *open || n < 2 { String::new() } else { format!(" · {n} lines") };
-            let mut v = styled(&format!("{} {title}{size}", if *open { "▾" } else { "▸" }), Style::new().fg(DIM), 0);
+            let mut v = styled(&format!("{} {title}{size}", if *open { "▾" } else { "▸" }), Style::new().fg(theme::dim()), 0);
             if *open {
                 let a: Value = serde_json::from_str(args).unwrap_or_default();
                 if let (Some(old), Some(new)) = (a["old"].as_str(), a["new"].as_str()) {
@@ -2777,7 +2776,7 @@ fn item_lines(it: &Item, w: usize, need: usize) -> Vec<Line<'static>> {
                 } else if let (Some(_), Some(c)) = (a["path"].as_str(), a["content"].as_str()) {
                     v.extend(diff_lines("", c, w));
                 } else {
-                    v.extend(styled(args, Style::new().fg(Color::Magenta), 2));
+                    v.extend(styled(args, Style::new().fg(theme::dim()), 2));
                     let body: Vec<&str> = result.lines().take(40).collect();
                     v.extend(styled(&body.join("\n"), Style::new(), 2));
                 }
@@ -2825,7 +2824,7 @@ fn tw(s: &str) -> usize {
 }
 
 fn md_block(b: &Md, w: usize) -> Vec<Line<'static>> {
-    let dim = Style::new().fg(DIM);
+    let dim = Style::new().fg(theme::dim());
     let pad = |n: usize| Span::raw(" ".repeat(n));
     match b {
         Md::Code(lang, ls) => {
@@ -2882,7 +2881,7 @@ fn md_block(b: &Md, w: usize) -> Vec<Line<'static>> {
             if t.is_empty() {
                 vec![Line::raw("")]
             } else if (1..=6).contains(&h) && t[h..].starts_with(' ') {
-                fill(inline(t[h..].trim(), Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)), w, pad(0), pad(0), true)
+                fill(inline(t[h..].trim(), theme::bold(theme::ink())), w, pad(0), pad(0), true)
             } else if let Some(q) = t.strip_prefix('>') {
                 fill(inline(q.trim_start(), Style::new().add_modifier(Modifier::ITALIC)), w, Span::styled("│ ", dim), Span::styled("│ ", dim), true)
             } else if ["- ", "* ", "+ "].iter().any(|m| t.starts_with(m)) {
@@ -2913,7 +2912,7 @@ fn inline(s: &str, base: Style) -> Vec<(String, Style)> {
         let mark = if c == '`' {
             cs[i + 1..].iter().position(|&c| c == '`').map(|p| {
                 v.push((std::mem::take(&mut cur), st(b, it)));
-                v.push((cs[i + 1..i + 1 + p].iter().collect(), Style::new().fg(Color::Yellow)));
+                v.push((cs[i + 1..i + 1 + p].iter().collect(), Style::new().fg(theme::ink2())));
                 p + 2
             })
         } else if c == '*' && cs.get(i + 1) == Some(&'*') {
@@ -2958,7 +2957,7 @@ fn code_spans(l: &str) -> Vec<(String, Style)> {
     while i < cs.len() {
         let c = cs[i];
         if (c == '/' && cs.get(i + 1) == Some(&'/')) || (c == '#' && cs[..i].iter().all(|c| c.is_whitespace())) {
-            put(cs[i..].iter().collect(), Style::new().fg(DIM));
+            put(cs[i..].iter().collect(), Style::new().fg(theme::dim()));
             break;
         } else if c == '"' {
             let mut j = i + 1;
@@ -2966,16 +2965,16 @@ fn code_spans(l: &str) -> Vec<(String, Style)> {
                 j += if cs[j] == '\\' { 2 } else { 1 };
             }
             let j = (j + 1).min(cs.len());
-            put(cs[i..j].iter().collect(), Style::new().fg(Color::Green));
+            put(cs[i..j].iter().collect(), Style::new().fg(theme::ink2()));
             i = j;
         } else if c.is_alphanumeric() || c == '_' {
             let j = cs[i..].iter().position(|c| !(c.is_alphanumeric() || *c == '_')).map_or(cs.len(), |p| i + p);
             let word: String = cs[i..j].iter().collect();
-            let st = if KEYWORDS.contains(&word.as_str()) { Style::new().fg(Color::Magenta) } else { Style::new().fg(Color::Yellow) };
+            let st = if KEYWORDS.contains(&word.as_str()) { theme::bold(theme::ink()) } else { Style::new().fg(theme::ink2()) };
             put(word, st);
             i = j;
         } else {
-            put(c.to_string(), Style::new().fg(Color::Yellow));
+            put(c.to_string(), Style::new().fg(theme::ink2()));
             i += 1;
         }
     }
@@ -3033,7 +3032,7 @@ fn diff_lines(old: &str, new: &str, w: usize) -> Vec<Line<'static>> {
         let text: String = format!("  {mark} {l}").chars().take(w.max(4)).collect();
         Line::from(Span::styled(text, st))
     };
-    let (dim, red, green) = (Style::new().fg(DIM), Style::new().fg(Color::Red), Style::new().fg(Color::Green));
+    let (dim, red, green) = (Style::new().fg(theme::dim()), Style::new().fg(theme::removed()), Style::new().fg(theme::added()));
     let mut v: Vec<Line<'static>> = vec![];
     v.extend(o[pre.saturating_sub(2)..pre].iter().map(|l| row(" ", l, dim)));
     v.extend(o[pre..o.len() - suf].iter().map(|l| row("-", l, red)));
@@ -3100,11 +3099,11 @@ fn draw_picker(f: &mut Frame, p: &Picker) -> (Rect, usize) {
     let h = (hits.len() as u16 + 4).clamp(6, area.height.saturating_sub(4).max(6)).min(area.height);
     let r = Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 2, width: w, height: h };
     f.render_widget(Clear, r);
-    let block = Block::bordered().border_style(Style::new().fg(ACCENT))
-        .title(format!(" {} ", p.title)).title_bottom(Line::styled(" ↑↓ move · type to filter · Enter pick · Esc close ", Style::new().fg(DIM)));
+    let block = Block::bordered().border_style(Style::new().fg(theme::line()))
+        .title(format!(" {} ", p.title)).title_bottom(Line::styled(" ↑↓ move · type to filter · Enter pick · Esc close ", Style::new().fg(theme::dim())));
     let inner = block.inner(r);
     f.render_widget(block, r);
-    let mut lines = vec![Line::from(vec![Span::styled("search: ", Style::new().fg(DIM)), Span::raw(p.filter.clone()), Span::styled("▏", Style::new().fg(ACCENT))])];
+    let mut lines = vec![Line::from(vec![Span::styled("search: ", Style::new().fg(theme::dim())), Span::raw(p.filter.clone()), Span::styled("▏", Style::new().fg(theme::orange()))])];
     let rows = inner.height.saturating_sub(1) as usize;
     let all_rows = p.rows();
     let at = all_rows.iter().position(|(i, _)| *i == Some(p.sel)).unwrap_or(0);
@@ -3112,11 +3111,11 @@ fn draw_picker(f: &mut Frame, p: &Picker) -> (Rect, usize) {
     let at = if at > 0 && all_rows[at - 1].0.is_none() { at - 1 } else { at };
     let top = at.saturating_sub(rows.saturating_sub(1)).min(at);
     if hits.is_empty() {
-        lines.push(Line::styled("no match", Style::new().fg(DIM)));
+        lines.push(Line::styled("no match", Style::new().fg(theme::dim())));
     }
     for (i, label) in all_rows.iter().skip(top).take(rows) {
         match i {
-            None => lines.push(Line::styled(label.to_string(), Style::new().fg(ACCENT).add_modifier(Modifier::BOLD))),
+            None => lines.push(Line::styled(label.to_string(), theme::bold(theme::ink()))),
             Some(i) => {
                 let mark = if hits[*i].0 == p.cur { "● " } else { "  " };
                 let st = if *i == p.sel { Style::new().add_modifier(Modifier::REVERSED) } else { Style::new() };
@@ -3137,11 +3136,11 @@ fn draw_confirm(f: &mut Frame, c: &Confirm, queued: usize) {
             let cmd = s("cmd");
             let d = DANGER.is_match(&cmd);
             (format!("in {}", c.cwd.display()),
-             cmd.lines().map(|l| Line::styled(l.to_string(), Style::new().fg(Color::Yellow))).collect(), d)
+             cmd.lines().map(|l| Line::styled(l.to_string(), Style::new().fg(theme::ink()))).collect(), d)
         }
         "edit_file" => {
-            let mut v: Vec<Line> = s("old").lines().map(|l| Line::styled(format!("- {l}"), Style::new().fg(Color::Red))).collect();
-            v.extend(s("new").lines().map(|l| Line::styled(format!("+ {l}"), Style::new().fg(Color::Green))));
+            let mut v: Vec<Line> = s("old").lines().map(|l| Line::styled(format!("- {l}"), Style::new().fg(theme::removed()))).collect();
+            v.extend(s("new").lines().map(|l| Line::styled(format!("+ {l}"), Style::new().fg(theme::added()))));
             (s("path"), v, false)
         }
         "write_file" => {
@@ -3153,7 +3152,7 @@ fn draw_confirm(f: &mut Frame, c: &Confirm, queued: usize) {
         "rename_symbol" => (format!("{} → {} across the project", s("old"), s("new")), vec![], false),
         "review_hold" => (format!("{} asked for changes: push anyway?", s("owners")),
             s("text").lines().map(|l| Line::raw(l.to_string())).collect(), true),
-        "team_note" => ("add to the team notes?".into(), vec![Line::styled(s("text"), Style::new().fg(Color::Yellow))], false),
+        "team_note" => ("add to the team notes?".into(), vec![Line::styled(s("text"), Style::new().fg(theme::ink()))], false),
         "network" => (format!("{}:{}", s("host"), a["port"]), vec![Line::raw("a sandboxed command is connecting to a host that isn't on the allowlist")], true),
         _ => (clip(&a.to_string(), 80), vec![Line::raw(a.to_string())], false),
     };
@@ -3162,14 +3161,14 @@ fn draw_confirm(f: &mut Frame, c: &Confirm, queued: usize) {
     // rows a line takes once wrapped inside the border, so the keys line never falls off the bottom
     let iw = w.saturating_sub(2).max(1);
     let rows = |l: &Line| Paragraph::new(l.clone()).wrap(ratatui::widgets::Wrap { trim: false }).line_count(iw).max(1) as u16;
-    let mut head = vec![Line::styled(summary, Style::new().fg(DIM))];
+    let mut head = vec![Line::styled(summary, Style::new().fg(theme::dim()))];
     if !c.warn.is_empty() {
-        head.push(Line::styled(format!("! {}", c.warn), Style::new().fg(Color::Red).add_modifier(Modifier::BOLD)));
+        head.push(Line::styled(format!("! {}", c.warn), theme::bold(theme::orange())));
     }
     head.push(Line::raw(""));
     let mut foot = vec![Line::raw("")];
     if !c.rule.is_empty() && c.tool != "review_hold" {
-        foot.push(Line::from(vec![Span::styled("always = auto-approve ", Style::new().fg(DIM)), Span::styled(c.rule.clone(), Style::new().add_modifier(Modifier::BOLD))]));
+        foot.push(Line::from(vec![Span::styled("always = auto-approve ", Style::new().fg(theme::dim())), Span::styled(c.rule.clone(), Style::new().add_modifier(Modifier::BOLD))]));
     }
     let keys = if c.tool == "review_hold" { "[y] push anyway   [h] hand to them in team chat   [n] hold and fix".to_string() }
         else if c.rule.is_empty() { "[y] allow   [n] deny".to_string() } else { "[y] allow   [a] always   [n] deny".to_string() };
@@ -3186,7 +3185,7 @@ fn draw_confirm(f: &mut Frame, c: &Confirm, queued: usize) {
     let h = (fixed + body_h).min(area.height);
     let r = Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 2, width: w, height: h };
     f.render_widget(Clear, r);
-    let color = if danger || !c.warn.is_empty() { Color::Red } else { Color::Yellow };
+    let color = if danger || !c.warn.is_empty() { theme::orange() } else { theme::ink2() };
     let more = if queued > 1 { format!(" (+{} waiting) ", queued - 1) } else { String::new() };
     let block = Block::bordered().border_style(Style::new().fg(color))
         .title(Line::from(vec![Span::styled(format!(" {} ", c.tool), Style::new().add_modifier(Modifier::REVERSED | Modifier::BOLD)),

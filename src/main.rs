@@ -43,6 +43,7 @@ mod teamcrypto;
 mod teamsetup;
 mod teamview;
 mod textcall;
+mod theme;
 mod tier;
 mod tools;
 mod ui;

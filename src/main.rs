@@ -106,6 +106,8 @@ fn parse() -> Args {
             "--mode" => a.mode = it.next(),
             "--json" => a.json = true,
             "serve" => a.serve = true,
+            // `qh team`: the same TUI, opened on the team space; plain `qh` shows no teammates
+            "team" => ui::TEAM_UI.store(true, std::sync::atomic::Ordering::Relaxed),
             "--max-turns" => match it.next().and_then(|v| v.parse().ok()).filter(|n| *n > 0) {
                 Some(n) => a.max_turns = Some(n),
                 None => {

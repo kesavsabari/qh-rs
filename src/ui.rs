@@ -328,6 +328,18 @@ fn eye_mark(status: &str) -> Line<'static> {
     Line::from(vec![Span::styled(" q", theme::bold(theme::ink())), Span::styled(g, theme::bold(c)), Span::styled("h", theme::bold(theme::ink()))])
 }
 
+/// Started as `qh team`: the team space and everything about teammates is on screen. Plain `qh`
+/// keeps the team connected underneath (holds, claims, answers) but shows none of it; a request
+/// that needs you arrives as a desktop notification.
+pub static TEAM_UI: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn team_ui() -> bool {
+    TEAM_UI.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// What solo `qh` says when a team key is pressed.
+const TEAM_ELSEWHERE: &str = "teammates live in their own screen: run `qh team` (this one keeps holds and claims working underneath)";
+
 /// A control-key chord the way this OS writes it: ⌃K on macOS, ^K on Linux, Ctrl+K on Windows.
 fn ctrl_key(c: char) -> String {
     if cfg!(target_os = "macos") { format!("⌃{c}") } else if cfg!(windows) { format!("Ctrl+{c}") } else { format!("^{c}") }
@@ -461,7 +473,7 @@ pub fn run(hub: Arc<Hub>, tx: Sender<Ui>, rx: Receiver<Ui>) -> std::io::Result<(
         if done.contains(&root) || !crate::team::enabled_for(&cwd) { continue }
         done.push(root);
         match app.start_team_in(&n) {
-            Ok(s) => app.note(&n, s),
+            Ok(s) => if team_ui() { app.note(&n, s) },
             Err(e) => app.err(&n, format!("team presence: {e}")),
         }
     }
@@ -470,13 +482,15 @@ pub fn run(hub: Arc<Hub>, tx: Sender<Ui>, rx: Receiver<Ui>) -> std::io::Result<(
         if let Some(p) = recent_projects().into_iter().map(|(p, _)| p).find(|p| p.is_dir() && crate::team::enabled_for(p)) {
             let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
             match app.start_team_at(p.clone(), &active, true) {
-                Ok(_) => { app.last_team = p; app.note(&active, format!("team {name} · Ctrl+] to open")) }
+                Ok(_) => { app.last_team = p; if team_ui() { app.note(&active, format!("team {name} · {} to open", ctrl_key(']'))) } }
                 Err(e) => app.err(&active, format!("team presence: {e}")),
             }
         }
     }
     app.project = std::path::PathBuf::new(); // so the team on screen follows the active tab
     app.set_active(&active);
+    if team_ui() && !app.in_team_space() { app.flip_space() }
+    if team_ui() && app.in_team_space() && app.team_view.is_none() { app.open_map() }
     #[cfg(windows)]
     if crate::sandbox::enabled(&hub.cfg) {
         if let Some(s) = crate::sandbox_windows::offer_once() { app.note(&active, s) }
@@ -2070,7 +2084,7 @@ Type /team create to put it on GitHub (private) and invite friends by their GitH
                     self.cur = self.input.len();
                     self.note(&a, "type your friend's GitHub username, then Enter");
                 }
-                "overview" => self.team_view = Some(crate::teamview::TeamView::open(&m.cwd())),
+                "overview" => self.open_map(),
                 "settings" => {
                     let all = vec![
                         ("private".to_string(), "Only the team can see the code".to_string()),
@@ -2338,7 +2352,9 @@ $ARGUMENTS is replaced by what you type after the command".into()
         let team = self.in_team_space();
         let accent = if team { theme::ink() } else { theme::orange() };
         // which space you're in, always in the corner
-        let chip = if team {
+        let chip = if !team_ui() {
+            String::new()
+        } else if team {
             format!(" ◆ {} ", crate::team::repo().unwrap_or_default().rsplit('/').next().unwrap_or("team"))
         } else {
             let waiting = crate::team::needs_you().then_some(());
@@ -2348,7 +2364,7 @@ $ARGUMENTS is replaced by what you type after the command".into()
         let st = self.hub.get(&self.active).map(|m| m.status()).unwrap_or("idle");
         f.render_widget(Paragraph::new(eye_mark(st)), Rect { width: 4.min(area.width), ..area });
         let area = Rect { x: area.x + 4, width: area.width.saturating_sub(4), ..area };
-        let chip_w = chip.chars().map(|c| c.width().unwrap_or(0)).sum::<usize>() as u16 + 1;
+        let chip_w = if chip.is_empty() { 0 } else { chip.chars().map(|c| c.width().unwrap_or(0)).sum::<usize>() as u16 + 1 };
         f.render_widget(Paragraph::new(Line::styled(chip.as_str(), if team {
             theme::inverted()
         } else { Style::new().fg(theme::dim()) })), Rect { width: chip_w.min(area.width), ..area });
@@ -2491,10 +2507,11 @@ $ARGUMENTS is replaced by what you type after the command".into()
     }
 
     fn in_team_space(&self) -> bool {
-        crate::team::running() && crate::team::enabled_for(&self.project)
+        team_ui() && crate::team::running() && crate::team::enabled_for(&self.project)
     }
 
     fn open_map(&mut self) {
+        if !team_ui() { let a = self.active.clone(); return self.note(&a, TEAM_ELSEWHERE) }
         let cwd = self.hub.get(&self.active).map(|m| m.cwd()).unwrap_or_default();
         self.team_view = Some(crate::teamview::TeamView::open(&cwd));
     }
@@ -2502,6 +2519,7 @@ $ARGUMENTS is replaced by what you type after the command".into()
     /// Ctrl+Space: from your own work to the team's and back, instantly. Both keep running.
     fn flip_space(&mut self) {
         let a = self.active.clone();
+        if !team_ui() { return self.note(&a, TEAM_ELSEWHERE) }
         if self.in_team_space() || crate::team::enabled_for(&self.project) {
             self.map_was_open = self.team_view.is_some();
             self.team_view = None;
@@ -2635,6 +2653,7 @@ then it's `git push -u origin {branch}` and `gh pr create --fill`.");
         });
         let (h1, h2, h3, h4, a1, a2) = (self.hub.clone(), self.hub.clone(), self.hub.clone(), self.hub.clone(), a.clone(), a.clone());
         let (h5, h6, h7) = (self.hub.clone(), self.hub.clone(), self.hub.clone());
+        let notify_cfg = self.hub.cfg.notify.clone();
         let hooks = crate::team::Hooks {
             answer: std::sync::Arc::new(move |q: crate::team::Question| {
                 // a read-only copy of the asked session answers; the session itself carries on
@@ -2646,7 +2665,7 @@ then it's `git push -u origin {branch}` and `gh pr create --fill`.");
                         return;
                     };
                     let (text, relied) = crate::engine::answer_question(&hub, &m, &who, &q.text);
-                    hub.emit(&m.name, Event::Notice(format!("answered {who}: {}", text.lines().next().unwrap_or("").chars().take(100).collect::<String>())));
+                    if team_ui() { hub.emit(&m.name, Event::Notice(format!("answered {who}: {}", text.lines().next().unwrap_or("").chars().take(100).collect::<String>()))); }
                     crate::team::reply(&q, &text, &relied);
                 });
             }),
@@ -2662,15 +2681,21 @@ then it's `git push -u origin {branch}` and `gh pr create --fill`.");
                     h6.send(session, text, "user", 0, None);
                 }
             }),
-            say: Box::new(move |s: String| h1.emit(&a1, Event::Notice(s))),
+            say: Box::new(move |s: String| if team_ui() { h1.emit(&a1, Event::Notice(s)) }),
             deliver: Box::new(move |session: &str, text: &str| {
                 let to = if h2.get(session).is_some() { session.to_string() } else { h2.names().first().cloned().unwrap_or_default() };
                 h2.send(&to, text, "user", 0, None);
             }),
-            ask: Box::new(move |i: &crate::team::Incoming| h3.emit(&a2, Event::Notice(format!(
-                "⚑ {} {} your {}: \"{}\" · nothing runs until you accept: Ctrl+T → Requests (accept, reply or decline)",
-                i.from, if i.question.is_some() { "asks" } else { "sent a request for" }, i.session,
-                i.text.chars().filter(|c| !c.is_control()).take(200).collect::<String>())))),
+            ask: Box::new(move |i: &crate::team::Incoming| {
+                let what = format!("{} {} your {}: \"{}\"", i.from, if i.question.is_some() { "asks" } else { "sent a request for" }, i.session,
+                                   i.text.chars().filter(|c| !c.is_control()).take(200).collect::<String>());
+                if team_ui() {
+                    h3.emit(&a2, Event::Notice(format!("⚑ {what} · nothing runs until you accept: {} → Requests", ctrl_key('T'))))
+                } else {
+                    // solo: the one thing that crosses over, outside the terminal
+                    crate::notify::send(crate::notify::mode(&notify_cfg), &format!("qh team: {what} · open `qh team` to answer"))
+                }
+            }),
             refresh: Box::new(move || h4.emit("", Event::Changed)),
             changed: Box::new(move |_| h7.emit("", Event::Changed)),
         };
@@ -2715,7 +2740,7 @@ then it's `git push -u origin {branch}` and `gh pr create --fill`.");
         if bg > 0 { out += &format!(" · {bg} bg") }
         if self.hub.paused.load(std::sync::atomic::Ordering::Relaxed) { out += " · PAUSED" }
         if m.status() == "held" { out += &format!(" · held (> {MAX_HOPS} hops): /release") }
-        if let Some(t) = crate::team::status_line() { out += &format!(" · {t}") }
+        if team_ui() { if let Some(t) = crate::team::status_line() { out += &format!(" · {t}") } }
         out
     }
 

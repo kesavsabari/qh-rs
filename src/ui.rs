@@ -314,6 +314,44 @@ fn folder_picker(dir: &std::path::Path) -> Picker {
     Picker { title: "team: which folder?", cmd: "/team".into(), all, filter: String::new(), sel: 0, cur: String::new() }
 }
 
+/// " q•h": the eye blinks when idle, pulses while working, looks at you (›) when it needs you,
+/// and is a grey dash when the model is unreachable.
+fn eye_mark(status: &str) -> Line<'static> {
+    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    let t = START.get_or_init(Instant::now).elapsed().as_secs_f32();
+    let (g, c) = match status {
+        "working" | "waiting-model" => ("•", if (t * 1.6) % 1.0 < 0.5 { theme::orange() } else { theme::ember() }),
+        "confirm" | "asking" => (if (t * 0.6) % 1.0 < 0.5 { "•" } else { "›" }, theme::orange()),
+        "error" | "offline" => ("-", theme::dim()),
+        _ => (if t % 4.0 > 3.8 { " " } else { "•" }, theme::orange()),
+    };
+    Line::from(vec![Span::styled(" q", theme::bold(theme::ink())), Span::styled(g, theme::bold(c)), Span::styled("h", theme::bold(theme::ink()))])
+}
+
+/// A control-key chord the way this OS writes it: ⌃K on macOS, ^K on Linux, Ctrl+K on Windows.
+fn ctrl_key(c: char) -> String {
+    if cfg!(target_os = "macos") { format!("⌃{c}") } else if cfg!(windows) { format!("Ctrl+{c}") } else { format!("^{c}") }
+}
+
+/// A shifted key the same way: ⇧Tab, or Shift+Tab on Windows.
+fn shift_key(k: &str) -> String {
+    if cfg!(windows) { format!("Shift+{k}") } else { format!("⇧{k}") }
+}
+
+/// The picker command that puts the pick in the input instead of running it.
+const FILL: &str = "\u{0}fill";
+
+/// ⌃K: every command and key in one list; a pick lands in the input, to add to or run.
+fn palette() -> Picker {
+    let mut all: Vec<(String, String, String)> = COMMANDS.iter()
+        .map(|(c, d)| (format!("{c} "), format!("{c:<18} {d}"), "commands".to_string())).collect();
+    all.extend(SUBCOMMANDS.iter().map(|(c, d)| {
+        let fill = c.split(['<', '[']).next().unwrap_or(c).trim_end().to_string() + " ";
+        (fill, format!("{c}  {d}"), "more".to_string())
+    }));
+    Picker { title: "everything", cmd: FILL.into(), all, filter: String::new(), sel: 0, cur: String::new() }
+}
+
 fn picker_g(title: &'static str, all: Vec<(String, String, String)>) -> Picker {
     Picker { title, cmd: "/team".into(), all, filter: String::new(), sel: 0, cur: String::new() }
 }
@@ -1002,7 +1040,12 @@ impl App {
                     let cmd = p.cmd.clone();
                     self.picker = None;
                     if let Some(name) = pick {
-                        self.command(&format!("{cmd} {name}"));
+                        if cmd == FILL {
+                            self.input = name.chars().collect();
+                            self.cur = self.input.len();
+                        } else {
+                            self.command(&format!("{cmd} {name}"));
+                        }
                     }
                 }
                 _ => {}
@@ -1055,6 +1098,7 @@ impl App {
             KeyCode::Char('t') if ctrl => self.open_map(),
             KeyCode::Char(' ' | ']' | '5') if ctrl => self.flip_space(),
             KeyCode::Char('p') if ctrl => self.command("/project"),
+            KeyCode::Char('k') if ctrl => self.picker = Some(palette()),
             KeyCode::BackTab => {
                 let m = self.hub.cycle_mode();
                 let a = self.active.clone();
@@ -2248,9 +2292,15 @@ $ARGUMENTS is replaced by what you type after the command".into()
         f.render_widget(Paragraph::new(line), input);
         f.render_widget(input_block, input_box);
         f.set_cursor_position((input.x + 2 + cx as u16, input.y));
-        // macOS writes the control key as ⌃, the way its own menus show it
-        let c = if cfg!(target_os = "macos") { "⌃" } else { "^" };
-        let hints = format!("⇧Tab mode  ⇧←/→ tabs  {c}N new tab  {c}G grid  {c}R replies  {c}P projects  {c}T team  Esc stop  {c}Q quit  ·  /help for all keys");
+        // three hints for the moment; ⌃K has everything else
+        let working = self.hub.get(&self.active).is_some_and(|m| matches!(m.status(), "working" | "waiting-model"));
+        let hints = if working {
+            format!("Esc stop   {} replies only   {} everything", ctrl_key('R'), ctrl_key('K'))
+        } else if self.hub.names().len() > 1 {
+            format!("{} tabs   {} mode   {} everything", shift_key("←/→"), shift_key("Tab"), ctrl_key('K'))
+        } else {
+            format!("{} mode   {} projects   {} everything", shift_key("Tab"), ctrl_key('P'), ctrl_key('K'))
+        };
         // a newer qh: a standing notice at the right end of the bottom line, over the hints
         let foot = match crate::update::available() {
             Some(v) => {
@@ -2294,6 +2344,10 @@ $ARGUMENTS is replaced by what you type after the command".into()
             let waiting = crate::team::needs_you().then_some(());
             format!(" ◇ personal{} ", if waiting.is_some() { " · team needs you ^Space" } else { "" })
         };
+        // the q-eye: what the session you're looking at is doing, at a glance
+        let st = self.hub.get(&self.active).map(|m| m.status()).unwrap_or("idle");
+        f.render_widget(Paragraph::new(eye_mark(st)), Rect { width: 4.min(area.width), ..area });
+        let area = Rect { x: area.x + 4, width: area.width.saturating_sub(4), ..area };
         let chip_w = chip.chars().map(|c| c.width().unwrap_or(0)).sum::<usize>() as u16 + 1;
         f.render_widget(Paragraph::new(Line::styled(chip.as_str(), if team {
             theme::inverted()

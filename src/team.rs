@@ -1248,7 +1248,10 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks, background: bool) -> Re
         release(&repo2);
         finished.store(true, Relaxed);
         if handed {
-            // holds and claims work only while connected: once `qh team` closes, connect again
+            // holds and claims work only while connected: once `qh team` closes, connect again.
+            // First let it take the lock (it's free for a moment after we let go, seen live)
+            let t0 = Instant::now();
+            while held_as(&repo2) == "solo" && t0.elapsed() < Duration::from_secs(30) { std::thread::sleep(Duration::from_millis(500)) }
             while !connection_free(&repo2) { std::thread::sleep(Duration::from_secs(20)) }
             RETAKE.lock().unwrap().push(repo2.clone());
             (hooks.refresh)();

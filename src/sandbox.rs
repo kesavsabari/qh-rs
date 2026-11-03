@@ -283,8 +283,10 @@ fn protect_candidates(root: &Path) -> Vec<PathBuf> {
 /// Policy::protect (read-only where the OS can do it).
 fn qh_own(root: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
     let qh = canon(&crate::config::config_dir());
-    let own = vec![qh.clone(), canon(&crate::config::state_dir())];
     let r = canon(root);
+    // a folder holding the whole project (QH_STATE_DIR=., QH_CONFIG=~/qh.toml) would leave every
+    // protected path out: only one inside the project is set aside
+    let own = [qh.clone(), canon(&crate::config::state_dir())].into_iter().filter(|o| !under(&r, o)).collect();
     let steer = ["skills", "commands", "QH.md"].iter().map(|x| qh.join(x)).filter(|x| under(x, &r)).collect();
     (own, steer)
 }
@@ -847,6 +849,24 @@ mod tests {
         assert_eq!(s.restore().len(), 1);
         assert_eq!(std::fs::read_to_string(hooks.join("f3")).unwrap(), "ok");
         assert!(!hooks.join("new").exists() && hooks.join("big").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// qh's state folder set to the project (QH_STATE_DIR=.) used to take every protected path
+    /// out of the snapshot, so a planted .envrc or hook stayed.
+    #[test]
+    fn state_dir_holding_the_project_keeps_the_snapshot() {
+        let _env = crate::hub::tests::ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let root = canon(&std::env::temp_dir()).join(format!("qh-snap-own-{}", std::process::id()));
+        std::fs::create_dir_all(root.join(".git/hooks")).unwrap();
+        let was = std::env::var_os("QH_STATE_DIR");
+        std::env::set_var("QH_STATE_DIR", &root);
+        let s = Snapshot::take(&root);
+        std::fs::write(root.join(".envrc"), "evil").unwrap();
+        std::fs::write(root.join(".git/hooks/pre-commit"), "evil").unwrap();
+        let fixed = s.restore();
+        match was { Some(v) => std::env::set_var("QH_STATE_DIR", v), None => std::env::remove_var("QH_STATE_DIR") }
+        assert!(!root.join(".envrc").exists() && !root.join(".git/hooks/pre-commit").exists(), "put back: {fixed:?}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

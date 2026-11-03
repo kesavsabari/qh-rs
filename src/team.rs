@@ -5053,6 +5053,9 @@ pub(crate) mod tests {
         assert!(std::fs::read_to_string(per_repo("team-owner", &repo)).unwrap().ends_with(" project"));
         assert!(!connection_free(&repo), "plain qh waits while `qh team` is open");
         release(&repo);
+        // a git child another test forks can hold the lock until it execs: give it a moment
+        let t0 = Instant::now();
+        while !connection_free(&repo) && t0.elapsed() < Duration::from_secs(3) { std::thread::sleep(Duration::from_millis(50)) }
         assert!(connection_free(&repo), "and connects again once it closes");
     }
 

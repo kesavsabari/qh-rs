@@ -2636,7 +2636,7 @@ then it's `git push -u origin {branch}` and `gh pr create --fill`.");
     fn start_team_at(&self, cwd: std::path::PathBuf, tab: &str, background: bool) -> Result<String, String> {
         let (hub, a) = (self.hub.clone(), tab.to_string());
         let root = crate::team::github_repo(&cwd).map(|(r, _)| r).unwrap_or_else(|| cwd.clone());
-        let root6 = root.clone();
+        let (root2, root6) = (root.clone(), root.clone());
         let summary = Box::new(move || {
             // only this project's sessions: other projects are none of this team's business
             let members: Vec<_> = lock(&hub.members).iter().filter(|m| crate::teamview::in_project(&m.cwd(), &root)).cloned().collect();
@@ -2698,8 +2698,13 @@ then it's `git push -u origin {branch}` and `gh pr create --fill`.");
             }),
             say: Box::new(move |s: String| if team_ui() { h1.emit(&a1, Event::Notice(s)) }),
             deliver: Box::new(move |session: &str, text: &str| {
-                let to = if h2.get(session).is_some() { session.to_string() } else { h2.names().first().cloned().unwrap_or_default() };
-                h2.send(&to, text, "user", 0, None);
+                // accepted work runs where it was sent, else in a session of this project: never
+                // in another project's tab, which would do it in the wrong checkout
+                let Some(m) = h2.get(session).or_else(|| fallback_session(&h2, &root2)) else {
+                    crate::team::log(&format!("accepted work for your {session} not started: no session of this project is open"));
+                    return;
+                };
+                h2.send(&m.name, text, "user", 0, None);
             }),
             ask: Box::new(move |i: &crate::team::Incoming| {
                 if crate::team::focusing().is_some() { return } // held: focus ending says what waited

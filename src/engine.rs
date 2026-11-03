@@ -874,7 +874,7 @@ fn hold_push(hub: &Arc<Hub>, m: &Arc<Member>, r: &crate::review::Outcome) -> Opt
     let login = |to: &str| to.split('/').next().unwrap_or(to).to_string();
     let hand = |list: &[(String, String)]| -> Vec<String> {
         let owners: Vec<String> = list.iter().map(|(to, _)| login(to)).collect();
-        crate::review::held(&r.head, &m.name, &owners);
+        crate::review::held(&r.repo, &r.root, &r.head, &m.name, &owners);
         list.iter().map(|(to, a)| match crate::team::dm_send(&login(to), &crate::review::handoff_text(&me, &r.files, a, &r.diff, &r.head, &m.name)) {
             Ok(_) => format!("@{}", login(to)),
             Err(e) => format!("@{} (couldn't message: {e})", login(to)),

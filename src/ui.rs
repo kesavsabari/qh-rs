@@ -2676,13 +2676,14 @@ then it's `git push -u origin {branch}` and `gh pr create --fill`.");
             answered: Box::new(move |session: &str, text: &str| {
                 // busy: it reads the answer before its next model call; idle: it's woken with it
                 // (ctl held while queueing: the turn's end takes the queue under the same lock)
-                let Some(m) = h6.get(session) else { return };
+                // a decision kept over a restart may name a tab that isn't open now: the first one
+                let Some(m) = h6.get(session).or_else(|| h6.names().first().and_then(|n| h6.get(n))) else { return };
                 let c = lock(&m.ctl);
                 if c.running {
-                    crate::team::queue_answer(session, text);
+                    crate::team::queue_answer(&m.name, text);
                 } else {
                     drop(c);
-                    h6.send(session, text, "user", 0, None);
+                    h6.send(&m.name, text, "user", 0, None);
                 }
             }),
             say: Box::new(move |s: String| if team_ui() { h1.emit(&a1, Event::Notice(s)) }),

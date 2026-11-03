@@ -1064,6 +1064,7 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks, background: bool) -> Re
     });
     with(&repo, load_private);
     with(&repo, |s| FOCUS.store(s.flow.focus, Relaxed));
+    crate::review::load_held(&repo); // pushes of ours still waiting on an owner, from before a restart
     set_current(&repo);
     let (repo2, me2) = (repo.clone(), me.clone());
     let (live_tx, live_rx) = std::sync::mpsc::channel();

@@ -443,6 +443,9 @@ pub struct Outcome {
     pub head: String,
     /// the change itself, cut short, for the owner's decision card
     pub diff: String,
+    /// the checkout and its owner/name, so a hold can be kept on disk for that project
+    pub root: std::path::PathBuf,
+    pub repo: String,
 }
 
 /// Commits the user chose to push anyway: a retried push of one doesn't ask again.
@@ -481,13 +484,13 @@ pub fn before_push(session: &str, cwd: &Path, cfg: &crate::config::Config, notic
         f.dedup();
         (f, v.iter().find(|r| ids.contains(&r.id)).map(|r| r.head.clone()).unwrap_or_default())
     };
-    let diff = crate::team::github_repo(cwd).and_then(|(root, _)| {
-        let b = base(&root)?;
+    let (root, repo) = crate::team::github_repo(cwd).unwrap_or_default();
+    let diff = (!repo.is_empty()).then(|| base(&root)).flatten().and_then(|b| {
         let mut a = vec!["diff", "--no-color", "--no-ext-diff", "-U1", b.as_str(), "HEAD", "--"];
         a.extend(files.iter().map(|f| f.as_str()));
         git(&root, &a)
     }).map(|d| clip_diff(&d)).unwrap_or_default();
-    Some(Outcome { text, changes: pick("changes"), handoff: pick("handoff"), files, head, diff })
+    Some(Outcome { text, changes: pick("changes"), handoff: pick("handoff"), files, head, diff, root, repo })
 }
 
 /// The private message that hands a held push to the owner themselves, in team chat. Its last
@@ -552,44 +555,112 @@ pub fn shown(text: &str) -> String {
     }
 }
 
-/// A push of ours waiting on its owner's decision.
+/// A push of ours waiting on its owner's decision. Kept on disk per project (team-held/), so a
+/// restart neither forgets the hold nor drops the decision that comes for it.
 #[derive(Clone)]
-struct Held { head: String, session: String, owners: Vec<String> }
+struct Held {
+    repo: String,
+    root: String, // the checkout it was pushed from: on load, whether it still stands
+    head: String,
+    session: String,
+    owners: Vec<String>,
+    ts: u64,
+    decided: Option<bool>, // the owner approved (true) or sent it back (false)
+    news: Option<String>,  // their decision, not yet handed to the session
+}
 
 static HELD: Mutex<Vec<Held>> = Mutex::new(Vec::new());
-static DECISIONS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+
+/// A hold older than this is dropped on load: nobody's coming back to it.
+const HELD_DAYS: u64 = 14;
+
+fn held_file(repo: &str) -> std::path::PathBuf {
+    crate::config::state_dir().join("team-held").join(repo.replace('/', "__"))
+}
+
+/// Write `repo`'s holds out, whole (callers pass the list they just changed, still locked).
+fn save_held(v: &[Held], repo: &str) {
+    // tests write only to a QH_STATE_DIR of their own
+    if repo.is_empty() || (cfg!(test) && std::env::var_os("QH_STATE_DIR").is_none()) { return }
+    let list: Vec<Value> = v.iter().filter(|h| h.repo == repo).map(|h| json!({"root": h.root, "head": h.head, "session": h.session,
+        "owners": h.owners, "ts": h.ts, "decided": h.decided, "news": h.news})).collect();
+    let p = held_file(repo);
+    if list.is_empty() { let _ = std::fs::remove_file(&p); return }
+    let _ = std::fs::create_dir_all(p.parent().unwrap_or(&p));
+    let tmp = p.with_extension("tmp");
+    if crate::platform::write_private(&tmp, Value::Array(list).to_string().as_bytes()).is_ok() { let _ = std::fs::rename(&tmp, &p); }
+}
+
+/// team.rs connected `repo`: take back the holds saved for it, minus the stale ones: too old,
+/// the commit gone or already on a remote branch, or no longer in its checkout's HEAD (rewritten,
+/// or the branch moved elsewhere).
+pub fn load_held(repo: &str) {
+    let saved: Vec<Value> = serde_json::from_str(&std::fs::read_to_string(held_file(repo)).unwrap_or_default()).unwrap_or_default();
+    let s = |x: &Value| x.as_str().unwrap_or("").to_string();
+    let stands = |h: &Held| {
+        let root = Path::new(&h.root);
+        now().saturating_sub(h.ts) < HELD_DAYS * 86400
+            && git(root, &["merge-base", "--is-ancestor", &h.head, "HEAD"]).is_some()
+            && git(root, &["branch", "-r", "--contains", &h.head]).is_some_and(|o| o.trim().is_empty())
+    };
+    let got: Vec<Held> = saved.iter().map(|x| Held {
+        repo: repo.into(), root: s(&x["root"]), head: s(&x["head"]), session: s(&x["session"]),
+        owners: x["owners"].as_array().into_iter().flatten().filter_map(|o| o.as_str().map(String::from)).collect(),
+        ts: x["ts"].as_u64().unwrap_or(0), decided: x["decided"].as_bool(), news: x["news"].as_str().map(String::from),
+    }).filter(|h| !h.head.is_empty() && !h.root.is_empty() && stands(h)).collect();
+    for h in got.iter().filter(|h| h.decided == Some(true)) { push_anyway(&h.head) }
+    let news = got.iter().any(|h| h.news.is_some());
+    let mut v = HELD.lock().unwrap();
+    v.retain(|h| h.repo != repo);
+    v.extend(got);
+    save_held(&v, repo);
+    drop(v);
+    if news { crate::team::bump() }
+}
 
 /// engine.rs handed `head` to `owners`: keep it until one of them decides.
-pub fn held(head: &str, session: &str, owners: &[String]) {
+pub fn held(repo: &str, root: &Path, head: &str, session: &str, owners: &[String]) {
     if head.is_empty() { return }
     let mut v = HELD.lock().unwrap();
     v.retain(|h| h.head != head);
-    v.push(Held { head: head.into(), session: session.into(), owners: owners.to_vec() });
+    v.push(Held { repo: repo.into(), root: root.to_string_lossy().into(), head: head.into(), session: session.into(),
+        owners: owners.to_vec(), ts: now(), decided: None, news: None });
+    save_held(&v, repo);
 }
 
 /// A private message came in from `from` (team.rs calls this for each). A decision on a push we
 /// hold goes to the session that pushed, and an approval lets the retried push through.
 pub fn on_dm(from: &str, text: &str) {
     let Some(Tag::Decide { head, approve, note }) = tag(text) else { return };
-    let h = {
-        let mut v = HELD.lock().unwrap();
-        let Some(i) = v.iter().position(|h| h.head == head && h.owners.iter().any(|o| o.eq_ignore_ascii_case(from))) else { return };
-        v.remove(i)
-    };
+    let mut v = HELD.lock().unwrap();
+    let Some(h) = v.iter_mut().find(|h| h.head == head && h.decided.is_none() && h.owners.iter().any(|o| o.eq_ignore_ascii_case(from))) else { return };
     let n = if note.is_empty() { String::new() } else { format!("\n\nTheir note: {note}") };
-    let msg = if approve {
+    h.news = Some(if approve {
         push_anyway(&head);
         format!("[owner decision] {from} approved the held push.{n}\n\nPush it now (the same command); it won't be held again.")
     } else {
         format!("[owner decision] {from} sent the push back for changes.{n}\n\nMake the changes, commit, and push again.")
-    };
-    DECISIONS.lock().unwrap().push((h.session, msg));
+    });
+    h.decided = Some(approve);
+    let repo = h.repo.clone();
+    save_held(&v, &repo);
+    drop(v);
     crate::team::bump();
 }
 
-/// Decisions not yet handed to their sessions (team.rs's loop delivers them).
+/// Decisions not yet handed to their sessions (team.rs's loop delivers them). A push sent back
+/// is done with once told; an approved one stays until it's pushed, so its retry goes through.
 pub fn take_decisions() -> Vec<(String, String)> {
-    std::mem::take(&mut *DECISIONS.lock().unwrap())
+    let mut v = HELD.lock().unwrap();
+    let (mut out, mut repos) = (vec![], vec![]);
+    for h in v.iter_mut() {
+        let Some(m) = h.news.take() else { continue };
+        out.push((h.session.clone(), m));
+        if !repos.contains(&h.repo) { repos.push(h.repo.clone()) }
+    }
+    v.retain(|h| h.decided != Some(false) || h.news.is_some());
+    for r in &repos { save_held(&v, r) }
+    out
 }
 
 /// What the reviews said, for the agent and the user.
@@ -800,12 +871,13 @@ new file mode 100644
 
     #[test]
     fn an_owner_decision_reaches_only_a_push_we_hold() {
+        let _env = crate::hub::tests::ENV.lock().unwrap_or_else(|e| e.into_inner()); // the held list is shared with the restart test
         let d = decision_text("feed01", true, "fine, ship it");
         assert_eq!(tag(&d), Some(Tag::Decide { head: "feed01".into(), approve: true, note: "fine, ship it".into() }));
         assert!(shown(&d).starts_with("✓ approved the push (feed01)"));
         assert!(shown(&decision_text("feed01", false, "")).starts_with("↩ sent the push back"));
         assert_eq!(tag("just chatting about #qh-decide"), None);
-        held("feed01", "s1", &["dave".into()]);
+        held("t/hold", Path::new("/nowhere"), "feed01", "s1", &["dave".into()]);
         on_dm("mallory", &d); // not who it was handed to
         on_dm("dave", &decision_text("other", true, ""));
         assert!(!pushed_anyway("feed01") && take_decisions().iter().all(|(s, _)| s != "s1"));
@@ -814,10 +886,65 @@ new file mode 100644
         assert!(pushed_anyway("feed01") && got.iter().any(|(s, m)| s == "s1" && m.contains("approved") && m.contains("ship it")));
         on_dm("dave", &d); // once only
         assert!(take_decisions().iter().all(|(s, _)| s != "s1"));
-        held("feed02", "s2", &["dave".into()]);
+        held("t/hold", Path::new("/nowhere"), "feed02", "s2", &["dave".into()]);
         on_dm("dave", &decision_text("feed02", false, "use / 100"));
         assert!(!pushed_anyway("feed02") && take_decisions().iter().any(|(s, m)| s == "s2" && m.contains("use / 100")));
         let c = clip_diff(&format!("diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n ctx\n{}", "+l\n".repeat(40)));
         assert!(!c.contains("ctx") && !c.contains("--- a/x") && c.contains("@@") && c.ends_with("more lines"));
+    }
+
+    #[test]
+    fn a_held_push_and_its_decision_survive_a_restart() {
+        let _env = crate::hub::tests::ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let root = std::env::temp_dir().join(format!("qh-held-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let repo = root.join("r");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::env::set_var("QH_STATE_DIR", root.join("state"));
+        let g = |a: &[&str]| git(&repo, a).unwrap_or_default().trim().to_string();
+        let commit = |m: &str, amend: bool| {
+            let mut a = vec!["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", m];
+            if amend { a.push("--amend") }
+            g(&a);
+            g(&["rev-parse", "HEAD"])
+        };
+        g(&["init", "-q"]);
+        let head = commit("a", false);
+        assert!(!head.is_empty());
+        // a restart: what's in memory is gone, the file brings it back
+        let restart = || {
+            HELD.lock().unwrap().retain(|h| h.repo != "t/held");
+            PUSH_ANYWAY.lock().unwrap().retain(|h| h.len() != 40); // this test's heads are real commits
+            load_held("t/held");
+        };
+        held("t/held", &repo, &head, "s1", &["erin".into()]);
+        restart();
+        assert!(HELD.lock().unwrap().iter().any(|h| h.repo == "t/held" && h.head == head && h.session == "s1" && h.decided.is_none()));
+        // the owner's decision comes in after it; a restart before it's delivered keeps it too
+        on_dm("erin", &decision_text(&head, true, "ok"));
+        restart();
+        assert!(pushed_anyway(&head), "an approval outlives a restart");
+        assert!(take_decisions().iter().any(|(s, m)| s == "s1" && m.contains("approved")));
+        restart();
+        assert!(pushed_anyway(&head) && take_decisions().iter().all(|(s, _)| s != "s1"), "delivered once");
+        // pushed since: it doesn't come back
+        g(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        restart();
+        assert!(!pushed_anyway(&head) && !HELD.lock().unwrap().iter().any(|h| h.repo == "t/held"));
+        assert!(!held_file("t/held").exists(), "nothing left, no file");
+        // the branch was rewritten: the held commit isn't in HEAD any more
+        g(&["update-ref", "-d", "refs/remotes/origin/main"]);
+        held("t/held", &repo, &head, "s1", &["erin".into()]);
+        let h2 = commit("b", true);
+        restart();
+        assert!(!HELD.lock().unwrap().iter().any(|h| h.repo == "t/held"));
+        // sent back: told once, then let go
+        held("t/held", &repo, &h2, "s1", &["erin".into()]);
+        on_dm("erin", &decision_text(&h2, false, "no"));
+        restart();
+        assert!(take_decisions().iter().any(|(s, m)| s == "s1" && m.contains("sent the push back")));
+        restart();
+        assert!(!HELD.lock().unwrap().iter().any(|h| h.repo == "t/held") && !pushed_anyway(&h2));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

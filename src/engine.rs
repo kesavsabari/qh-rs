@@ -1008,10 +1008,10 @@ relevant files first, then call ask_model again with the code, error or plan pas
     let touched: Vec<crate::team::Touched> = tools::preview(&cwd, name, &args).into_iter()
         .filter_map(|(full, after)| crate::team::touched(&cwd, &full, &after)).collect();
     let mut heads_up = None; // claims = "warn": the edit goes ahead and the agent is told after it
-    if let Some((notice, msg, held)) = touched.iter().find_map(|t| crate::team::check_edit(&m.name, t, hub.cfg.claims_lock)) {
-        hub.emit(&m.name, Event::Notice(notice));
-        if held { return msg }
-        heads_up = Some(msg);
+    // every touched file is checked: a heads-up on one doesn't let a hold on another through
+    for (notice, msg, held) in touched.iter().filter_map(|t| crate::team::check_edit(&m.name, t, hub.cfg.claims_lock)) {
+        if held { hub.emit(&m.name, Event::Notice(notice)); return msg }
+        if heads_up.is_none() { hub.emit(&m.name, Event::Notice(notice)); heads_up = Some(msg) }
     }
     // behaviour promises teammates hold on these functions: a quick model check, paid by the editor
     for t in &touched {

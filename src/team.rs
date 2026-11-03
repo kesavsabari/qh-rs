@@ -176,6 +176,8 @@ pub struct Outgoing {
     pub ts: u64,
     pub history: Vec<(Status, u64)>,
     pub reply: String, // their latest words back (a reply, or why they declined)
+    pub packet: Value, // the handover packet it went with (Null if none), so a resend keeps it
+    pub was: Vec<u64>, // ids it went under before a resend, so their news about those still lands here
 }
 
 impl Outgoing {
@@ -852,13 +854,15 @@ fn incoming_of(v: &Value) -> Incoming {
 
 fn outgoing_json(o: &Outgoing) -> Value {
     json!({"id": o.id, "to": o.to, "session": o.session, "text": o.text, "kind": o.kind, "from_session": o.from_session,
-           "ts": o.ts, "history": history_json(&o.history), "reply": o.reply})
+           "ts": o.ts, "history": history_json(&o.history), "reply": o.reply, "packet": o.packet, "was": o.was})
 }
 
 fn outgoing_of(v: &Value) -> Outgoing {
     let s = |k: &str| v[k].as_str().unwrap_or("").to_string();
     Outgoing { id: v["id"].as_u64().unwrap_or(0), to: s("to"), session: s("session"), text: s("text"), kind: s("kind"),
-               from_session: s("from_session"), ts: v["ts"].as_u64().unwrap_or(0), history: history_of(&v["history"]), reply: s("reply") }
+               from_session: s("from_session"), ts: v["ts"].as_u64().unwrap_or(0), history: history_of(&v["history"]), reply: s("reply"),
+               packet: if v["packet"].is_object() { v["packet"].clone() } else { Value::Null },
+               was: v["was"].as_array().into_iter().flatten().filter_map(Value::as_u64).collect() }
 }
 
 /// What's in flight survives a restart: our outbox (else a request to someone offline is gone the
@@ -919,10 +923,35 @@ fn save_requests(s: &State) {
 }
 
 /// Tell whoever sent request `re` where it is now (rides our next write, like any message).
+/// A qh before 0.2.6 reads kind "s" as a new request (an empty card), so it gets the old private
+/// line for a reply or a decline and nothing for the rest.
 fn status_out(s: &mut State, to: &str, re: u64, st: Status, text: &str) {
+    let what = s.pending.iter().chain(&s.flow.taken).find(|i| i.from == to && i.id == re).map(|i| i.text.clone());
+    status_about(s, to, re, st, text, what.as_deref().unwrap_or(""))
+}
+
+/// `status_out` for request `re`, whose words were `what` (for an older qh's line).
+fn status_about(s: &mut State, to: &str, re: u64, st: Status, text: &str, what: &str) {
+    if !knows_status(s, to) {
+        let what = if what.is_empty() { "your request".to_string() } else { clip_to(bare(what), 80) };
+        let me = s.me.clone();
+        let line = match st {
+            Status::Replied => format!("{me} re your request \"{what}\": {text}"),
+            Status::Declined if text.is_empty() => format!("{me} declined: \"{what}\""),
+            Status::Declined => format!("{me} declined: \"{what}\": {text}"),
+            _ => return,
+        };
+        if let Err(e) = dm_locked(s, to, &line) { log_to(&s.repo.clone(), &format!("couldn't tell {to}: {e}")) }
+        return;
+    }
     s.next_id += 1;
     s.outbox.push(json!({"id": s.next_id, "to": to, "kind": "s", "re": re, "status": st.as_str(), "text": text, "ts": now()}));
     s.dirty = true;
+}
+
+/// Whether their qh reads request status and withdraw messages (kinds "s", "w"): 0.2.6 on.
+fn knows_status(s: &State, to: &str) -> bool {
+    s.peers.get(to).is_none_or(|p| !p.qh.is_empty() && !crate::update::newer("0.2.6", &p.qh))
 }
 
 fn push_fyi(s: &mut State, kind: &str, text: String) {
@@ -1143,7 +1172,9 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks, background: bool) -> Re
             if last_poll.elapsed() >= POLL {
                 last_poll = Instant::now();
                 if wanted_elsewhere(&repo2) {
-                    log_to(&repo2, "the qh opened in this project took over the team connection");
+                    log_to(&repo2, if held_as(&repo2) == "solo" {
+                        "`qh team` took over the team connection; holds and claims here pause until you reopen this qh"
+                    } else { "the qh opened in this project took over the team connection" });
                     running.store(false, Relaxed);
                     break;
                 }
@@ -1869,6 +1900,13 @@ fn take_in(repo: &str, me: &String, key: Option<Key>, mut p: Peer, hooks: &Hooks
         if id <= s.seen.get(login).copied().unwrap_or(0) || s.pending.iter().any(|x| x.from == *login && x.id == id) {
             continue;
         }
+        // a resend of one we still hold: same card, under its new id (their news about it uses that)
+        let was: Vec<u64> = m["was"].as_array().into_iter().flatten().filter_map(Value::as_u64).collect();
+        if let Some(x) = s.pending.iter_mut().find(|x| x.from == *login && was.contains(&x.id)) {
+            x.id = id;
+            s.dirty = true;
+            continue;
+        }
         let mut inc = Incoming { from: login.clone(), id, session: m["session"].as_str().unwrap_or("main").into(),
                                  text: m["text"].as_str().unwrap_or("").into(), question: None, ts: m["ts"].as_u64().unwrap_or_else(now),
                                  from_session: m["from_session"].as_str().unwrap_or("").into(), replied: false,
@@ -1880,7 +1918,8 @@ fn take_in(repo: &str, me: &String, key: Option<Key>, mut p: Peer, hooks: &Hooks
             s.dirty = true;
             let (re, text) = (m["re"].as_u64().unwrap_or(0), inc.text.clone());
             let Some(st) = m["status"].as_str().and_then(Status::parse) else { continue };
-            let Some(o) = s.sent.iter_mut().find(|o| o.to == *login && o.id == re) else { continue };
+            let Some(o) = s.sent.iter_mut().find(|o| o.to == *login && (o.id == re || o.was.contains(&re))) else { continue };
+            let id = o.id; // the id it goes under now, after any resend
             if o.history.iter().any(|h| h.0 == st) && st != Status::Replied {
                 if st == Status::Seen && !text.is_empty() { o.reply = text.clone() } // "seen, back to it 14:00"
                 continue;
@@ -1900,7 +1939,7 @@ fn take_in(repo: &str, me: &String, key: Option<Key>, mut p: Peer, hooks: &Hooks
                 push_fyi(s, "reply", line.clone());
                 say_locked(repo, s, hooks, line);
             }
-            (hooks.changed)(TeamEvent::Outgoing { id: re, status: st });
+            (hooks.changed)(TeamEvent::Outgoing { id, status: st });
             continue;
         }
         if m["kind"] == "w" {
@@ -2119,10 +2158,11 @@ pub fn send_packet(to: &str, session: &str, text: &str, from_session: &str, pack
         s.next_id += 1;
         let id = s.next_id;
         let mut m = json!({"id": id, "to": to, "session": session, "text": text, "from_session": from_session, "ts": now()});
-        if packet.is_object() { m["packet"] = packet }
+        let packet = if packet.is_object() { m["packet"] = packet.clone(); packet } else { Value::Null };
         s.outbox.push(m);
         s.sent.push(Outgoing { id, to: to.into(), session: session.into(), text: text.into(), kind: "handover".into(),
-                               from_session: from_session.into(), ts: now(), history: vec![(Status::Queued, now())], reply: String::new() });
+                               from_session: from_session.into(), ts: now(), history: vec![(Status::Queued, now())],
+                               reply: String::new(), packet, was: vec![] });
         let n = s.sent.len();
         if n > 100 { s.sent.drain(..n - 100); }
         s.dirty = true;
@@ -2246,7 +2286,7 @@ fn decide_why_locked(s: &mut State, from: &str, id: u64, answer: &str, why: &str
             reply_locked(s, &q, &format!("(not answered: {} said no. Use their fact sheet, or ask them directly.)", s.me), &[]);
         }
         (Some(_), _) => {}
-        (None, "deny") => status_out(s, from, id, Status::Declined, why),
+        (None, "deny") => status_about(s, from, id, Status::Declined, why, &inc.text),
         (None, "expired") => status_out(s, from, id, Status::Expired, ""),
         (None, _) => {
             status_out(s, from, id, Status::Accepted, "");
@@ -2587,7 +2627,7 @@ pub fn let_go(id: u64) {
 /// Send an expired request of ours again, as a new one.
 pub fn send_again(id: u64) -> Result<String, String> {
     let o = cur(|s| s.sent.iter().find(|o| o.id == id).cloned()).flatten().ok_or("no such request")?;
-    let r = send_from(&o.to, &o.session, &o.text, &o.from_session)?;
+    let r = send_packet(&o.to, &o.session, &o.text, &o.from_session, o.packet.clone())?;
     let_go(id);
     Ok(r)
 }
@@ -2896,16 +2936,28 @@ pub fn act(from: &str, id: u64, action: Action) -> Result<Option<(String, String
 }
 
 /// Put a request of ours back on the line if it isn't there (not once it's been answered).
+/// It leaves the outbox only once they've acked past its id, and they drop any id at or below
+/// that, so it goes under a new id; `was` tells them, so one they still hold isn't doubled.
 pub fn resend(id: u64) -> Result<(), String> {
-    cur(|s| {
-        let o = s.sent.iter().find(|o| o.id == id).ok_or("no such request")?.clone();
-        if o.status().done() { return Err(format!("it was already {}", o.status().as_str())) }
-        if !s.outbox.iter().any(|m| m["id"].as_u64() == Some(id)) {
-            s.outbox.push(json!({"id": id, "to": o.to, "session": o.session, "text": o.text, "from_session": o.from_session, "ts": o.ts}));
-            s.dirty = true;
-        }
-        Ok(())
-    }).unwrap_or_else(|| Err("team mode is off".into()))
+    cur(|s| resend_locked(s, id)).unwrap_or_else(|| Err("team mode is off".into()))
+}
+
+fn resend_locked(s: &mut State, id: u64) -> Result<(), String> {
+    let i = s.sent.iter().position(|o| o.id == id).ok_or("no such request")?;
+    let o = s.sent[i].clone();
+    if o.status().done() { return Err(format!("it was already {}", o.status().as_str())) }
+    if s.outbox.iter().any(|m| m["id"].as_u64() == Some(id)) { return Ok(()) }
+    s.next_id += 1;
+    let new = s.next_id;
+    let mut was = o.was.clone();
+    was.push(id);
+    let mut m = json!({"id": new, "to": o.to, "session": o.session, "text": o.text, "from_session": o.from_session, "ts": o.ts, "was": was});
+    if o.packet.is_object() { m["packet"] = o.packet.clone() }
+    s.outbox.push(m);
+    s.sent[i].id = new;
+    s.sent[i].was = was;
+    s.dirty = true;
+    Ok(())
 }
 
 /// Take a request of ours back: it leaves their list (or never reaches it).
@@ -2922,8 +2974,10 @@ fn withdraw_locked(s: &mut State, id: u64) -> Result<(), String> {
         // still in our outbox doesn't mean they lack it (a waiting request stays unacked so a
         // restart can't lose it), so always tell them; it's a no-op if it never reached them
         s.outbox.retain(|m| m["id"].as_u64() != Some(id));
-        s.next_id += 1;
-        s.outbox.push(json!({"id": s.next_id, "to": to, "kind": "w", "re": id, "ts": now()}));
+        if knows_status(s, &to) { // an older qh would show the notice as a new, empty request
+            s.next_id += 1;
+            s.outbox.push(json!({"id": s.next_id, "to": to, "kind": "w", "re": id, "ts": now()}));
+        }
         s.dirty = true;
         Ok(())
     }
@@ -3275,7 +3329,8 @@ pub fn check_edit(session: &str, t: &Touched, lock: bool) -> Option<(String, Str
     if ANYWAY.lock().unwrap().as_ref().and_then(|m| m.get(session)).is_some_and(|until| *until > now) { return None }
     let hold = |x: Option<(String, String)>| x.map(|(a, b)| (a, b, true));
     if t.funcs.is_empty() { return hold(check_contract(t)) }
-    if !lock { return check_warn(t).or_else(|| hold(check_contract(t))) }
+    // warn softens the claim pause only: an edit that breaks a teammate's code is still held
+    if !lock { return hold(check_contract(t)).or_else(|| check_warn(t)) }
     let hit = with(&t.repo, |s| {
         for p in s.peers.values().filter(|p| p.joined && p.online) {
             for (sess, files) in &p.claims {
@@ -3429,8 +3484,20 @@ fn note_change(session: &str, topic: &str, t: &Touched, warn: &str) {
 /// Each file this copy changes against the merge base of main (commits, uncommitted edits and
 /// untracked files; at most 200, none over 1 MB): (file, text before, text now).
 fn changes_vs_main(root: &Path) -> Vec<(String, String, String)> {
-    let Some(base) = ["origin/HEAD", "origin/main", "origin/master", "@{upstream}"].iter()
+    changes_since(root, false)
+}
+
+/// `changes_vs_main`; `mine` starts after the newest commit someone else wrote, so on a shared
+/// branch (or one pulled from a teammate) their commits aren't counted as this copy's work.
+fn changes_since(root: &Path, mine: bool) -> Vec<(String, String, String)> {
+    let Some(mut base) = ["origin/HEAD", "origin/main", "origin/master", "@{upstream}"].iter()
         .find_map(|r| git(root, &["merge-base", "HEAD", r]).map(|s| s.trim().to_string()).filter(|s| !s.is_empty())) else { return vec![] };
+    let me = git(root, &["var", "GIT_AUTHOR_IDENT"]).and_then(|i| i.split_once('<').and_then(|(_, r)| r.split_once('>')).map(|(e, _)| e.to_string()));
+    if let (true, Some(me)) = (mine, me.filter(|e| !e.is_empty())) {
+        let theirs = git(root, &["log", "--format=%H %ae", &format!("{base}..HEAD")]).unwrap_or_default().lines()
+            .find_map(|l| l.split_once(' ').filter(|(_, e)| !e.eq_ignore_ascii_case(&me)).map(|(h, _)| h.to_string()));
+        if let Some(h) = theirs { base = h }
+    }
     let mut files: Vec<String> = git(root, &["diff", "--name-only", "--no-renames", &base]).unwrap_or_default().lines().map(String::from).collect();
     // untracked: new source files count; build output nobody ignored (.pyc and the like) isn't text, so it doesn't
     files.extend(git(root, &["ls-files", "--others", "--exclude-standard"]).unwrap_or_default().lines()
@@ -3445,11 +3512,11 @@ fn changes_vs_main(root: &Path) -> Vec<(String, String, String)> {
 /// What this copy changes that isn't on main yet, however it was changed (qh's agents, a shell,
 /// an editor, a merge): committed or not, pushed to a branch or not. file -> function -> since
 /// when ("" = the file, outside any function). Compared with the merge base of main, so a branch
-/// that sits unmerged for days still shows. `old` keeps each function's first-seen time.
+/// that sits unmerged for days still shows; a teammate's commits we pulled aren't ours. `old` keeps each function's first-seen time.
 fn scan_unmerged(root: &Path, old: &Claims) -> Claims {
     let now = now();
     let mut out: Claims = HashMap::new();
-    for (f, before, after) in changes_vs_main(root) {
+    for (f, before, after) in changes_since(root, true) {
         let (a, b): (Vec<&str>, Vec<&str>) = (before.lines().collect(), after.lines().collect());
         let (del, add) = changed_lines(&a, &b);
         let (oa, ob) = (owners(&before), owners(&after));
@@ -3782,6 +3849,11 @@ pub fn transcript(login: &str, session: &str) -> Result<String, String> {
 static LOCKS: Mutex<Option<HashMap<String, std::fs::File>>> = Mutex::new(None);
 
 fn hold_connection(repo: &str, background: bool) -> Result<(), String> {
+    hold_connection_as(repo, background, team_window())
+}
+
+/// `hold_connection`, saying whether we are the `qh team` window.
+fn hold_connection_as(repo: &str, background: bool, team: bool) -> Result<(), String> {
     let path = per_repo("team-lock", repo);
     let _ = std::fs::create_dir_all(path.parent().unwrap_or(&path));
     let f = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&path).map_err(|e| e.to_string())?;
@@ -3797,12 +3869,14 @@ fn hold_connection(repo: &str, background: bool) -> Result<(), String> {
                 // a window opened in the project itself takes the team from one keeping it in the background
                 // one that is quitting still holds it while it tells teammates (up to 5 s): wait that out,
                 // or a quick restart comes up without the team (seen live)
-                let wait = if mode.trim() == "background" { 15 } else { 7 };
+                // plain `qh` gives way to `qh team` too: its notice sends you there to answer a request
+                let gives = mode.trim() == "background" || (mode.trim() == "solo" && !background && team);
+                let wait = if gives { 15 } else { 7 };
                 if background || t0.elapsed() > Duration::from_secs(wait) {
                     let _ = std::fs::remove_file(&want);
                     return Err(format!("team {repo} is connected in another qh (pid {pid}); close that one first"));
                 }
-                let _ = std::fs::write(&want, std::process::id().to_string());
+                let _ = std::fs::write(&want, format!("{}{}", std::process::id(), if team { " team" } else { "" }));
                 std::thread::sleep(Duration::from_millis(200));
             }
             Err(std::fs::TryLockError::Error(e)) => return Err(e.to_string()),
@@ -3812,7 +3886,8 @@ fn hold_connection(repo: &str, background: bool) -> Result<(), String> {
     // who holds it goes in a file of its own: Windows locks are mandatory, so nobody else can read the locked one
     let owner = per_repo("team-owner", repo);
     let _ = std::fs::create_dir_all(owner.parent().unwrap_or(&owner));
-    let _ = std::fs::write(&owner, format!("{} {}", std::process::id(), if background { "background" } else { "project" }));
+    let mode = if background { "background" } else if team { "project" } else { "solo" };
+    let _ = std::fs::write(&owner, format!("{} {mode}", std::process::id()));
     LOCKS.lock().unwrap().get_or_insert_with(HashMap::new).insert(repo.to_string(), f);
     Ok(())
 }
@@ -3821,10 +3896,26 @@ fn release(repo: &str) {
     if let Some(m) = LOCKS.lock().unwrap().as_mut() { m.remove(repo); }
 }
 
-/// We hold `repo` in the background and the qh opened in that project asked for it.
-fn wanted_elsewhere(repo: &str) -> bool {
+/// This process is the `qh team` window (plain `qh` keeps holds and claims working underneath).
+fn team_window() -> bool {
+    crate::ui::TEAM_UI.load(Relaxed)
+}
+
+/// How we hold `repo`: background, solo (plain `qh`), project (`qh team`); "" if we don't.
+fn held_as(repo: &str) -> String {
     let mine = std::fs::read_to_string(per_repo("team-owner", repo)).unwrap_or_default();
-    mine.ends_with(" background") && mine.starts_with(&format!("{} ", std::process::id())) && per_repo("team-want", repo).exists()
+    mine.strip_prefix(&format!("{} ", std::process::id())).unwrap_or("").trim().to_string()
+}
+
+/// We hold `repo` in the background and the qh opened in that project asked for it, or we're
+/// plain `qh` and `qh team` asked.
+fn wanted_elsewhere(repo: &str) -> bool {
+    let want = std::fs::read_to_string(per_repo("team-want", repo));
+    match held_as(repo).as_str() {
+        "background" => want.is_ok(),
+        "solo" => want.is_ok_and(|w| w.trim_end().ends_with(" team")),
+        _ => false,
+    }
 }
 
 pub fn stop() {
@@ -4515,6 +4606,9 @@ pub fn list_team_files(cwd: &Path, to: &str) -> String {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    /// A newcomer waiting to be let in, for other modules' tests.
+    pub(crate) fn ask_to_join(login: &str) { super::cur(|s| s.asking.push(login.into())); }
+
     #[test]
     fn editing_lists_only_hot_claims_of_online_teammates() {
         use std::collections::HashMap;
@@ -4562,6 +4656,8 @@ pub(crate) mod tests {
         run(&w, &["remote", "add", "origin", up.to_str().unwrap()]);
         run(&w, &["push", "-q", "origin", "main"]);
         run(&w, &["remote", "set-head", "origin", "main"]);
+        run(&w, &["config", "user.email", "t@t"]); // who "we" are when qh asks git
+        run(&w, &["config", "user.name", "t"]);
         assert!(super::scan_unmerged(&w, &Default::default()).is_empty(), "nothing off main");
         // a branch with a committed change (as a merge or another tool would leave it), plus a shell edit and a new file
         run(&w, &["checkout", "-qb", "side"]);
@@ -4577,6 +4673,17 @@ pub(crate) mod tests {
         assert!(p["a.py"].contains_key("two"));
         assert!(p["new.txt"].contains_key(""));
         assert!(!p.contains_key("cache.pyc"), "untracked build output is not work");
+        // a teammate's commit on the shared branch (pulled): only what's ours after it counts
+        let _ = std::fs::remove_file(w.join("new.txt"));
+        run(&w, &["checkout", "-q", "--", "a.py"]);
+        std::fs::write(w.join("a.py"), "def one():\n    return 11\n\ndef two():\n    return 222\n").unwrap();
+        assert!(std::process::Command::new("git").current_dir(&w).args(["commit", "-qam", "theirs"])
+            .env("GIT_AUTHOR_NAME", "bob").env("GIT_AUTHOR_EMAIL", "bob@b").env("GIT_COMMITTER_NAME", "bob").env("GIT_COMMITTER_EMAIL", "bob@b")
+            .output().unwrap().status.success());
+        assert!(super::scan_unmerged(&w, &Default::default()).is_empty(), "their commit, pulled, isn't our work");
+        std::fs::write(w.join("a.py"), "def one():\n    return 111\n\ndef two():\n    return 222\n").unwrap();
+        let p = super::scan_unmerged(&w, &Default::default());
+        assert_eq!(p["a.py"].keys().collect::<Vec<_>>(), vec!["one"], "only ours after it");
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -4900,17 +5007,27 @@ pub(crate) mod tests {
 
     #[test]
     fn one_qh_holds_a_team_and_the_projects_own_window_takes_it_from_a_background_one() {
+        let _env = crate::hub::tests::ENV.lock().unwrap_or_else(|e| e.into_inner()); // the lock files live in the state dir
         let repo = format!("lock/t{}", std::process::id());
         hold_connection(&repo, true).unwrap();
         assert!(hold_connection(&repo, true).unwrap_err().contains("connected in another qh"), "a second background one stays out");
         let r2 = repo.clone();
-        let fg = std::thread::spawn(move || hold_connection(&r2, false));
+        let fg = std::thread::spawn(move || hold_connection_as(&r2, false, false));
         let t0 = Instant::now();
         while !wanted_elsewhere(&repo) && t0.elapsed() < Duration::from_secs(5) { std::thread::sleep(Duration::from_millis(20)) }
         assert!(wanted_elsewhere(&repo), "the background holder is asked to give it up");
         release(&repo); // what its sync loop does when it sees that
         fg.join().unwrap().unwrap();
-        assert!(!wanted_elsewhere(&repo) && std::fs::read_to_string(per_repo("team-owner", &repo)).unwrap().ends_with(" project"));
+        assert!(!wanted_elsewhere(&repo) && std::fs::read_to_string(per_repo("team-owner", &repo)).unwrap().ends_with(" solo"));
+        // plain qh holds it now; its notice says open `qh team`, and that window takes it over
+        let r3 = repo.clone();
+        let tw = std::thread::spawn(move || hold_connection_as(&r3, false, true));
+        let t0 = Instant::now();
+        while !wanted_elsewhere(&repo) && t0.elapsed() < Duration::from_secs(5) { std::thread::sleep(Duration::from_millis(20)) }
+        assert!(wanted_elsewhere(&repo), "plain qh is asked to give it to `qh team`");
+        release(&repo);
+        tw.join().unwrap().unwrap();
+        assert!(std::fs::read_to_string(per_repo("team-owner", &repo)).unwrap().ends_with(" project"));
         release(&repo);
     }
 
@@ -5112,7 +5229,7 @@ pub(crate) mod tests {
     }
 
     fn peer(login: &str, sessions: &[&str], online: bool) -> Peer {
-        Peer { login: login.into(), online, joined: true, ts: now(),
+        Peer { login: login.into(), online, joined: true, ts: now(), qh: crate::update::VERSION.into(),
                sessions: sessions.iter().map(|s| (s.to_string(), "idle".into(), String::new())).collect(), ..Default::default() }
     }
 
@@ -5136,6 +5253,12 @@ pub(crate) mod tests {
         assert!(with(repo, |s| s.waiting.is_empty()).unwrap(), "warn doesn't queue a wait");
         let (_, _, held) = check_edit("main", &t("get_user"), true).expect("lock still holds");
         assert!(held);
+        // warn softens the pause, not the contract: a rename that breaks bob's fresh code is held
+        with(repo, |s| s.peers.get_mut("bob").unwrap().uses = HashMap::from([("api".to_string(), HashMap::from([("get_user".to_string(), now())]))]));
+        let mut gone = t("get_user");
+        gone.removed = vec!["get_user".into()];
+        let (_, err, held) = check_edit("main", &gone, false).expect("contract checked in warn mode");
+        assert!(held && err.contains("removes or renames get_user"), "{err}");
         STATES.lock().unwrap().as_mut().unwrap().remove(repo);
     }
 
@@ -5432,6 +5555,45 @@ pub(crate) mod tests {
         assert!(pending[1].question.is_some());
         assert_eq!(*answered.lock().unwrap(), 1);
         STATES.lock().unwrap().as_mut().unwrap().remove(repo);
+    }
+
+    #[test]
+    fn a_teammate_on_an_older_qh_gets_plain_lines_not_status_cards() {
+        let ((a, a_pub), (b, b_pub)) = (member("alice"), member("bob"));
+        let mut s = keyed("alice", &a, &[("bob", &b_pub)]);
+        s.peers.get_mut("bob").unwrap().qh = "0.2.4".into();
+        let work = |id| Incoming { from: "bob".into(), id, session: "main".into(), text: "build the backend".into(), ts: now(), ..Default::default() };
+        s.pending = vec![work(1), work(2), work(3)];
+        decide_locked(&mut s, "bob", 1, "once").unwrap();
+        reply_request_locked(&mut s, "bob", 2, "which framework?").unwrap();
+        decide_why_locked(&mut s, "bob", 3, "deny", "no time");
+        assert!(!s.outbox.iter().any(|m| m["kind"] == "s"), "0.2.4 would show these as empty requests: {:?}", s.outbox);
+        let mut bob = keyed("bob", &b, &[("alice", &a_pub)]);
+        take_private(&mut bob, "alice", &published(&s, &a_pub));
+        let got: Vec<String> = bob.msgs.iter().map(|m| m.text.clone()).collect();
+        assert_eq!(got, vec!["alice re your request \"build the backend\": which framework?".to_string(),
+                             "alice declined: \"build the backend\": no time".to_string()]);
+        // nor a withdraw notice
+        s.sent.push(Outgoing { id: 9, to: "bob".into(), history: vec![(Status::Queued, now())], ..Default::default() });
+        withdraw_locked(&mut s, 9).unwrap();
+        assert!(!s.outbox.iter().any(|m| m["kind"] == "w"));
+    }
+
+    #[test]
+    fn a_resend_goes_under_a_new_id_with_its_packet_and_isnt_doubled() {
+        let mut alice = state("alice");
+        alice.next_id = 10;
+        let packet = json!({"done": "parser", "left": "tests", "files": ["src/p.rs"]});
+        alice.sent.push(Outgoing { id: 4, to: "bob".into(), session: "main".into(), text: "finish it".into(),
+                                   history: vec![(Status::Delivered, now())], packet: packet.clone(), ..Default::default() });
+        resend_locked(&mut alice, 4).unwrap();
+        let m = alice.outbox.last().unwrap().clone();
+        assert_eq!((m["id"].as_u64(), m["packet"].clone(), m["was"].clone()), (Some(11), packet, json!([4])));
+        assert_eq!((alice.sent[0].id, alice.sent[0].was.clone()), (11, vec![4]));
+        let o = outgoing_of(&outgoing_json(&alice.sent[0]));
+        assert!(o.packet.is_object() && o.was == vec![4], "kept across a restart");
+        resend_locked(&mut alice, 11).unwrap();
+        assert_eq!(alice.outbox.len(), 1, "still on the line: not sent twice");
     }
 
     #[test]

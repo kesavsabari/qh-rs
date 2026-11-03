@@ -74,7 +74,7 @@ pub struct Turn {
     pub plan_pct: Option<f64>, // ChatGPT plan window used, when the backend says
     pub browsing: bool, // the model has opened a page: send the rest of the browser tools
     pub tokens: u64,
-    /// the turn ended normally: Done goes out once the tab is free (a prompt sent on turn_done
+    /// the turn ended (however it ended): Done goes out once the tab is free (a prompt sent on turn_done
     /// then runs instead of queueing, and a rewind isn't "busy")
     pub done: bool,
     pub chars_at: usize,
@@ -1196,6 +1196,29 @@ pub(crate) mod tests {
 
     // tests that point QH_STATE_DIR somewhere run one at a time
     pub(crate) static ENV: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn a_turn_that_fails_still_says_its_done() {
+        let _env = lock(&ENV);
+        let root = std::env::temp_dir().join(format!("qh-done-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::env::set_var("QH_STATE_DIR", root.join("state"));
+        let mut cfg = crate::config::load();
+        (cfg.host, cfg.model) = ("http://127.0.0.1:9".into(), "nothing-here".into()); // nobody listens: the turn errors
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        let tx = Mutex::new(tx);
+        let hub = Hub::new(cfg, None, Box::new(move |_, e| {
+            let _ = lock(&tx).send(match e { Event::Done { .. } => "done".into(), Event::Notice(n) => n, _ => String::new() });
+        }), false);
+        hub.add("a", None, "", "", None, false, Some(root.clone())).unwrap();
+        assert!(hub.send("a", "hi", "user", 0, None));
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let mut seen = vec![];
+        while let Some(left) = end.checked_duration_since(std::time::Instant::now()) {
+            match rx.recv_timeout(left) { Ok(e) if e == "done" => return, Ok(e) => seen.push(e), Err(_) => break }
+        }
+        panic!("no Done after a failed turn (the apps would show it busy forever): {seen:?}");
+    }
 
     #[test]
     fn delete_of_another_sessions_files_is_flagged() {

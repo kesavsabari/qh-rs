@@ -27,6 +27,9 @@ pub fn run(hub: &Arc<Hub>, m: &Arc<Member>, user: String) -> String {
         hub.emit(&m.name, Event::Notice(e.clone()));
         (e, false)
     });
+    // however the turn ended (an answer, stopped after repeated errors, an error, interrupted):
+    // the apps wait for turn_done to show the tab free, which the hub sends once it is
+    lock(&m.turn).done = true;
     if edited {
         verify(hub, m);
     }
@@ -215,7 +218,6 @@ Run the project's build or test command now, fix what fails, then reply."}));
                     continue;
                 }
             }
-            lock(&m.turn).done = true; // Done is sent by the hub once the tab is free
             return Ok((content(&msg).to_string(), edited));
         }
         // normalise up front so the UI shows the arguments the tool will actually get

@@ -276,6 +276,19 @@ fn protect_candidates(root: &Path) -> Vec<PathBuf> {
     v
 }
 
+/// qh's own folders, which qh itself writes while a command runs (a ChatGPT token refresh, a login
+/// from another terminal, /model): putting them back would undo those writes, so the snapshot
+/// leaves them alone. Inside them only what steers the agent and qh never writes is put back;
+/// the secrets are deny_read (no read or write on every OS) and the whole config folder stays in
+/// Policy::protect (read-only where the OS can do it).
+fn qh_own(root: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let qh = canon(&crate::config::config_dir());
+    let own = vec![qh.clone(), canon(&crate::config::state_dir())];
+    let r = canon(root);
+    let steer = ["skills", "commands", "QH.md"].iter().map(|x| qh.join(x)).filter(|x| under(x, &r)).collect();
+    (own, steer)
+}
+
 /// The sandbox for commands of a session whose project is `root`.
 pub fn policy(root: &Path, cfg: &Config, net: Net) -> Policy {
     let h = canon(&crate::config::home());
@@ -309,26 +322,28 @@ static GIT_EXEC: LazyLock<Regex> = LazyLock::new(|| Regex::new(
 /// that don't exist yet (a new .envrc).
 pub struct Snapshot(Vec<(PathBuf, Option<Files>)>);
 
-/// Files under a path with their contents.
-type Files = Vec<(PathBuf, Vec<u8>)>;
+/// Every file under a path, with its contents while they fit the budget. None: too big to keep, so
+/// it can't be put back, but it is known to have been there and so is never deleted.
+type Files = Vec<(PathBuf, Option<Vec<u8>>)>;
 
-fn files_under(p: &Path, out: &mut Vec<(PathBuf, Vec<u8>)>, budget: &mut usize) {
+fn files_under(p: &Path, out: &mut Files, budget: &mut usize) {
     if p.is_dir() {
         for e in std::fs::read_dir(p).into_iter().flatten().flatten() {
             files_under(&e.path(), out, budget);
         }
-    } else if let Ok(b) = std::fs::read(p) {
-        *budget = budget.saturating_sub(b.len());
-        if *budget > 0 {
-            out.push((p.to_path_buf(), b));
-        }
+    } else if let Ok(m) = std::fs::metadata(p) {
+        let b = if m.len() as usize <= *budget { std::fs::read(p).ok() } else { None };
+        *budget = budget.saturating_sub(b.as_ref().map_or(0, Vec::len));
+        out.push((p.to_path_buf(), b));
     }
 }
 
 impl Snapshot {
     pub fn take(root: &Path) -> Snapshot {
         let mut budget = 8 << 20;
-        let mut paths = protect_candidates(root);
+        let (own, steer) = qh_own(root);
+        let mut paths: Vec<PathBuf> = protect_candidates(root).into_iter().filter(|p| !own.iter().any(|o| under(p, o))).collect();
+        paths.extend(steer);
         paths.push(canon(root).join(".git/config"));
         Snapshot(paths.into_iter().map(|p| {
             let state = p.exists().then(|| { let mut v = vec![]; files_under(&p, &mut v, &mut budget); v });
@@ -353,21 +368,29 @@ impl Snapshot {
                 }
                 Some(files) if git_config => {
                     // ordinary git commands rewrite it (remote add, branch -u): only a new program-running key is undone
-                    let (old, new) = (files.first().map(|f| f.1.as_slice()).unwrap_or(b""), now.first().map(|f| f.1.as_slice()).unwrap_or(b""));
+                    let body = |v: &Files| v.first().and_then(|f| f.1.clone()).unwrap_or_default();
+                    let (old, new) = (body(files), body(&now));
                     let count = |b: &[u8]| GIT_EXEC.find_iter(&String::from_utf8_lossy(b)).count();
-                    if count(new) > count(old) {
+                    if count(&new) > count(&old) {
                         let _ = std::fs::write(p, old);
                         fixed.push(p.clone());
                     }
                 }
                 Some(files) => {
                     let mut changed = false;
+                    // only a file that wasn't there before goes: the listing is complete, whatever the budget
                     for (f, _) in now.iter().filter(|(f, _)| !files.iter().any(|(g, _)| g == f)) {
                         let _ = std::fs::remove_file(f);
                         changed = true;
                     }
-                    for (f, b) in files {
-                        if now.iter().find(|(g, _)| g == f).map(|(_, nb)| nb) != Some(b) {
+                    for (f, b) in files.iter().filter_map(|(f, b)| Some((f, b.as_ref()?))) {
+                        // over this pass's budget: read it directly rather than rewrite a file that may be unchanged
+                        let same = match now.iter().find(|(g, _)| g == f).map(|(_, nb)| nb) {
+                            Some(Some(nb)) => nb == b,
+                            Some(None) => std::fs::read(f).is_ok_and(|nb| &nb == b),
+                            None => false,
+                        };
+                        if !same {
                             if let Some(d) = f.parent() { let _ = std::fs::create_dir_all(d); }
                             let _ = std::fs::write(f, b);
                             changed = true;
@@ -803,6 +826,28 @@ mod tests {
         assert!(host_listed("crates.io", &[]) && host_listed("index.crates.io", &[]) && host_listed("objects.githubusercontent.com", &[]));
         assert!(!host_listed("evil.com", &[]) && !host_listed("crates.io.evil.com", &[]) && !host_listed("notgithub.com", &[]));
         assert!(host_listed("api.example.com", &["*.example.com".into()]));
+    }
+
+    /// b026: a file over the snapshot's budget used to leave every later file unrecorded, and
+    /// restore deleted them all as new.
+    #[test]
+    fn snapshot_over_budget_deletes_nothing() {
+        let root = canon(&std::env::temp_dir()).join(format!("qh-snap-big-{}", std::process::id()));
+        let hooks = root.join(".git/hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        std::fs::write(hooks.join("big"), vec![0u8; 9 << 20]).unwrap();
+        for i in 0..5 {
+            std::fs::write(hooks.join(format!("f{i}")), "ok").unwrap();
+        }
+        let s = Snapshot::take(&root);
+        assert!(s.restore().is_empty(), "nothing changed");
+        assert!((0..5).all(|i| hooks.join(format!("f{i}")).exists()) && hooks.join("big").exists());
+        std::fs::write(hooks.join("f3"), "evil").unwrap();
+        std::fs::write(hooks.join("new"), "evil").unwrap();
+        assert_eq!(s.restore().len(), 1);
+        assert_eq!(std::fs::read_to_string(hooks.join("f3")).unwrap(), "ok");
+        assert!(!hooks.join("new").exists() && hooks.join("big").exists());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

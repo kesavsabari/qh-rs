@@ -489,6 +489,10 @@ pub fn run(hub: Arc<Hub>, tx: Sender<Ui>, rx: Receiver<Ui>) -> std::io::Result<(
     }
     app.project = std::path::PathBuf::new(); // so the team on screen follows the active tab
     app.set_active(&active);
+    // the home folder is never a project (teamsetup::not_a_project): say so, it isn't refused
+    if hub.get(&active).is_some_and(|m| crate::teamsetup::not_a_project(&m.cwd()).is_err()) {
+        app.note(&active, "working in your home folder: commands can change everything in it but the protected and secret paths. Open a project folder with Ctrl+P");
+    }
     if team_ui() && !app.in_team_space() { app.flip_space() }
     if team_ui() && app.in_team_space() && app.team_view.is_none() { app.open_map() }
     #[cfg(windows)]

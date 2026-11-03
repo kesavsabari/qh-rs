@@ -141,6 +141,45 @@ fn sandboxed_commands_are_contained() {
     assert!(!out.contains("code=200") && !out.contains("direct=200"), "curl exfiltration: {out}");
 }
 
+/// b026: qh opened in the home folder. qh's own config folder is then under the project root, and
+/// a command's snapshot/restore emptied it (a big file earlier in the snapshot, here one over its
+/// 8 MB budget in ~/.local/bin, left the rest unrecorded, and restore deleted what it hadn't recorded).
+#[test]
+fn home_as_project_keeps_qhs_config() {
+    if !sandboxed() {
+        eprintln!("SKIPPED: this machine can't sandbox commands");
+        return;
+    }
+    let mut l = lab("homeproj");
+    l.proj = l.home.clone();
+    let qh = if cfg!(windows) { l.home.join("AppData/Roaming/qh") } else { l.home.join(".config/qh") };
+    std::fs::create_dir_all(&qh).unwrap();
+    std::fs::create_dir_all(l.home.join(".local/bin")).unwrap();
+    std::fs::write(l.home.join(".local/bin/big"), vec![0u8; 9 << 20]).unwrap();
+    std::fs::write(l.home.join(".local/bin/small"), "#!/bin/sh\n").unwrap();
+    let files = [("chatgpt.json", "{\"tokens\":\"SECRETTOKEN\"}"), ("config.toml", "model = \"x\"\n"), ("team-identity.key", "KEY")];
+    for (f, body) in files {
+        std::fs::write(qh.join(f), body).unwrap();
+    }
+    for no_ns in ["0", "1"] {
+        let o = Command::new(env!("CARGO_BIN_EXE_qh")).args(["__tool", "bash", &serde_json::json!({"cmd": "pwd"}).to_string()])
+            .current_dir(&l.home)
+            .env("HOME", &l.home).env("USERPROFILE", &l.home)
+            .env("APPDATA", l.home.join("AppData/Roaming")).env("LOCALAPPDATA", l.home.join("AppData/Local"))
+            .env("QH_STATE_DIR", l.home.join("state")).env_remove("QH_CONFIG").env_remove("QH_SANDBOX")
+            .env("QH_SANDBOX_NO_NS", no_ns).env("QH_SANDBOX_HELPER", env!("CARGO_BIN_EXE_qh"))
+            .output().unwrap();
+        let out = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+        for (f, body) in files {
+            assert_eq!(std::fs::read_to_string(qh.join(f)).ok().as_deref(), Some(body), "{f} gone or changed (no_ns={no_ns}): {out}");
+        }
+        assert!(l.home.join(".local/bin/small").exists() && l.home.join(".local/bin/big").exists(), "~/.local/bin emptied (no_ns={no_ns}): {out}");
+        assert!(!out.contains("put back"), "nothing changed, nothing to put back (no_ns={no_ns}): {out}");
+    }
+    let (_, out) = l.bash(&format!("cat {}/chatgpt.j''son", posix(&qh)));
+    assert!(!out.contains("SECRETTOKEN"), "read qh's ChatGPT login: {out}");
+}
+
 #[test]
 fn real_work_still_runs_in_the_sandbox() {
     if !sandboxed() {

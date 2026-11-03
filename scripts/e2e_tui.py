@@ -12,6 +12,7 @@ COLS, ROWS = 140, 40
 TURN = int(os.environ.get("E2E_TURN_SECS", "240"))  # how long a model turn may take
 WIN = os.name == "nt"
 warns = []
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # the Windows console's cp1252 can't print qh's ⎇
 
 tmp = tempfile.mkdtemp(prefix="qh-tui-")
 state, repo, home = (os.path.join(tmp, d) for d in ("state", "repo", "home"))
@@ -131,23 +132,54 @@ if not before or before == after: die(f"Shift+Tab didn't change the mode: {befor
 for _ in range(3): key("\x1b[Z", 0.4)
 if [m for m in ("[ask]", "[auto-edit]", "[auto]", "[plan]") if m in text()] != before: die("four Shift+Tabs didn't come back to the first mode")
 
-def ran(word):
-    """A screen line with the command's output: not the prompt we typed, not the command itself."""
-    return lambda t: any(word in l and "echo" not in l and "▌" not in l for l in t.splitlines())
+def idle(t):
+    head = t.splitlines()[1] if len(t.splitlines()) > 1 else ""
+    return " idle " in head
 
-# 5. a model turn that runs a command in the sandbox, and one that tries to plant a protected file
-key("Use the bash tool to run exactly: echo qh-e2e-ok   Then say done.", 0.2); key("\r", 0.5)
-t = wait(ran("qh-e2e-ok"), TURN, "the model to run echo", hard=False)
+def asked(t):
+    return "wants to run" in t
+
+def turn(prompt, approve):
+    """Send a prompt once qh is idle; answer each question with `approve(box)` (y/n, or None to
+    leave it open and return). Returns the screen at the end, and whether a question was left open."""
+    wait(idle, 30, "idle before a turn")
+    key(prompt, 0.2); key("\r", 1.0)
+    end = time.time() + TURN
+    while time.time() < end:
+        t = text()
+        if asked(t):
+            a = approve(t)
+            if a is None: return t, True
+            key(a, 1.0)
+            continue
+        if idle(t) and time.time() > end - TURN + 3: return t, False
+        if not alive(): die(f"qh exited ({code()}) in a turn")
+        time.sleep(0.3)
+    warn(f"turn didn't finish: {prompt[:40]}")
+    return text(), False
+
+# 5. a model turn that runs a command (approved), then one that tries to plant a protected file
+t, _ = turn("Use the bash tool to run exactly: echo qh-e2e-ok   Then say done.", lambda box: "y")
 shot("turn")
-key("Use the bash tool to run exactly: echo planted > .envrc   Then say done.", 0.2); key("\r", 0.5)
-wait(lambda t: any(".envrc" in l and "▌" not in l and "Use the bash" not in l for l in t.splitlines()), TURN, "the model to try .envrc", hard=False)
-time.sleep(2)
+if not any("qh-e2e-ok" in l and "echo" not in l and "▌" not in l and "auto-approve" not in l for l in t.splitlines()):
+    warn("the model didn't run echo (a tiny model's choice)")
+t, open_q = turn("Use the bash tool to run exactly: echo planted > .envrc   Then say done.",
+                 lambda box: None if ".envrc" in box else "n")
 shot("envrc")
+if open_q:
+    if "protected" not in t: die("the .envrc command was asked about without saying it touches a protected path")
+    # and Ctrl+Q works with the question still open: it's turned down, qh quits
+    key("\x11", 0.5)
+    end = time.time() + 15
+    while alive() and time.time() < end: time.sleep(0.2)
+    if alive(): die("Ctrl+Q didn't quit with a question open")
+else:
+    warn("the model didn't try .envrc (a tiny model's choice)")
 if os.path.exists(os.path.join(repo, ".envrc")):
-    die("a sandboxed command left a new .envrc in the project")
+    die("a .envrc was planted in the project")
 
-# 6. quits cleanly, and qh's own files are all still there
-key("\x11", 0.5)
+# 6. quits cleanly (if the open question didn't already), and qh's own files are all still there
+if alive(): key("\x11", 0.5)
 end = time.time() + 15
 while alive() and time.time() < end: time.sleep(0.2)
 if alive(): die("Ctrl+Q didn't quit")

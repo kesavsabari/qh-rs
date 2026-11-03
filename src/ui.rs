@@ -979,6 +979,12 @@ impl App {
     }
 
     fn key(&mut self, k: KeyEvent) {
+        // Ctrl+Q quits even with a question open: what was waiting is turned down, nothing runs
+        if !self.confirms.is_empty() && k.code == KeyCode::Char('q') && k.modifiers.contains(Mods::CONTROL) {
+            for c in self.confirms.drain(..) { let _ = c.reply.send(Answer::No); }
+            self.quit = true;
+            return;
+        }
         if let Some(c) = self.confirms.front() {
             let ans = match k.code {
                 KeyCode::Char('y') | KeyCode::Enter => Some(Answer::Yes),

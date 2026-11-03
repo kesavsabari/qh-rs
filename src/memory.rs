@@ -75,7 +75,7 @@ pub fn list(dir: &Path) -> Vec<Mem> {
         .filter(|p| p.extension().is_some_and(|e| e == "md") && p.file_name().is_some_and(|n| n != "MEMORY.md"))
         .filter(|p| std::fs::symlink_metadata(p).is_ok_and(|m| m.is_file()))
         .filter_map(|p| Some(parse(&std::fs::read_to_string(&p).ok()?, p))).collect();
-    v.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    v.sort_by_key(|a| a.name.to_lowercase());
     v
 }
 

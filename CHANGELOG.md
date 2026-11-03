@@ -2,6 +2,47 @@
 
 Each version starts with a one-line summary; the website shows it once the version is no longer recent.
 
+## 0.2.6 — 2026-11-03
+
+Team mode, redone: a new look, requests on screen, and agents that coordinate on code. Includes
+everything planned for 0.2.5.
+
+- **New look.** One palette: three inks, a hairline, and one orange for live things only (nearest
+  of 16 colours where there's no 24-bit). Panes and the input lose their boxes. The q-eye in the
+  corner shows what the session is doing; the footer shows three hints for the moment.
+- **⌃K lists every command,** and a pick lands in the input. Keys are written the way each OS
+  writes them (⌃K, ^K, Ctrl+K).
+- **`qh team` opens the team space.** Plain `qh` keeps the team connected underneath (holds,
+  claims, answers) without showing teammates, and a request reaches you as a desktop notification.
+- **A numbered menu** down the left of the team space, in three groups (needs you / your work /
+  team), each page with its count and a line of what's in it. New pages: You asked, Who's editing,
+  Taken over, Agent answered.
+- **Requests on screen.** The oldest waiting request is docked on every page, the header says how
+  many need you, `l` puts one off till later, and declining work asks why. Home opens with what
+  came in while you were away. You can send a request again or take it back.
+- **Handovers.** Hand work over now or later at a set time; a request can expire early, and you're
+  warned when it clashes with someone's work.
+- **Trust.** Your agent can always answer for trusted teammates, by topic if you like; trust adds
+  their promises, and every answer is logged. **Focus mode** holds requests until you're done.
+- **Claims from git.** Every change not on main yet, however it was made, holds a teammate's edit
+  to the same function. `claims = "lock"` (default) holds the edit; `"warn"` makes it and tells the
+  agent and you once. Broken promises hold either way.
+- **Contracts** are checked on the whole change at commit and push, however it was made; a break
+  sends the teammate a request. Agents write what they count on with the promise tool.
+- **Holds before the prompt.** A push or commit the team would hold is held before the allow
+  prompt, not after you approve it, and holds once per break.
+- **qh link:** messages up to 16 MiB stream in acked windows; a teammate reachable directly is
+  preferred over the relay.
+- **qh no longer empties its own config folder** when the project is your home folder. The
+  sandbox's undo step skipped files past an 8 MB budget and then deleted them as if a command had
+  made them, taking your ChatGPT sign-in and settings with it. qh's own files are now left alone,
+  secrets stay unreadable to commands, and qh tells you when it's working in your home folder.
+- **Held pushes survive a restart.** A push waiting on a teammate, their answer, and an approval
+  are kept per project; ones already pushed, rewritten or 14 days old are dropped.
+- **Fixes.** Team setup refuses your home folder, also when it sits inside a git repo whose top is
+  home. A closed window says goodbye instead of showing online for 5 minutes; a teammate waking
+  from sleep is checked again at once; macOS refusing LAN sends is said in the team log.
+
 ## 0.2.4 — 2026-10-30
 
 Teammates connect through strict networks, and the Windows sandbox gets NuGet.

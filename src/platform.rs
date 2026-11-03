@@ -398,6 +398,15 @@ pub fn diff(label: &str, before: Option<&str>, after: Option<&str>) -> String {
     out
 }
 
+/// Seconds east of UTC on this machine now (for clock times like "14:00").
+#[cfg(unix)]
+pub fn utc_offset() -> i64 {
+    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as libc::time_t).unwrap_or(0);
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    if unsafe { libc::localtime_r(&t, &mut tm) }.is_null() { return 0 }
+    tm.tm_gmtoff as i64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -457,15 +466,6 @@ mod tests {
         let (o, killed) = run_timeout(shell_cmd("echo hi; sleep 5"), None, 1, &std::env::temp_dir()).unwrap();
         assert!(killed && String::from_utf8_lossy(&o.stdout).contains("hi"));
     }
-}
-
-/// Seconds east of UTC on this machine now (for clock times like "14:00").
-#[cfg(unix)]
-pub fn utc_offset() -> i64 {
-    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as libc::time_t).unwrap_or(0);
-    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    if unsafe { libc::localtime_r(&t, &mut tm) }.is_null() { return 0 }
-    tm.tm_gmtoff as i64
 }
 
 #[cfg(windows)]

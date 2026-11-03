@@ -1184,6 +1184,12 @@ the project are refused. path is relative to the project root. Lines are numbere
     ]
 }
 
+/// Models picked with /model, newest first (at most 5), kept across runs.
+pub fn recent_models() -> Vec<String> {
+    std::fs::read_to_string(state_dir().join("recent_models")).unwrap_or_default()
+        .lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect()
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -1309,10 +1315,4 @@ pub(crate) mod tests {
         for h in hs { h.join().unwrap(); }
         assert_eq!(*order.lock().unwrap(), vec![0, 1, 2, 3]);
     }
-}
-
-/// Models picked with /model, newest first (at most 5), kept across runs.
-pub fn recent_models() -> Vec<String> {
-    std::fs::read_to_string(state_dir().join("recent_models")).unwrap_or_default()
-        .lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect()
 }

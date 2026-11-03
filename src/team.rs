@@ -2506,7 +2506,7 @@ pub fn focus_default() -> u64 {
 
 /// Till when a teammate is focusing (0: they aren't).
 pub fn focus_of(login: &str) -> u64 {
-    cur(|s| s.peers.get(login).map(|p| p.focus).unwrap_or(0)).unwrap_or(0).max(0)
+    cur(|s| s.peers.get(login).map(|p| p.focus).unwrap_or(0)).unwrap_or(0)
 }
 
 /// Handovers you accepted, newest first.
@@ -4774,7 +4774,7 @@ pub(crate) mod tests {
         let mut s = state("alice");
         s.pending = vec![Incoming { from: "bob".into(), id: 3, text: "job".into(), kind: "handover".into(),
                                     history: vec![(Status::Delivered, now())], ..Default::default() }];
-        let i = s.pending.iter_mut().next().unwrap();
+        let i = s.pending.first_mut().unwrap();
         i.snoozed = true;
         i.until = now() + 3600;
         status_out(&mut s, "bob", 3, Status::Seen, &format!("seen, back to it {}", clock(now() + 3600)));

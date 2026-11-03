@@ -1034,7 +1034,7 @@ impl TeamView {
             for l in &body[..shown] { lines.push(Line::raw(format!("    {l}"))) }
             if body.len() > shown { lines.push(Line::styled(format!("    … {} more lines (↑↓ to pick it)", body.len() - shown), Style::new().fg(theme::dim()))) }
             if let Some(why) = i.packet["held"].as_str() {
-                lines.push(Line::styled(pad(&format!("{why}"), w), theme::fg(theme::orange())));
+                lines.push(Line::styled(pad(why, w), theme::fg(theme::orange())));
                 if let (true, Some((a, _))) = (on, &i.draft) {
                     for l in crate::ui::wrap(&format!("answer ready: {a}"), w.saturating_sub(4).max(10)) { lines.push(Line::styled(format!("    {l}"), theme::fg(theme::ink2()))) }
                     lines.push(Line::styled("    Enter sends it as written · d says no", theme::fg(theme::dim())));

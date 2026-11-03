@@ -3262,7 +3262,7 @@ fn draw_confirm(f: &mut Frame, c: &Confirm, queued: usize) {
     let keys = if c.tool == "review_hold" { "[y] push anyway   [h] hand to them in team chat   [n] hold and fix".to_string() }
         else if c.rule.is_empty() { "[y] allow   [n] deny".to_string() } else { "[y] allow   [a] always   [n] deny".to_string() };
     foot.push(Line::styled(keys, Style::new().add_modifier(Modifier::BOLD)));
-    let fixed: u16 = head.iter().chain(&foot).map(|l| rows(l)).sum::<u16>() + 2;
+    let fixed: u16 = head.iter().chain(&foot).map(&rows).sum::<u16>() + 2;
     let budget = area.height.saturating_sub(5).saturating_sub(fixed);
     let (mut body_h, mut body) = (0u16, vec![]);
     for l in detail {

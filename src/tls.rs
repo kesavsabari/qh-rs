@@ -37,7 +37,7 @@ fn handshake(s: &mut TcpStream, mut c: Connection) -> std::io::Result<(Arc<Wire>
     while c.is_handshaking() {
         c.complete_io(s)?;
     }
-    Ok(split(s, Some(c))?)
+    split(s, Some(c))
 }
 
 fn split(s: &TcpStream, c: Option<Connection>) -> std::io::Result<(Arc<Wire>, Reader)> {

@@ -390,6 +390,11 @@ impl TeamView {
     }
 
     /// Accept (or with "always", accept and trust) a waiting request: work goes into its session.
+    /// On Asked you with a teammate's request picked (not a held push): its keys come first.
+    fn request_picked(&self) -> bool {
+        self.tab == REQUESTS && self.sel[REQUESTS].checked_sub(open_holds().len()).is_some_and(|n| n < crate::team::pending().len())
+    }
+
     fn accept(hub: &std::sync::Arc<Hub>, i: &crate::team::Incoming, ans: &str) -> Act {
         match crate::team::decide(&i.from, i.id, ans) {
             Some((session, note)) if session.is_empty() => Act::Note(note),
@@ -489,10 +494,11 @@ impl TeamView {
                 return Act::None;
             }
         }
-        // someone asking to join: l lets them in, n doesn't
+        // someone asking to join: l lets them in, n doesn't (on Asked you, with a request picked,
+        // l puts that request off instead: letting someone in never rides on another key's meaning)
         if let Some(who) = crate::team::join_requests().first().cloned() {
             match k.code {
-                KeyCode::Char('l') => { crate::team::let_in(&who); return Act::Note(format!("letting {who} in")) }
+                KeyCode::Char('l') if !self.request_picked() => { crate::team::let_in(&who); return Act::Note(format!("letting {who} in")) }
                 KeyCode::Char('n') => { crate::team::not_now(&who); return Act::None }
                 _ => {}
             }
@@ -801,7 +807,8 @@ impl TeamView {
             let more = if joins.len() > 1 { format!("  (+{} more)", joins.len() - 1) } else { String::new() };
             f.render_widget(Paragraph::new(vec![
                 Line::styled(format!(" {who} wants to join the team{more}"), Style::new().fg(theme::orange()).add_modifier(Modifier::BOLD)),
-                Line::styled("   l let them in · n not now", Style::new().fg(theme::orange())),
+                Line::styled(if self.request_picked() { "   l let them in from another page (here l puts the picked request off) · n not now" }
+                             else { "   l let them in · n not now" }, Style::new().fg(theme::orange())),
             ]).block(Block::new().borders(Borders::TOP).border_style(Style::new().fg(theme::dim()))), wait);
         } else if let Some(i) = card {
             let more = pending.iter().filter(|x| !x.snoozed).count() - 1;
@@ -1600,8 +1607,13 @@ mod flow_screen_tests {
         keep("2-asked-you", &s);
         ok(&s, &["packet: 2 done · 1 left · checkout.tsx", "⚠ clashes: sam also handed you checkout.tsx", "held for you: it promises total"]);
 
-        // later asks until when; the card goes away
+        // later asks until when; the card goes away. Someone waiting to join is not let in by
+        // that l: it belongs to the picked request here
+        crate::team::tests::ask_to_join("dana");
+        assert!(screen(&mut v, &hub, &cwd).contains("l let them in from another page"));
         key(&mut v, &hub, &cwd, KeyCode::Char('l'));
+        assert!(v.later.is_some() && crate::team::join_requests() == ["dana"], "l on Asked you put the request off, dana still waits");
+        crate::team::not_now("dana");
         let s = screen(&mut v, &hub, &cwd);
         keep("3-later", &s);
         ok(&s, &["LATER, UNTIL WHEN?", "in 1 hour", "tomorrow morning", "when I'm done here"]);

@@ -2418,12 +2418,16 @@ $ARGUMENTS is replaced by what you type after the command".into()
                 let up = matches!(ev.kind, K::ScrollUp);
                 if let Some(p) = self.picker.as_mut() {
                     p.sel = if up { p.sel.saturating_sub(1) } else { (p.sel + 1).min(p.hits().len().saturating_sub(1)) };
+                } else if self.team_view.is_some() {
+                    // the wheel moves through the team screen, not the chat hidden behind it
+                    self.key(KeyEvent::new(if up { KeyCode::Up } else { KeyCode::Down }, Mods::NONE));
                 } else if self.map.is_none() {
                     let a = self.active.clone();
                     let v = self.view(&a);
                     v.scroll = if up { v.scroll + 3 } else { v.scroll.saturating_sub(3) };
                 }
             }
+            K::Down(MouseButton::Left) if self.picker.is_none() && self.team_view.as_mut().is_some_and(|tv| tv.click(col, row)) => {}
             K::Down(MouseButton::Left) => {
                 if let Some(p) = self.picker.as_mut() {
                     if let Some((r, top)) = self.picker_rows {
@@ -2687,6 +2691,7 @@ then it's `git push -u origin {branch}` and `gh pr create --fill`.");
                 h2.send(&to, text, "user", 0, None);
             }),
             ask: Box::new(move |i: &crate::team::Incoming| {
+                if crate::team::focusing().is_some() { return } // held: focus ending says what waited
                 let what = format!("{} {} your {}: \"{}\"", i.from, if i.question.is_some() { "asks" } else { "sent a request for" }, i.session,
                                    i.text.chars().filter(|c| !c.is_control()).take(200).collect::<String>());
                 if team_ui() {

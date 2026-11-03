@@ -1163,8 +1163,11 @@ their agent answers from its live session; the answer arrives later as a message
                &[("question", "string"), ("to", "string"), ("deep", "boolean")], &["question"]),
         schema("tell_team", &format!("Send a teammate's agent a message: hand them their part of a task, or tell them a decision \
 they build on (an API shape, a route, a file layout). It waits in their Requests until the person accepts it, then runs in their session on their machine; they may reply or decline instead. to = \"login\" or \
-\"login/session\" (their first session when no session is named). Be specific: what to build, and the agreed interface. {TEAM_FILES}"),
-               &[("to", "string"), ("text", "string")], &["to", "text"]),
+\"login/session\" (their first session when no session is named). Be specific: what to build, and the agreed interface. \
+When you hand over work you started, also fill the packet they read on accepting: done and left (one item per line), files \
+(comma-separated paths), watch_out (gotchas), branch (where your commits are). {TEAM_FILES}"),
+               &[("to", "string"), ("text", "string"), ("done", "string"), ("left", "string"), ("files", "string"),
+                 ("watch_out", "string"), ("branch", "string")], &["to", "text"]),
         schema("promise", "Write down what your code counts on in a teammate's function (its interface or behaviour: \
 \"get_user returns None for unknown ids, never panics\", \"Order.total is in cents\"). Whenever anyone on the team changes \
 that function, their edit is checked against it first, and a break is held and sent to you as a request instead of landing \

@@ -487,6 +487,17 @@ fn settle(hub: &Arc<Hub>, m: &Arc<Member>) {
     }
 }
 
+/// tell_team's handover packet from its optional fields (Null when none is filled).
+fn packet(args: &Value) -> Value {
+    let s = |k: &str| args[k].as_str().unwrap_or("").trim().to_string();
+    let lines = |k: &str| s(k).lines().map(|l| l.trim().trim_start_matches(['-', '*', '•']).trim().to_string()).filter(|l| !l.is_empty()).collect::<Vec<_>>();
+    let files: Vec<String> = s("files").split([',', '\n']).map(|f| f.trim().to_string()).filter(|f| !f.is_empty()).collect();
+    if lines("done").is_empty() && lines("left").is_empty() && files.is_empty() && s("watch_out").is_empty() && s("branch").is_empty() {
+        return Value::Null;
+    }
+    json!({"done": lines("done"), "left": lines("left"), "files": files, "watch": s("watch_out"), "branch": s("branch")})
+}
+
 /// Answer a teammate agent's question from a read-only copy of this session: everything it
 /// knows, plus a few read-only lookups. Nothing is added to the session itself; the owner pays.
 /// Returns (answer, names the answer promises).
@@ -944,7 +955,8 @@ fn dispatch(hub: &Arc<Hub>, m: &Arc<Member>, name: &str, args: &Value) -> String
                 None => return format!("error: {who} isn't a teammate with a session open right now; tell the user"),
             }
         } else { session.to_string() };
-        return match crate::team::send_from(who, &session, &format!("[from {}'s agent] {text}", crate::team::me().unwrap_or_default()), &m.name) {
+        return match crate::team::send_packet(who, &session, &format!("[from {}'s agent] {text}", crate::team::me().unwrap_or_default()), &m.name,
+                                              packet(&args)) {
             Ok(m) => m,
             Err(e) => format!("error: {e}"),
         };

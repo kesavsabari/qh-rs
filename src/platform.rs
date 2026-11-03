@@ -458,3 +458,23 @@ mod tests {
         assert!(killed && String::from_utf8_lossy(&o.stdout).contains("hi"));
     }
 }
+
+/// Seconds east of UTC on this machine now (for clock times like "14:00").
+#[cfg(unix)]
+pub fn utc_offset() -> i64 {
+    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as libc::time_t).unwrap_or(0);
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    if unsafe { libc::localtime_r(&t, &mut tm) }.is_null() { return 0 }
+    tm.tm_gmtoff as i64
+}
+
+#[cfg(windows)]
+pub fn utc_offset() -> i64 {
+    use windows_sys::Win32::System::Time::{GetTimeZoneInformation, TIME_ZONE_INFORMATION};
+    let mut z: TIME_ZONE_INFORMATION = unsafe { std::mem::zeroed() };
+    let r = unsafe { GetTimeZoneInformation(&mut z) };
+    // 1 = standard, 2 = daylight, u32::MAX = TIME_ZONE_ID_INVALID
+    if r == u32::MAX { return 0 }
+    let extra = match r { 1 => z.StandardBias, 2 => z.DaylightBias, _ => 0 };
+    -((z.Bias + extra) as i64) * 60
+}

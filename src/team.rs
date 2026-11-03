@@ -34,7 +34,7 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -92,6 +92,7 @@ pub struct Peer {
     promises: Vec<Promise>,                 // what their sessions count on staying true
     link: Vec<String>,                      // where their qh-link listens ("lan=1.2.3.4:5"), sealed like the rest
     link_ms: u64,                           // when those addresses were current (their clock, ms)
+    focus: u64,                             // focusing till then (0: not)
     seq: u64,                               // when this copy was made (ms): an older git copy can't undo a live one
     sign: String,                           // their signing key (Ed25519), named in the folder
     anchor: String,                         // the commit GitHub vouches for their keys on
@@ -126,6 +127,9 @@ pub struct Incoming {
     pub kind: String,         // handover | question
     pub history: Vec<(Status, u64)>, // delivered when it reached us, then seen, replied…
     pub snoozed: bool,        // "later": off the card, still counted
+    pub until: u64,           // ...till this time, then back on the card (0: till you pick it)
+    pub packet: Value,        // a handover's packet from the sender's agent: done, left, files, watch, branch
+    pub draft: Option<(String, Vec<String>)>, // a question our agent answered with a promise, held for you: (answer, names)
 }
 
 impl Incoming {
@@ -204,9 +208,31 @@ pub enum TeamEvent {
     Outgoing { id: u64, status: Status },
 }
 
-/// What we do with a waiting request.
+/// What we do with a waiting request. Later's time: when the card comes back (0: when you pick it).
 #[derive(Clone, Debug)]
-pub enum Action { Accept, Always, Reply(String), Decline(Option<String>), Later }
+pub enum Action { Accept, Always, Reply(String), Decline(Option<String>), Later(u64) }
+
+/// An answer our agent sent a teammate without asking us.
+#[derive(Clone, Debug, Default)]
+pub struct Answered {
+    pub ts: u64,
+    pub to: String,
+    pub question: String,
+    pub answer: String,
+    pub promise: bool, // it promised names (RELIED ON): only trusted teammates get those alone
+    pub taken_back: bool,
+}
+
+/// Steps 6-8: handovers you took, what your agent answered alone, trust topics, focus.
+#[derive(Default)]
+struct Flow {
+    taken: Vec<Incoming>,                 // handovers you accepted, newest last (the last 30)
+    approved: Vec<(String, u64)>,         // questions you said yes to: their answers go out whatever they promise
+    log: Vec<Answered>,                   // the last 100 answers sent without you
+    topics: HashMap<String, Vec<String>>, // trusted login -> topics their promises may cover (none: any)
+    focus: u64,                           // holding cards and notifications till then
+    focus_told: bool,                     // the "focus over" note went out
+}
 
 const REQUEST_LIFE: u64 = 14 * 86400; // a request nobody acted on expires after two weeks
 
@@ -316,6 +342,7 @@ struct State {
     cleared: HashMap<String, u64>,  // DM / group channel -> lines up to this time hidden (`x` in the chat)
     pinged: Vec<String>,            // channels with an unread @mention of us
     dirty: bool,                    // something to publish now (sent message, decision)
+    flow: Flow,
     running: std::sync::Arc<AtomicBool>,
     finished: std::sync::Arc<AtomicBool>,
 }
@@ -730,6 +757,7 @@ fn parse_data(p: &mut Peer, d: &Value) {
     }
     p.link = d["link"].as_array().into_iter().flatten().filter_map(|a| a.as_str().map(String::from)).collect();
     p.link_ms = d["link_ms"].as_u64().unwrap_or(0);
+    p.focus = d["focus"].as_u64().unwrap_or(0);
     p.team_notes = d["team_notes"].as_str().unwrap_or("").to_string();
 }
 
@@ -799,7 +827,8 @@ fn history_of(v: &Value) -> Vec<(Status, u64)> {
 
 fn incoming_json(i: &Incoming) -> Value {
     json!({"from": i.from, "id": i.id, "session": i.session, "text": i.text, "ts": i.ts, "from_session": i.from_session,
-           "replied": i.replied, "kind": i.kind, "snoozed": i.snoozed, "history": history_json(&i.history),
+           "replied": i.replied, "kind": i.kind, "snoozed": i.snoozed, "until": i.until, "packet": i.packet,
+           "draft": i.draft.as_ref().map(|d| json!([d.0, d.1])), "history": history_json(&i.history),
            "question": i.question.as_ref().map(|q| json!({"repo": q.repo, "from": q.from, "from_session": q.from_session,
                                                            "id": q.id, "session": q.session, "text": q.text}))})
 }
@@ -811,6 +840,9 @@ fn incoming_of(v: &Value) -> Incoming {
         from: s("from"), id: v["id"].as_u64().unwrap_or(0), session: s("session"), text: s("text"), ts: v["ts"].as_u64().unwrap_or(0),
         from_session: s("from_session"), replied: v["replied"].as_bool().unwrap_or(false), kind: s("kind"),
         snoozed: v["snoozed"].as_bool().unwrap_or(false), history: history_of(&v["history"]),
+        until: v["until"].as_u64().unwrap_or(0), packet: v["packet"].clone(),
+        draft: v["draft"][0].as_str().map(|a| (a.to_string(), v["draft"][1].as_array().into_iter().flatten()
+            .filter_map(|x| x.as_str().map(String::from)).collect())),
         question: q.is_object().then(|| Question {
             repo: q["repo"].as_str().unwrap_or("").into(), from: q["from"].as_str().unwrap_or("").into(),
             from_session: q["from_session"].as_str().unwrap_or("").into(), id: q["id"].as_u64().unwrap_or(0),
@@ -831,7 +863,17 @@ fn outgoing_of(v: &Value) -> Outgoing {
 
 /// What's in flight survives a restart: our outbox (else a request to someone offline is gone the
 /// moment we restart before they read it), what waits for us, what we sent, and when we were last open.
-struct Saved { outbox: Vec<Value>, pending: Vec<Incoming>, sent: Vec<Outgoing>, fyi: Vec<Fyi>, ts: u64 }
+struct Saved { outbox: Vec<Value>, pending: Vec<Incoming>, sent: Vec<Outgoing>, fyi: Vec<Fyi>, ts: u64, flow: Flow }
+
+fn answered_json(a: &Answered) -> Value {
+    json!({"ts": a.ts, "to": a.to, "q": a.question, "a": a.answer, "promise": a.promise, "back": a.taken_back})
+}
+
+fn answered_of(v: &Value) -> Answered {
+    Answered { ts: v["ts"].as_u64().unwrap_or(0), to: v["to"].as_str().unwrap_or("").into(), question: v["q"].as_str().unwrap_or("").into(),
+               answer: v["a"].as_str().unwrap_or("").into(), promise: v["promise"].as_bool().unwrap_or(false),
+               taken_back: v["back"].as_bool().unwrap_or(false) }
+}
 
 fn load_requests(repo: &str) -> Saved {
     let v: Value = serde_json::from_str(&std::fs::read_to_string(per_repo("team-requests", repo)).unwrap_or_default()).unwrap_or_default();
@@ -843,6 +885,14 @@ fn load_requests(repo: &str) -> Saved {
         fyi: arr("fyi").iter().map(|f| Fyi { ts: f["ts"].as_u64().unwrap_or(0), kind: f["kind"].as_str().unwrap_or("").into(),
                                              text: f["text"].as_str().unwrap_or("").into() }).collect(),
         ts: v["ts"].as_u64().unwrap_or(0),
+        flow: Flow {
+            taken: arr("taken").iter().map(incoming_of).collect(),
+            log: arr("answered").iter().map(answered_of).collect(),
+            topics: serde_json::from_value(v["topics"].clone()).unwrap_or_default(),
+            focus: v["focus"].as_u64().unwrap_or(0),
+            focus_told: v["focus_told"].as_bool().unwrap_or(false),
+            approved: vec![],
+        },
     }
 }
 
@@ -855,6 +905,9 @@ fn save_requests(s: &State) {
         "pending": s.pending.iter().map(incoming_json).collect::<Vec<_>>(),
         "sent": s.sent.iter().map(outgoing_json).collect::<Vec<_>>(),
         "fyi": s.fyi.iter().map(|f| json!({"ts": f.ts, "kind": f.kind, "text": f.text})).collect::<Vec<_>>(),
+        "taken": s.flow.taken.iter().map(incoming_json).collect::<Vec<_>>(),
+        "answered": s.flow.log.iter().map(answered_json).collect::<Vec<_>>(),
+        "topics": s.flow.topics, "focus": s.flow.focus, "focus_told": s.flow.focus_told,
     });
     let body = v.to_string();
     let mut g = SAVED.lock().unwrap();
@@ -886,6 +939,23 @@ fn expire_locked(s: &mut State) -> Vec<(String, u64)> {
         decide_locked(s, from, *id, "expired");
     }
     old
+}
+
+/// Cards put off till a time come back at that time; focus ends at its time, with one note of what waited.
+fn wake_locked(s: &mut State) {
+    let t = now();
+    for i in s.pending.iter_mut().filter(|i| i.snoozed && i.until > 0 && i.until <= t) {
+        i.snoozed = false;
+        i.until = 0;
+        alert(format!("qh: back to {}'s request: {}", i.from, clip_to(bare(&i.text), 80)));
+        s.dirty = true;
+    }
+    if s.flow.focus > 0 && s.flow.focus <= t && !s.flow.focus_told {
+        s.flow.focus_told = true;
+        let n = s.pending.iter().filter(|i| !i.snoozed).count();
+        if n > 0 { ALERTS.lock().unwrap().push(format!("qh: focus over · {n} waiting for you")) }
+        s.dirty = true;
+    }
 }
 
 /// Let `login` in without asking when they turn up (you invited them).
@@ -974,7 +1044,7 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks, background: bool) -> Re
     let (running, finished) = (std::sync::Arc::new(AtomicBool::new(true)), std::sync::Arc::new(AtomicBool::new(false)));
     STATES.lock().unwrap().get_or_insert_with(HashMap::new).insert(repo.clone(), State {
         repo: repo.clone(), me: me.clone(), peers: HashMap::new(), error: String::new(), key: load_key(&repo),
-        outbox: saved.outbox, next_id, seen, pending: saved.pending, sent: saved.sent, fyi: saved.fyi, last_open: saved.ts,
+        outbox: saved.outbox, next_id, seen, pending: saved.pending, sent: saved.sent, fyi: saved.fyi, last_open: saved.ts, flow: saved.flow,
         roles: load_roles(&repo),
         approved: load_list("team-approved", &repo), asking: vec![], invites, chat,
         epoch: std::fs::read_to_string(per_repo("team-epoch", &repo)).ok().and_then(|e| e.trim().parse().ok()).unwrap_or(0),
@@ -993,6 +1063,7 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks, background: bool) -> Re
         dirty: true, running: running.clone(), finished: finished.clone(),
     });
     with(&repo, load_private);
+    with(&repo, |s| FOCUS.store(s.flow.focus, Relaxed));
     set_current(&repo);
     let (repo2, me2) = (repo.clone(), me.clone());
     let (live_tx, live_rx) = std::sync::mpsc::channel();
@@ -1013,6 +1084,7 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks, background: bool) -> Re
             let d = summary(); // outside the lock: it reads the hub
             with(&repo2, |s| {
                 expire_locked(s);
+                wake_locked(s);
                 save_requests(s);
                 if let Some(k) = &s.key {
                     // the key goes to members, and to newcomers we approved; nobody else
@@ -1034,6 +1106,7 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks, background: bool) -> Re
                     d["outbox"] = Value::from(s.outbox.clone());
                     d["acks"] = json!(s.seen);
                     d["roles"] = json!(s.roles);
+                    d["focus"] = json!(s.flow.focus);
                     d["chat"] = Value::from(s.my_chat.clone());
                     d["dms"] = Value::from(s.my_dms.clone());
                     d["groups"] = Value::from(s.my_groups.clone());
@@ -1692,9 +1765,11 @@ pub fn channel_send(chan: &str, text: &str) -> Result<String, String> {
 }
 
 static ALERTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+static FOCUS: AtomicU64 = AtomicU64::new(0); // the current team's focus end, readable under the state lock
 
 /// Something worth a desktop notification (the UI decides whether to show it: focus, `notify`).
 fn alert(text: String) {
+    if focusing().is_some() { return } // held: the count still shows, and focus ending says what waited
     let mut a = ALERTS.lock().unwrap();
     a.push(text);
     let n = a.len();
@@ -1795,7 +1870,8 @@ fn take_in(repo: &str, me: &String, key: Option<Key>, mut p: Peer, hooks: &Hooks
         }
         let mut inc = Incoming { from: login.clone(), id, session: m["session"].as_str().unwrap_or("main").into(),
                                  text: m["text"].as_str().unwrap_or("").into(), question: None, ts: m["ts"].as_u64().unwrap_or_else(now),
-                                 from_session: m["from_session"].as_str().unwrap_or("").into(), replied: false, ..Default::default() };
+                                 from_session: m["from_session"].as_str().unwrap_or("").into(), replied: false,
+                                 packet: if m["packet"].is_object() { m["packet"].clone() } else { Value::Null }, ..Default::default() };
         let role = s.roles.get(login).map(String::as_str).unwrap_or("member");
         if m["kind"] == "s" {
             // where one of our requests is now
@@ -1804,7 +1880,10 @@ fn take_in(repo: &str, me: &String, key: Option<Key>, mut p: Peer, hooks: &Hooks
             let (re, text) = (m["re"].as_u64().unwrap_or(0), inc.text.clone());
             let Some(st) = m["status"].as_str().and_then(Status::parse) else { continue };
             let Some(o) = s.sent.iter_mut().find(|o| o.to == *login && o.id == re) else { continue };
-            if o.history.iter().any(|h| h.0 == st) && st != Status::Replied { continue }
+            if o.history.iter().any(|h| h.0 == st) && st != Status::Replied {
+                if st == Status::Seen && !text.is_empty() { o.reply = text.clone() } // "seen, back to it 14:00"
+                continue;
+            }
             o.history.push((st, inc.ts));
             if !text.is_empty() { o.reply = text.clone() }
             let what = clip_to(bare(&o.text), 80);
@@ -2018,6 +2097,12 @@ pub fn send(to: &str, session: &str, text: &str) -> Result<String, String> {
 
 /// `send` from one of our sessions (its agent used tell_team), so they see where it came from.
 pub fn send_from(to: &str, session: &str, text: &str, from_session: &str) -> Result<String, String> {
+    send_packet(to, session, text, from_session, Value::Null)
+}
+
+/// `send_from` with a handover packet the sending agent wrote: what's done, what's left, the
+/// files, what to watch out for, the branch. The receiver sees it when they accept.
+pub fn send_packet(to: &str, session: &str, text: &str, from_session: &str, packet: Value) -> Result<String, String> {
     cur(|s| {
         if s.key.is_none() {
             return Err("you're not in the team yet: waiting to be let in".to_string());
@@ -2032,7 +2117,9 @@ pub fn send_from(to: &str, session: &str, text: &str, from_session: &str) -> Res
         let online = p.online;
         s.next_id += 1;
         let id = s.next_id;
-        s.outbox.push(json!({"id": id, "to": to, "session": session, "text": text, "from_session": from_session, "ts": now()}));
+        let mut m = json!({"id": id, "to": to, "session": session, "text": text, "from_session": from_session, "ts": now()});
+        if packet.is_object() { m["packet"] = packet }
+        s.outbox.push(m);
         s.sent.push(Outgoing { id, to: to.into(), session: session.into(), text: text.into(), kind: "handover".into(),
                                from_session: from_session.into(), ts: now(), history: vec![(Status::Queued, now())], reply: String::new() });
         let n = s.sent.len();
@@ -2106,7 +2193,7 @@ pub fn not_now(login: &str) {
 }
 
 /// A request's text without the "[from bob's agent] " tag tell_team puts on it.
-fn bare(text: &str) -> &str {
+pub fn bare(text: &str) -> &str {
     text.strip_prefix('[').and_then(|t| t.split_once("] ")).map_or(text, |x| x.1)
 }
 
@@ -2160,7 +2247,14 @@ fn decide_why_locked(s: &mut State, from: &str, id: u64, answer: &str, why: &str
         (Some(_), _) => {}
         (None, "deny") => status_out(s, from, id, Status::Declined, why),
         (None, "expired") => status_out(s, from, id, Status::Expired, ""),
-        (None, _) => status_out(s, from, id, Status::Accepted, ""),
+        (None, _) => {
+            status_out(s, from, id, Status::Accepted, "");
+            let mut t = inc.clone();
+            t.history.push((Status::Accepted, now()));
+            s.flow.taken.push(t);
+            let n = s.flow.taken.len();
+            if n > 30 { s.flow.taken.drain(..n - 30); }
+        }
     }
     Some(inc)
 }
@@ -2178,6 +2272,12 @@ pub fn decide(from: &str, id: u64, answer: &str) -> Option<(String, String)> {
     save_seen(&repo);
     if answer == "deny" { return None }
     if let Some(q) = inc.question {
+        if let Some((text, relied)) = inc.draft {
+            // held because it promised something: you looked and said yes, so it goes as written
+            with(&repo, |s| { reply_locked(s, &q, &text, &relied); log_answer(s, &q, &text, !relied.is_empty()) });
+            return Some((String::new(), format!("sent your agent's answer to {}", inc.from)));
+        }
+        with(&repo, |s| s.flow.approved.push((q.from.clone(), q.id)));
         // a question: answered from a read-only copy, nothing runs in the session itself
         let run = with(&repo, |s| { s.answered.push(now()); s.answerer.clone() }).flatten();
         let session = q.session.clone();
@@ -2305,11 +2405,197 @@ fn reply_locked(s: &mut State, q: &Question, text: &str, relied: &[String]) {
     s.dirty = true;
 }
 
-/// Our agent's answer to a teammate's question is ready.
+/// Our agent's answer to a teammate's question is ready. Facts go out alone to anyone; an answer
+/// that promises names (RELIED ON) goes alone only to someone trusted on that topic, else it's
+/// held in Asked you with the answer ready. Whatever goes out without you is logged.
 pub fn reply(q: &Question, text: &str, relied: &[String]) {
     let who = if q.from_session.is_empty() { q.from.clone() } else { format!("{}/{}", q.from, q.from_session) };
-    log_to(&q.repo, &format!("your {} → {who}: {}", q.session, text.chars().take(300).collect::<String>()));
-    with(&q.repo, |s| reply_locked(s, q, text, relied));
+    let held = with(&q.repo, |s| {
+        let pos = s.flow.approved.iter().position(|a| *a == (q.from.clone(), q.id));
+        if let Some(i) = pos { s.flow.approved.remove(i); }
+        let alone = pos.is_none() && !text.starts_with("(not answered");
+        if alone && !relied.is_empty() && !trusted_for(s, &q.from, &q.text) {
+            let mut inc = Incoming { from: q.from.clone(), id: q.id, session: q.session.clone(), text: format!("question: {}", q.text),
+                                     question: Some(q.clone()), ts: now(), from_session: q.from_session.clone(), kind: "question".into(),
+                                     history: vec![(Status::Delivered, now())], draft: Some((text.to_string(), relied.to_vec())), ..Default::default() };
+            inc.packet = json!({"held": format!("held for you: it promises {}, and {} isn't trusted on this topic", relied.join(", "), q.from)});
+            s.pending.push(inc);
+            s.dirty = true;
+            return true;
+        }
+        reply_locked(s, q, text, relied);
+        if alone { log_answer(s, q, text, !relied.is_empty()) }
+        false
+    }).unwrap_or(false);
+    if held {
+        alert(format!("qh: {who}'s question waits for you: the answer promises something"));
+        log_to(&q.repo, &format!("held your {}'s answer to {who}: it promises {}", q.session, relied.join(", ")));
+    } else {
+        log_to(&q.repo, &format!("your {} → {who}: {}", q.session, text.chars().take(300).collect::<String>()));
+    }
+}
+
+fn log_answer(s: &mut State, q: &Question, text: &str, promise: bool) {
+    s.flow.log.push(Answered { ts: now(), to: q.from.clone(), question: q.text.clone(), answer: text.to_string(), promise, taken_back: false });
+    let n = s.flow.log.len();
+    if n > 100 { s.flow.log.drain(..n - 100); }
+    push_fyi(s, "answered", format!("your agent answered {}: {}", q.from, clip_to(&q.text, 80)));
+    s.dirty = true;
+}
+
+/// May our agent promise `login` something about this question without us? Trusted, and the
+/// question names one of their topics (no topics picked: any).
+fn trusted_for(s: &State, login: &str, question: &str) -> bool {
+    if s.roles.get(login).map(String::as_str) != Some("trusted") { return false }
+    let topics = s.flow.topics.get(login).map(Vec::as_slice).unwrap_or(&[]);
+    let q = question.to_lowercase();
+    topics.is_empty() || topics.iter().any(|t| q.contains(&t.to_lowercase()))
+}
+
+/// Local clock time of `ts`: "14:00", with the day when it isn't today ("tomorrow 09:00").
+pub fn clock(ts: u64) -> String {
+    let off = crate::platform::utc_offset();
+    let local = |t: u64| t as i64 + off;
+    let (day, today) = (local(ts).div_euclid(86400), local(now()).div_euclid(86400));
+    let m = local(ts).rem_euclid(86400) / 60;
+    let hm = format!("{:02}:{:02}", m / 60, m % 60);
+    match day - today { 0 => hm, 1 => format!("tomorrow {hm}"), _ => format!("in {}d {hm}", day - today) }
+}
+
+/// The next local `hh:mm` from now (today if it's still ahead, else tomorrow).
+fn next_at(hour: i64, min: i64) -> u64 {
+    let off = crate::platform::utc_offset();
+    let t = now() as i64 + off;
+    let mut at = t.div_euclid(86400) * 86400 + hour * 3600 + min * 60;
+    if at <= t { at += 86400 }
+    (at - off).max(0) as u64
+}
+
+/// Later's choices: (words, when the card comes back; 0 = when you pick it from Asked you).
+pub fn later_choices() -> Vec<(String, u64)> {
+    let mut v = vec![("in 1 hour".to_string(), now() + 3600)];
+    let lunch = next_at(14, 0);
+    if lunch - now() < 12 * 3600 && lunch > now() + 3600 { v.push((format!("after lunch {}", clock(lunch)), lunch)) }
+    let morning = next_at(9, 0);
+    v.push((format!("tomorrow morning {}", clock(morning)), morning + if morning - now() < 6 * 3600 { 86400 } else { 0 }));
+    v.push(("when I'm done here".to_string(), 0));
+    v
+}
+
+/// Focusing: cards and notifications hold till then. None when not focusing.
+pub fn focusing() -> Option<u64> {
+    let f = FOCUS.load(Relaxed);
+    (f > now()).then_some(f)
+}
+
+/// Start focusing till `until` (0 stops). Teammates see it on your folder.
+pub fn set_focus(until: u64) -> Result<String, String> {
+    cur(|s| { s.flow.focus = until; s.flow.focus_told = until == 0; s.dirty = true; }).ok_or("team mode is off")?;
+    FOCUS.store(until, Relaxed);
+    bump();
+    Ok(if until == 0 { "focus off: cards and notifications are back".into() }
+       else { format!("focusing till {}: cards and notifications hold, teammates see it; your agent still answers facts", clock(until)) })
+}
+
+/// The default focus end: an hour from now, up to the next half hour.
+pub fn focus_default() -> u64 {
+    let t = now() + 3600;
+    t.div_ceil(1800) * 1800
+}
+
+/// Till when a teammate is focusing (0: they aren't).
+pub fn focus_of(login: &str) -> u64 {
+    cur(|s| s.peers.get(login).map(|p| p.focus).unwrap_or(0)).unwrap_or(0).max(0)
+}
+
+/// Handovers you accepted, newest first.
+pub fn taken() -> Vec<Incoming> {
+    cur(|s| s.flow.taken.iter().rev().cloned().collect()).unwrap_or_default()
+}
+
+/// Drop a handover from Taken over (it's finished).
+pub fn taken_done(from: &str, id: u64) {
+    cur(|s| { s.flow.taken.retain(|t| !(t.from == from && t.id == id)); s.dirty = true; });
+}
+
+/// Files a handover touches: its packet's list.
+pub fn packet_files(i: &Incoming) -> Vec<String> {
+    i.packet["files"].as_array().into_iter().flatten().filter_map(|f| f.as_str().map(String::from)).collect()
+}
+
+/// Other handovers, waiting or taken, that touch a file this one does: (from, shared files).
+pub fn clashes(i: &Incoming) -> Vec<(String, Vec<String>)> {
+    let mine = packet_files(i);
+    if mine.is_empty() { return vec![] }
+    cur(|s| s.pending.iter().filter(|x| x.question.is_none()).chain(s.flow.taken.iter())
+        .filter(|x| !(x.from == i.from && x.id == i.id))
+        .filter_map(|x| {
+            let both: Vec<String> = packet_files(x).into_iter().filter(|f| mine.contains(f)).collect();
+            (!both.is_empty()).then(|| (x.from.clone(), both))
+        }).collect()).unwrap_or_default()
+}
+
+/// What our agent told teammates without us, newest first.
+pub fn answer_log() -> Vec<Answered> {
+    cur(|s| s.flow.log.iter().rev().cloned().collect()).unwrap_or_default()
+}
+
+/// Take back an answer from the log (newest-first index): the teammate gets a correction.
+pub fn take_back(n: usize) -> Result<String, String> {
+    let a = cur(|s| {
+        let i = s.flow.log.len().checked_sub(n + 1)?;
+        let a = s.flow.log.get_mut(i)?;
+        if a.taken_back { return None }
+        a.taken_back = true;
+        s.dirty = true;
+        Some(a.clone())
+    }).flatten().ok_or("already taken back, or gone")?;
+    channel_send(&format!("@{}", a.to), &format!("Correction: please don't rely on my agent's answer to \"{}\" (\"{}\"). Ask me again.",
+                                                  clip_to(&a.question, 120), clip_to(&a.answer, 120)))?;
+    Ok(format!("took it back: {} gets a correction", a.to))
+}
+
+/// The topics a trusted teammate's promises may cover (empty: any).
+pub fn topics(login: &str) -> Vec<String> {
+    cur(|s| s.flow.topics.get(login).cloned().unwrap_or_default()).unwrap_or_default()
+}
+
+/// Add (or with `remove`, drop) a topic for a teammate.
+pub fn set_topic(login: &str, topic: &str, remove: bool) -> Result<String, String> {
+    let t = topic.trim().to_lowercase();
+    if t.is_empty() { return Err("no topic given".into()) }
+    cur(|s| {
+        let v = s.flow.topics.entry(login.to_string()).or_default();
+        v.retain(|x| *x != t);
+        if !remove { v.push(t.clone()) }
+        s.dirty = true;
+    }).ok_or("team mode is off")?;
+    Ok(if remove { format!("{login}: dropped topic {t}") } else { format!("{login}: your agent may promise them things about {t}") })
+}
+
+/// Our role for a teammate: viewer, member or trusted.
+pub fn role_of(login: &str) -> String {
+    cur(|s| s.roles.get(login).cloned().unwrap_or_else(|| "member".into())).unwrap_or_default()
+}
+
+/// Forget an expired or finished request of ours ("let it go").
+pub fn let_go(id: u64) {
+    cur(|s| { s.sent.retain(|o| o.id != id); s.dirty = true; });
+}
+
+/// Send an expired request of ours again, as a new one.
+pub fn send_again(id: u64) -> Result<String, String> {
+    let o = cur(|s| s.sent.iter().find(|o| o.id == id).cloned()).flatten().ok_or("no such request")?;
+    let r = send_from(&o.to, &o.session, &o.text, &o.from_session)?;
+    let_go(id);
+    Ok(r)
+}
+
+/// Days until a request of ours expires, from day 12 of 14 while it's still open (None before that).
+pub fn expires_in(o: &Outgoing) -> Option<u64> {
+    if o.status().done() || o.status() == Status::Replied { return None }
+    let age = now().saturating_sub(o.ts);
+    (age >= REQUEST_LIFE - 2 * 86400).then(|| (REQUEST_LIFE.saturating_sub(age)).div_ceil(86400))
 }
 
 /// Whether teammates' agents may ask ours: auto (answer, within the hourly budget), ask (you
@@ -2596,8 +2882,15 @@ pub fn act(from: &str, id: u64, action: Action) -> Result<Option<(String, String
             if let Some(r) = repo() { save_seen(&r) }
             Ok(None)
         }
-        Action::Later => cur(|s| s.pending.iter_mut().find(|i| i.from == from && i.id == id).map(|i| { i.snoozed = true; s.dirty = true; }))
-            .flatten().map(|_| None).ok_or_else(|| "that request isn't waiting any more".to_string()),
+        Action::Later(until) => cur(|s| {
+            let i = s.pending.iter_mut().find(|i| i.from == from && i.id == id)?;
+            i.snoozed = true;
+            i.until = until;
+            let tell = until > 0 && i.question.is_none();
+            if tell { status_out(s, from, id, Status::Seen, &format!("seen, back to it {}", clock(until))) }
+            s.dirty = true;
+            Some(())
+        }).flatten().map(|_| None).ok_or_else(|| "that request isn't waiting any more".to_string()),
     }
 }
 
@@ -4220,7 +4513,7 @@ pub fn list_team_files(cwd: &Path, to: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     #[test]
     fn editing_lists_only_hot_claims_of_online_teammates() {
         use std::collections::HashMap;
@@ -4434,6 +4727,130 @@ mod tests {
     }
 
     #[test]
+    fn a_handover_packet_arrives_is_kept_on_accept_and_clashes_are_found() {
+        let (ra, rb) = (format!("req/pk-a{}", std::process::id()), format!("req/pk-b{}", std::process::id()));
+        let mut alice = state("alice");
+        alice.repo = ra.clone();
+        let pk = |files: &[&str]| json!({"done": ["button"], "left": ["partial amount", "tests"], "files": files, "watch": "pence", "branch": "sam/refund"});
+        let mut bob = state("bob");
+        bob.repo = rb.clone();
+        bob.outbox.push(json!({"id": 5, "to": "alice", "session": "main", "text": "refund button", "ts": now(), "packet": pk(&["checkout.tsx", "api.ts"])}));
+        let mut carol = state("carol");
+        carol.outbox.push(json!({"id": 7, "to": "alice", "session": "main", "text": "error banner", "ts": now(), "packet": pk(&["checkout.tsx"])}));
+        let (bob_out, carol_out) = (bob.outbox.clone(), carol.outbox.clone());
+        { let mut g = STATES.lock().unwrap(); let m = g.get_or_insert_with(HashMap::new); m.insert(ra.clone(), alice); m.insert(rb.clone(), bob); }
+        let hooks = quiet();
+        let mut nc = false;
+        for (who, out) in [("bob", bob_out), ("carol", carol_out)] {
+            let mut p = peer(who, &["main"], true);
+            p.outbox = out;
+            take_in(&ra, &"alice".to_string(), None, p, &hooks, &mut nc);
+        }
+        with(&ra, |s| {
+            assert_eq!(s.pending.len(), 2);
+            assert_eq!(s.pending[0].packet["left"][0], "partial amount");
+            assert_eq!(s.pending[0].packet["branch"], "sam/refund");
+            decide_locked(s, "bob", 5, "once").unwrap();
+            assert_eq!(s.flow.taken.len(), 1, "an accepted handover stays in Taken over");
+            assert!(s.flow.taken[0].history.iter().any(|h| h.0 == Status::Accepted));
+        });
+        // carol's waiting handover touches checkout.tsx, as bob's taken one does
+        let carol_inc = with(&ra, |s| s.pending[0].clone()).unwrap();
+        let mine = packet_files(&carol_inc);
+        let others: Vec<(String, Vec<String>)> = with(&ra, |s| s.flow.taken.iter().filter_map(|x| {
+            let both: Vec<String> = packet_files(x).into_iter().filter(|f| mine.contains(f)).collect();
+            (!both.is_empty()).then(|| (x.from.clone(), both))
+        }).collect()).unwrap();
+        assert_eq!(others, [("bob".to_string(), vec!["checkout.tsx".to_string()])]);
+        let mut g = STATES.lock().unwrap();
+        let m = g.as_mut().unwrap();
+        m.remove(&ra);
+        m.remove(&rb);
+    }
+
+    #[test]
+    fn later_with_a_time_tells_the_sender_and_comes_back_by_itself() {
+        let mut s = state("alice");
+        s.pending = vec![Incoming { from: "bob".into(), id: 3, text: "job".into(), kind: "handover".into(),
+                                    history: vec![(Status::Delivered, now())], ..Default::default() }];
+        let i = s.pending.iter_mut().next().unwrap();
+        i.snoozed = true;
+        i.until = now() + 3600;
+        status_out(&mut s, "bob", 3, Status::Seen, &format!("seen, back to it {}", clock(now() + 3600)));
+        wake_locked(&mut s);
+        assert!(s.pending[0].snoozed, "not yet");
+        s.pending[0].until = now() - 1;
+        wake_locked(&mut s);
+        assert!(!s.pending[0].snoozed && s.pending[0].until == 0, "back on the card");
+        let m = s.outbox.last().unwrap();
+        assert_eq!((m["status"].as_str(), m["text"].as_str().map(|t| t.starts_with("seen, back to it "))), (Some("seen"), Some(true)));
+        // the sender's line shows it even though "seen" came before
+        let mut bob = state("bob");
+        bob.sent.push(Outgoing { id: 3, to: "alice".into(), text: "job".into(), history: vec![(Status::Queued, now()), (Status::Seen, now())], ..Default::default() });
+        let repo = format!("req/later{}", std::process::id());
+        bob.repo = repo.clone();
+        STATES.lock().unwrap().get_or_insert_with(HashMap::new).insert(repo.clone(), bob);
+        let mut p = peer("alice", &["main"], true);
+        p.outbox = vec![m.clone()];
+        take_in(&repo, &"bob".to_string(), None, p, &quiet(), &mut false);
+        assert!(with(&repo, |s| s.sent[0].reply.starts_with("seen, back to it")).unwrap());
+        STATES.lock().unwrap().as_mut().unwrap().remove(&repo);
+    }
+
+    #[test]
+    fn promises_go_alone_only_to_the_trusted_on_their_topics() {
+        let repo = format!("req/trust{}", std::process::id());
+        let mut s = state("alice");
+        s.repo = repo.clone();
+        s.roles.insert("sam".into(), "trusted".into());
+        s.flow.topics.insert("sam".into(), vec!["refund".into()]);
+        STATES.lock().unwrap().get_or_insert_with(HashMap::new).insert(repo.clone(), s);
+        let q = |id, from: &str, text: &str| Question { repo: repo.clone(), from: from.into(), from_session: String::new(), id, session: "main".into(), text: text.into() };
+        // a fact: goes to anyone, logged
+        reply(&q(1, "ravi", "which field?"), "currency", &[]);
+        // a promise to the trusted, on their topic: goes, logged as a promise
+        reply(&q(2, "sam", "are refunds idempotent?"), "yes, by refund id", &["refund_id".into()]);
+        // a promise off their topic, and one to someone untrusted: held with the answer ready
+        reply(&q(3, "sam", "payout schedule for EU?"), "weekly", &["payout_day".into()]);
+        reply(&q(4, "ravi", "is total in cents?"), "yes", &["total".into()]);
+        with(&repo, |s| {
+            let sent: Vec<u64> = s.outbox.iter().filter(|m| m["kind"] == "a").filter_map(|m| m["re"].as_u64()).collect();
+            assert_eq!(sent, [1, 2]);
+            assert_eq!(s.flow.log.iter().map(|a| (a.to.as_str(), a.promise)).collect::<Vec<_>>(), [("ravi", false), ("sam", true)]);
+            assert_eq!(s.pending.iter().map(|i| i.id).collect::<Vec<_>>(), [3, 4]);
+            assert_eq!(s.pending[0].draft.as_ref().unwrap().0, "weekly");
+            assert!(s.pending[0].packet["held"].as_str().unwrap().contains("isn't trusted on this topic"));
+        });
+        // a question you said yes to goes whatever it promises, and isn't logged as alone
+        with(&repo, |s| s.flow.approved.push(("ravi".into(), 9)));
+        reply(&q(9, "ravi", "port?"), "8080", &["PORT".into()]);
+        with(&repo, |s| {
+            assert!(s.outbox.iter().any(|m| m["kind"] == "a" && m["re"] == 9));
+            assert_eq!(s.flow.log.len(), 2);
+        });
+        STATES.lock().unwrap().as_mut().unwrap().remove(&repo);
+    }
+
+    #[test]
+    fn expiry_shows_from_day_twelve() {
+        let o = |age: u64| Outgoing { id: 1, ts: now() - age, history: vec![(Status::Delivered, now() - age)], ..Default::default() };
+        assert_eq!(expires_in(&o(11 * 86400)), None);
+        assert_eq!(expires_in(&o(12 * 86400)), Some(2));
+        assert_eq!(expires_in(&o(13 * 86400 + 100)), Some(1));
+        let mut done = o(13 * 86400);
+        done.history.push((Status::Accepted, now()));
+        assert_eq!(expires_in(&done), None);
+    }
+
+    #[test]
+    fn clock_says_today_or_tomorrow() {
+        let t = next_at(9, 0);
+        assert!(clock(t).ends_with("09:00"), "{}", clock(t));
+        assert!(t > now() && t <= now() + 86400);
+        assert!(later_choices().last().is_some_and(|c| c.1 == 0));
+    }
+
+    #[test]
     fn a_withdrawn_request_leaves_their_list_or_never_reaches_it() {
         let (ra, rb) = (format!("req/wd-a{}", std::process::id()), format!("req/wd-b{}", std::process::id()));
         let mut bob = state("bob");
@@ -4566,6 +4983,54 @@ mod tests {
         let ins: Vec<&str> = "x\nnew\ny".lines().collect();
         assert_eq!(changed_lines(&same, &ins), (vec![], vec![1]));
     }
+/// A team for the screen tests: two handovers that clash on checkout.tsx, a question held
+    /// because it promises something, one handover taken, answers sent alone, requests about to
+    /// expire, a trusted teammate on one topic who is focusing.
+    pub(crate) fn install_flow_demo(repo: &str) {
+        let mut s = state("kesav");
+        s.repo = repo.into();
+        s.key = Some(tc::new_team_key());
+        s.running = std::sync::Arc::new(AtomicBool::new(true));
+        let t = now();
+        for (login, online) in [("sam", true), ("priya", true), ("ravi", false)] {
+            let mut p = Peer { login: login.into(), online, joined: true, ts: t, ..Default::default() };
+            p.sessions = vec![("ui".into(), "working".into(), String::new())];
+            if login == "sam" { p.focus = t + 3600 }
+            s.peers.insert(login.into(), p);
+        }
+        s.roles.insert("sam".into(), "trusted".into());
+        s.flow.topics.insert("sam".into(), vec!["refunds".into()]);
+        let pk = |files: &[&str], left: &[&str]| json!({"done": ["button + confirm dialog", "calls POST /refunds (full only)"], "left": left,
+            "files": files, "watch": "amount is in minor units (pence)", "branch": "sam/refund-btn"});
+        let inc = |from: &str, id, text: &str, packet: Value| Incoming { from: from.into(), id, session: "main".into(), text: text.into(),
+            ts: t - 600, kind: "handover".into(), history: vec![(Status::Delivered, t - 600)], packet, ..Default::default() };
+        s.pending.push(inc("priya", 7, "[from priya's agent] api error banner on checkout", pk(&["checkout.tsx"], &["banner copy"])));
+        let q = Question { repo: repo.into(), from: "ravi".into(), from_session: String::new(), id: 9, session: "main".into(), text: "is total in cents?".into() };
+        s.pending.push(Incoming { from: "ravi".into(), id: 9, session: "main".into(), text: "question: is total in cents?".into(), question: Some(q),
+            kind: "question".into(), ts: t - 60, history: vec![(Status::Delivered, t - 60)], draft: Some(("yes, always cents".into(), vec!["total".into()])),
+            packet: json!({"held": "held for you: it promises total, and ravi isn't trusted on this topic"}), ..Default::default() });
+        let mut took = inc("sam", 5, "[from sam's agent] refund button wiring", pk(&["checkout.tsx", "RefundButton.tsx", "api/refunds.ts"],
+                                                                                   &["partial amount field", "error state when refund fails", "tests in checkout.test.tsx"]));
+        took.history.push((Status::Accepted, t - 300));
+        s.flow.taken.push(took);
+        s.flow.log = vec![
+            Answered { ts: t - 7200, to: "sam".into(), question: "which currency field does refund.created use?".into(), answer: "currency, ISO 4217".into(), ..Default::default() },
+            Answered { ts: t - 3600, to: "sam".into(), question: "can I rely on refunds being idempotent?".into(), answer: "yes, by refund id".into(), promise: true, ..Default::default() },
+        ];
+        s.sent = vec![
+            Outgoing { id: 1, to: "sam".into(), session: "ui".into(), text: "handover: checkout tests".into(), kind: "handover".into(), ts: t - 12 * 86400,
+                       history: vec![(Status::Queued, t - 12 * 86400), (Status::Delivered, t - 12 * 86400)], ..Default::default() },
+            Outgoing { id: 2, to: "ravi".into(), session: "main".into(), text: "question: payout cutoff?".into(), kind: "question".into(), ts: t - 14 * 86400,
+                       history: vec![(Status::Delivered, t - 14 * 86400), (Status::Expired, t - 3600)], ..Default::default() },
+        ];
+        STATES.lock().unwrap().get_or_insert_with(HashMap::new).insert(repo.into(), s);
+        set_current(repo);
+    }
+
+    pub(crate) fn drop_demo(repo: &str) {
+        STATES.lock().unwrap().as_mut().unwrap().remove(repo);
+    }
+
     fn state(me: &str) -> State {
         State {
             repo: "o/r".into(), me: me.into(), peers: HashMap::new(), error: String::new(), key: None, outbox: vec![], next_id: 0, sent: vec![], fyi: vec![], last_open: 0,
@@ -4574,7 +5039,7 @@ mod tests {
             asked_github: HashMap::new(), warned: vec![], my_sha: String::new(),
             chat: vec![], my_chat: vec![], chat_seen: HashMap::new(), my_notes: vec![], notes_seen: HashMap::new(), claims: HashMap::new(), unmerged: HashMap::new(),
             uses: HashMap::new(), waiting: vec![], sheets: HashMap::new(), asked: vec![], answered: vec![], answers: "auto".into(),
-            answerer: None, promises: vec![], last_answer: HashMap::new(), unread: 0, dirty: false, running: Default::default(), finished: Default::default(),
+            answerer: None, promises: vec![], last_answer: HashMap::new(), unread: 0, dirty: false, flow: Flow::default(), running: Default::default(), finished: Default::default(),
             secret: None, my_dms: vec![], my_groups: vec![], my_gmsgs: vec![], groups: HashMap::new(), msgs: vec![],
             msg_ids: Default::default(), chan_unread: HashMap::new(), cleared: HashMap::new(), pinged: vec![],
         }

@@ -314,6 +314,7 @@ enum To {
     Reply(String, u64),       // writing back to a waiting request
     SendBack(String, String), // what a held push needs before it goes: (pusher, commit)
     Decline(String, u64),     // why we're saying no to a request (may be left empty)
+    Topic(String),            // a topic a trusted teammate's promises may cover
 }
 
 /// Pushes handed to you that you haven't decided yet: they head the Requests tab.
@@ -329,17 +330,22 @@ const ACTIVITY: usize = 5;
 const OUTGOING: usize = 6;
 const EDITING: usize = 7;
 const AGREE: usize = 8;
+const TAKEN: usize = 9;
+const ANSWERED: usize = 10;
 
-/// The menu down the left, in order: (page, group heading it starts, name). Number keys pick by place.
-const MENU: [(usize, Option<&str>, &str); 9] = [
+/// The menu down the left, in order: (page, group heading it starts, name). Number keys pick by
+/// place (0 is the tenth); the last is reached with ← then ↑↓.
+const MENU: [(usize, Option<&str>, &str); 11] = [
     (0, None, "Home"),
     (REQUESTS, Some("NEEDS YOU"), "Asked you"),
     (OUTGOING, None, "You asked"),
-    (EDITING, Some("YOUR WORK"), "Who's editing"),
+    (TAKEN, Some("YOUR WORK"), "Taken over"),
+    (EDITING, None, "Who's editing"),
     (AGREE, None, "Agreements"),
     (ISSUES, None, "Tasks"),
     (PRS, None, "Pull requests"),
     (CHAT, Some("TEAM"), "Chat"),
+    (ANSWERED, None, "Agent answered"),
     (ACTIVITY, None, "Activity"),
 ];
 const MENU_W: u16 = 34;
@@ -351,11 +357,14 @@ fn menu_pos(tab: usize) -> usize {
 #[derive(Default)]
 pub struct TeamView {
     tab: usize,
-    sel: [usize; 9],
+    sel: [usize; 11],
+    later: Option<(String, u64, usize)>, // picking when a put-off request comes back: (from, id, choice)
     typing: Option<(To, String)>,
     scroll: u16,
     person: usize, // the map's selected person
     detail: bool,  // the map opened on one person
+    in_menu: bool, // ← moved focus to the menu: ↑/↓ change page, → or Enter go back in
+    menu_at: Rect, // where the menu was drawn, for clicks
     away_shown: bool, // "while you were away" was on screen on Home
     away_done: bool,  // ...and you left Home since: it's not shown again this time
 }
@@ -364,7 +373,8 @@ impl TeamView {
     pub fn open(cwd: &Path) -> Self {
         if let Some((_, r)) = crate::team::github_repo(cwd) { gh_refresh(&r, false) }
         // a request waiting: open on it
-        let tab = if crate::team::pending().iter().all(|i| i.snoozed) && open_holds().is_empty() { 0 } else { REQUESTS };
+        let quiet = crate::team::pending().iter().all(|i| i.snoozed) && open_holds().is_empty();
+        let tab = if quiet || crate::team::focusing().is_some() { 0 } else { REQUESTS };
         Self { tab, ..Self::default() }
     }
 
@@ -392,6 +402,25 @@ impl TeamView {
         }
     }
 
+    /// A click on a menu entry opens that page. True when the click landed on the menu.
+    pub fn click(&mut self, col: u16, row: u16) -> bool {
+        let m = self.menu_at;
+        if col < m.x || col >= m.x + m.width || row < m.y || row >= m.y + m.height { return false }
+        let mut y = m.y;
+        for (tab, group, _) in MENU.iter() {
+            if group.is_some() { y += 2 }
+            if row == y || row == y + 1 {
+                self.tab = *tab;
+                self.scroll = 0;
+                self.detail = false;
+                self.in_menu = false;
+                return true;
+            }
+            y += 2;
+        }
+        true
+    }
+
     pub fn key(&mut self, k: KeyEvent, hub: &std::sync::Arc<Hub>, cwd: &Path) -> Act {
         // writing a message: the keys are the text
         if let Some((to, text)) = self.typing.as_mut() {
@@ -409,6 +438,7 @@ impl TeamView {
                     }
                     if text.is_empty() { return Act::None }
                     let r = match to {
+                        To::Topic(who) => crate::team::set_topic(&who, &text, false),
                         To::Chat(c) => crate::team::channel_send(&c, &text),
                         To::Question(who, s) => crate::team::ask_person_agent(&who, &s, &text),
                         To::Task(who, s) => crate::team::send(&who, &s, &text),
@@ -424,12 +454,58 @@ impl TeamView {
             }
             return Act::None;
         }
+        // later: until when?
+        if let Some((from, id, pick)) = self.later.as_mut() {
+            let choices = crate::team::later_choices();
+            match k.code {
+                KeyCode::Esc => self.later = None,
+                KeyCode::Up | KeyCode::Char('k') => *pick = pick.checked_sub(1).unwrap_or(choices.len() - 1),
+                KeyCode::Down | KeyCode::Char('j') => *pick = (*pick + 1) % choices.len(),
+                KeyCode::Enter => {
+                    let (from, id, (words, at)) = (from.clone(), *id, choices[(*pick).min(choices.len() - 1)].clone());
+                    self.later = None;
+                    return match crate::team::act(&from, id, crate::team::Action::Later(at)) {
+                        Ok(_) if at == 0 => Act::Note(format!("later: {from}'s request is off the card, still in Asked you")),
+                        Ok(_) => Act::Note(format!("later: {from}'s card comes back {words}; they see when you'll get to it")),
+                        Err(e) => Act::Err(e),
+                    };
+                }
+                _ => {}
+            }
+            return Act::None;
+        }
+        // f: focus till the next half hour after an hour, f again stops
+        if k.code == KeyCode::Char('f') && !(self.tab == 0 && self.detail) {
+            let until = if crate::team::focusing().is_some() { 0 } else { crate::team::focus_default() };
+            return match crate::team::set_focus(until) { Ok(m) => Act::Note(m), Err(e) => Act::Err(e) };
+        }
+        // g on any page: go to the request on the card, picked, to answer it there
+        if k.code == KeyCode::Char('g') && self.tab != REQUESTS && crate::team::focusing().is_none() {
+            let pending = crate::team::pending();
+            if let Some(n) = pending.iter().position(|i| !i.snoozed) {
+                self.tab = REQUESTS;
+                self.sel[REQUESTS] = open_holds().len() + n;
+                self.scroll = 0;
+                return Act::None;
+            }
+        }
         // someone asking to join: l lets them in, n doesn't
         if let Some(who) = crate::team::join_requests().first().cloned() {
             match k.code {
                 KeyCode::Char('l') => { crate::team::let_in(&who); return Act::Note(format!("letting {who} in")) }
                 KeyCode::Char('n') => { crate::team::not_now(&who); return Act::None }
                 _ => {}
+            }
+        }
+        // the menu has the focus: arrows move through pages, nothing on the page reacts
+        if self.in_menu {
+            let step = |t: usize, d: usize| MENU[(menu_pos(t) + d) % MENU.len()].0;
+            match k.code {
+                KeyCode::Down | KeyCode::Char('j') => { self.tab = step(self.tab, 1); self.scroll = 0; self.detail = false; return Act::None }
+                KeyCode::Up | KeyCode::Char('k') => { self.tab = step(self.tab, MENU.len() - 1); self.scroll = 0; self.detail = false; return Act::None }
+                KeyCode::Right | KeyCode::Enter => { self.in_menu = false; return Act::None }
+                KeyCode::Left => return Act::None,
+                _ => self.in_menu = false,
             }
         }
         // requests are answered only in their own tab, one picked request at a time: a key
@@ -457,10 +533,7 @@ impl TeamView {
                     }
                     // work: say why (or just Enter); the sender reads it with the no
                     KeyCode::Char('d') => { self.typing = Some((To::Decline(i.from.clone(), i.id), String::new())); return Act::None }
-                    KeyCode::Char('l') => return match crate::team::act(&i.from, i.id, crate::team::Action::Later) {
-                        Ok(_) => Act::Note(format!("later: {}'s request is off the card, still in Asked you", i.from)),
-                        Err(e) => Act::Err(e),
-                    },
+                    KeyCode::Char('l') => { self.later = Some((i.from.clone(), i.id, 0)); return Act::None }
                     KeyCode::Char('r') => { self.typing = Some((To::Reply(i.from.clone(), i.id), String::new())); return Act::None }
                     _ => {}
                 }
@@ -470,8 +543,46 @@ impl TeamView {
             let sent = crate::team::outgoing();
             if let Some(o) = sent.get(self.sel[OUTGOING].min(sent.len().saturating_sub(1))) {
                 match k.code {
+                    KeyCode::Char('s') | KeyCode::Char('r') if o.status() == Status::Expired => return match crate::team::send_again(o.id) {
+                        Ok(_) => Act::Note(format!("sent to {} again, as a new request", o.to)), Err(e) => Act::Err(e) },
+                    KeyCode::Char('x') if o.status().done() => { crate::team::let_go(o.id); return Act::Note("let it go".into()) }
                     KeyCode::Char('s') => return match crate::team::resend(o.id) { Ok(()) => Act::Note(format!("sent to {} again", o.to)), Err(e) => Act::Err(e) },
                     KeyCode::Char('w') => return match crate::team::withdraw(o.id) { Ok(()) => Act::Note(format!("took back your request to {}; they're told", o.to)), Err(e) => Act::Err(e) },
+                    _ => {}
+                }
+            }
+        }
+        if self.tab == TAKEN {
+            let t = crate::team::taken();
+            if let Some(i) = t.get(self.sel[TAKEN].min(t.len().saturating_sub(1))) {
+                match k.code {
+                    KeyCode::Enter => return Act::Work(format!("{}'s handover", i.from), handover_prompt(i)),
+                    KeyCode::Char('m') => {
+                        let at = format!("@{}", i.from);
+                        if let Some(n) = crate::team::channels().iter().position(|c| c.id == at) { self.sel[CHAT] = n }
+                        self.tab = CHAT;
+                        self.typing = Some((To::Chat(at), String::new()));
+                        return Act::None;
+                    }
+                    KeyCode::Char('d') => { crate::team::taken_done(&i.from, i.id); return Act::Note(format!("{}'s handover is done: off the list", i.from)) }
+                    _ => {}
+                }
+            }
+        }
+        if self.tab == ANSWERED && k.code == KeyCode::Char('u') {
+            return match crate::team::take_back(self.sel[ANSWERED]) { Ok(m) => Act::Note(m), Err(e) => Act::Err(e) };
+        }
+        if self.tab == 0 && self.detail {
+            if let Some(s) = self.picked_session(hub, &Self::root(cwd)).filter(|s| !s.who.is_empty()) {
+                match k.code {
+                    KeyCode::Char('t') => {
+                        let to = if crate::team::role_of(&s.who) == "trusted" { "member" } else { "trusted" };
+                        let r = crate::team::repo().ok_or("team mode is off".to_string()).and_then(|r| crate::team::set_role(&r, &s.who, to));
+                        return match r { Ok(_) if to == "trusted" => Act::Note(format!("{} is trusted: your agent answers them alone, promises too (+ to limit it to topics)", s.who)),
+                                         Ok(_) => Act::Note(format!("stopped trusting {}: answers that promise something wait for you", s.who)),
+                                         Err(e) => Act::Err(e) };
+                    }
+                    KeyCode::Char('+') => { self.typing = Some((To::Topic(s.who.clone()), String::new())); return Act::None }
                     _ => {}
                 }
             }
@@ -520,9 +631,11 @@ impl TeamView {
         match k.code {
             KeyCode::Esc => return Act::Close,
             KeyCode::Char('t') if k.modifiers.contains(KeyModifiers::CONTROL) => return Act::Close,
-            KeyCode::Right | KeyCode::Tab => { self.tab = MENU[(menu_pos(self.tab) + 1) % MENU.len()].0; self.scroll = 0 }
-            KeyCode::Left | KeyCode::BackTab => { self.tab = MENU[(menu_pos(self.tab) + MENU.len() - 1) % MENU.len()].0; self.scroll = 0 }
+            KeyCode::Left => self.in_menu = true,
+            KeyCode::Tab => { self.tab = MENU[(menu_pos(self.tab) + 1) % MENU.len()].0; self.scroll = 0 }
+            KeyCode::BackTab => { self.tab = MENU[(menu_pos(self.tab) + MENU.len() - 1) % MENU.len()].0; self.scroll = 0 }
             KeyCode::Char(c @ '1'..='9') => { self.tab = MENU[c as usize - '1' as usize].0; self.scroll = 0 }
+            KeyCode::Char('0') => { self.tab = MENU[9].0; self.scroll = 0 }
             KeyCode::Up | KeyCode::Char('k') => { *sel = sel.checked_sub(1).unwrap_or(n.saturating_sub(1)); self.scroll = 0 }
             KeyCode::Down | KeyCode::Char('j') => { *sel = (*sel + 1) % n.max(1); self.scroll = 0 }
             KeyCode::PageUp => self.scroll = self.scroll.saturating_add(10),
@@ -554,6 +667,8 @@ impl TeamView {
             OUTGOING => crate::team::outgoing().len(),
             EDITING => editing_rows(&people(hub, root)).len(),
             AGREE => contracts(&people(hub, root)).len(),
+            TAKEN => crate::team::taken().len(),
+            ANSWERED => crate::team::answer_log().len(),
             _ => crate::team::activity().len(),
         }
     }
@@ -596,11 +711,16 @@ impl TeamView {
         let head = format!(" {} ", repo.clone().unwrap_or_else(|| "not in a team".into()));
         let right = format!("● {online} online · {} teammates ", ppl.len().saturating_sub(1));
         let need = crate::team::pending().iter().filter(|i| !i.snoozed).count() + open_holds().len();
-        let need_s = if need > 0 { format!("   {need} need{} you", if need == 1 { "s" } else { "" }) } else { String::new() };
+        let focus = crate::team::focusing();
+        let need_s = match focus {
+            Some(t) => format!("   focusing till {} · {need} waiting", crate::team::clock(t)),
+            None if need > 0 => format!("   {need} need{} you", if need == 1 { "s" } else { "" }),
+            None => String::new(),
+        };
         let gap = (top.width as usize).saturating_sub(head.chars().count() + 5 + need_s.chars().count() + right.chars().count());
         f.render_widget(Paragraph::new(Line::from(vec![
             Span::styled(head, theme::bold(theme::ink())), Span::styled("team", theme::fg(theme::dim())),
-            Span::styled(need_s, theme::bold(theme::orange())),
+            Span::styled(need_s, if focus.is_some() { theme::fg(theme::dim()) } else { theme::bold(theme::orange()) }),
             Span::raw(" ".repeat(gap)), Span::styled(right, theme::fg(theme::ink2())),
         ])).block(Block::new().borders(Borders::BOTTOM).border_style(theme::fg(theme::line()))), top);
 
@@ -618,10 +738,13 @@ impl TeamView {
         let pending = crate::team::pending();
         let joins = crate::team::join_requests();
         // the card: the oldest request not put off till later, docked under every page but Asked you
-        let card = pending.iter().find(|i| !i.snoozed).filter(|_| self.tab != REQUESTS).cloned();
-        let wait_h = if !joins.is_empty() { 3 } else if card.is_some() { 4 } else { 0 };
+        let card = pending.iter().find(|i| !i.snoozed).filter(|_| self.tab != REQUESTS && crate::team::focusing().is_none()).cloned();
+        let clash = card.as_ref().map(crate::team::clashes).unwrap_or_default();
+        let later_n = crate::team::later_choices().len() as u16;
+        let wait_h = if self.later.is_some() { later_n + 2 } else if !joins.is_empty() { 3 } else if card.is_some() { 4 + u16::from(!clash.is_empty()) } else { 0 };
         let input_h = if self.typing.is_some() { 1 } else { 0 };
         let [menu, inner] = Layout::horizontal([Constraint::Length(MENU_W.min(inner.width / 2)), Constraint::Min(10)]).areas(inner);
+        self.menu_at = menu;
         let [body, wait, input, hint] = Layout::vertical([
             Constraint::Min(3), Constraint::Length(wait_h), Constraint::Length(input_h), Constraint::Length(1),
         ]).areas(inner);
@@ -655,6 +778,10 @@ impl TeamView {
             ISSUES => self.draw_list(f, body, gh.issues.iter().map(|(n, t, a)| (format!("#{n}"), t.clone(), if a.is_empty() { "open".into() } else { format!("→ {a}") })).collect(),
                                 gh.loading, &gh.error, "no open issues"),
             OUTGOING => self.draw_outgoing(f, body),
+            TAKEN => self.draw_taken(f, body),
+            ANSWERED => self.draw_list(f, body, crate::team::answer_log().into_iter().map(|a| (crate::team::clock(a.ts), format!("{}: {}", a.to, a.question),
+                                format!("\"{}\" · {}", clip(&a.answer.replace('\n', " "), 40), if a.taken_back { "taken back" } else if a.promise { "promise" } else { "fact" }))).collect(),
+                                false, "", "your agent hasn't answered anyone without you yet"),
             EDITING => { let rows = editing_rows(&ppl); self.draw_list(f, body, rows, false, "", "nobody is changing code that isn't on main") }
             AGREE => self.draw_list(f, body, contracts(&ppl).into_iter().map(|(a, b, n)| (n, format!("{b} counts on it"), format!("made by {a}"))).collect(),
                                 false, "", "no agreements yet: when a teammate's code uses a name yours made, it shows here"),
@@ -663,7 +790,14 @@ impl TeamView {
             _ => self.draw_list(f, body, crate::team::activity().into_iter().map(|(t, x)| (t, x, String::new())).collect(), false, "", "nothing yet this session"),
         }
 
-        if let Some(who) = joins.first() {
+        if let Some((from, _, pick)) = &self.later {
+            let mut lines = vec![Line::styled(format!(" LATER, UNTIL WHEN? · {from}'s request"), theme::bold(theme::ink()))];
+            for (n, (words, _)) in crate::team::later_choices().into_iter().enumerate() {
+                lines.push(if n == *pick { Line::from(vec![Span::styled("  › ", theme::bold(theme::orange())), Span::styled(words, theme::bold(theme::ink()))]) }
+                           else { Line::styled(format!("    {words}"), theme::fg(theme::ink2())) });
+            }
+            f.render_widget(Paragraph::new(lines).block(Block::new().borders(Borders::TOP).border_style(theme::fg(theme::line()))), wait);
+        } else if let Some(who) = joins.first() {
             let more = if joins.len() > 1 { format!("  (+{} more)", joins.len() - 1) } else { String::new() };
             f.render_widget(Paragraph::new(vec![
                 Line::styled(format!(" {who} wants to join the team{more}"), Style::new().fg(theme::orange()).add_modifier(Modifier::BOLD)),
@@ -673,13 +807,17 @@ impl TeamView {
             let more = pending.iter().filter(|x| !x.snoozed).count() - 1;
             let what = if i.question.is_some() { "asks your" } else { "hands you work for your" };
             let ww = wait.width as usize;
-            f.render_widget(Paragraph::new(vec![
+            let mut lines = vec![
                 Line::from(vec![Span::styled(" ● ", theme::bold(theme::orange())), Span::styled(i.from.clone(), theme::bold(theme::ink())),
                                 Span::styled(format!(" {what} {} · {}", i.session, crate::team::ago(i.ts)), theme::fg(theme::dim())),
                                 Span::styled(if more > 0 { format!("   + {more} more") } else { String::new() }, theme::fg(theme::ink2()))]),
                 Line::styled(format!("   {}", clip(&i.text.replace('\n', " "), ww.saturating_sub(4))), theme::fg(theme::ink())),
-                Line::styled(format!("   {} to answer: accept, reply, decline or later · nothing runs until you accept", menu_pos(REQUESTS) + 1), theme::fg(theme::dim())),
-            ]).block(Block::new().borders(Borders::TOP).border_style(theme::fg(theme::line()))), wait);
+            ];
+            if let Some((who, files)) = clash.first() {
+                lines.push(Line::styled(format!("   {}", clip(&format!("⚠ {who} also handed you {}", files.join(", ")), ww.saturating_sub(3))), theme::bold(theme::orange())));
+            }
+            lines.push(Line::styled("   g go to it: accept, reply, decline or later there · nothing runs until you accept", theme::fg(theme::dim())));
+            f.render_widget(Paragraph::new(lines).block(Block::new().borders(Borders::TOP).border_style(theme::fg(theme::line()))), wait);
         }
         if let Some((to, text)) = &self.typing {
             let label = match to {
@@ -691,6 +829,7 @@ impl TeamView {
                 To::Reply(who, _) => format!(" reply to {who} (no work starts) › "),
                 To::SendBack(who, _) => format!(" send {who}'s push back: what must change › "),
                 To::Decline(who, _) => format!(" why not, {who}? (Enter alone just says no) › "),
+                To::Topic(who) => format!(" a topic {who}'s questions may get promises on (e.g. refunds) › "),
             };
             f.render_widget(Paragraph::new(Line::from(vec![
                 Span::styled(label, Style::new().fg(accent).add_modifier(Modifier::BOLD)),
@@ -698,17 +837,23 @@ impl TeamView {
             ])), input);
         }
         let keys = match (self.typing.is_some(), self.tab) {
+            _ if self.later.is_some() => "↑↓ pick · Enter put it off till then · Esc cancel",
+            (false, _) if self.in_menu => "↑↓ pages · → or Enter go into the page · Esc back",
             (true, _) => "Enter send · Esc cancel · @login pings someone, @team everyone",
             (_, 0) if !self.detail => "↑↓ pick · Enter open · a ask their agent · p private message · m message the team · 1-9 pages · Esc back",
-            (_, 0) => "↑↓ sessions · Enter open yours / give their agent a task · m message · Esc back to the map",
-            (_, CHAT) => "↑↓ channel · Enter or m write · x clear a private thread · /dm <login> and /team group <name> <logins> from the prompt · ←→ pages · Esc back",
-            (_, REQUESTS) if self.sel[REQUESTS] < open_holds().len() => "↑↓ pick · Enter or a approve the push · s send back with a note · r talk it through · ←→ pages · Esc back",
-            (_, REQUESTS) => "↑↓ pick · Enter or a accept · r reply · d decline (say why) · l later · A always answer their questions · ←→ pages · Esc back",
-            (_, OUTGOING) => "↑↓ pick · s send again · w take it back · ←→ pages · Esc back",
-            (_, ISSUES) => "↑↓ pick · Enter start it in its own branch and session · r refresh · ←→ pages · Esc back",
-            (_, PRS) => "↑↓ pick · Enter have your current session review it · r refresh · ←→ pages · Esc back",
-            _ => "↑↓ scroll · ←→ pages · Esc back",
+            (_, 0) => "↑↓ sessions · Enter open yours / give their agent a task · t trust or stop · + topic · m message · Esc back to the map",
+            (_, CHAT) => "↑↓ channel · Enter or m write · x clear a private thread · /dm <login> and /team group <name> <logins> from the prompt · ← menu · Esc back",
+            (_, REQUESTS) if self.sel[REQUESTS] < open_holds().len() => "↑↓ pick · Enter or a approve the push · s send back with a note · r talk it through · ← menu · Esc back",
+            (_, REQUESTS) => "↑↓ pick · Enter or a accept · r reply · d decline (say why) · l later · A always answer their questions · ← menu · Esc back",
+            (_, OUTGOING) => "↑↓ pick · s send again · w take it back · x let an expired one go · ← menu · Esc back",
+            (_, TAKEN) => "↑↓ pick · Enter start on what's left · m ask them · d done · ← menu · Esc back",
+            (_, ANSWERED) => "↑↓ pick · u take back an answer (they get a correction) · ← menu · Esc back",
+            (_, ISSUES) => "↑↓ pick · Enter start it in its own branch and session · r refresh · ← menu · Esc back",
+            (_, PRS) => "↑↓ pick · Enter have your current session review it · r refresh · ← menu · Esc back",
+            _ => "↑↓ scroll · ← menu · Esc back",
         };
+        let keys = if self.later.is_some() || self.typing.is_some() { keys.to_string() }
+                   else { format!("f {} · {keys}", if crate::team::focusing().is_some() { "stop focusing" } else { "focus" }) };
         f.render_widget(Paragraph::new(Line::styled(format!(" {keys}"), Style::new().fg(theme::dim()))), hint);
     }
 
@@ -740,6 +885,12 @@ impl TeamView {
                 ISSUES => (gh.issues.len().to_string(), "open issues".into(), false),
                 PRS => (gh.prs.len().to_string(), "open pull requests".into(), false),
                 CHAT => (unread.to_string(), if unread > 0 { format!("{unread} unread") } else { "team, private, groups".into() }, unread > 0),
+                TAKEN => { let n = crate::team::taken().len(); (n.to_string(), "handovers you accepted".into(), false) }
+                ANSWERED => {
+                    let log = crate::team::answer_log();
+                    let p = log.iter().filter(|a| a.promise && !a.taken_back).count();
+                    (log.len().to_string(), if p > 0 { format!("without you · {p} promised") } else { "without you".into() }, false)
+                }
                 _ => (String::new(), "everything that happened".into(), false),
             }
         };
@@ -753,11 +904,12 @@ impl TeamView {
             let here = self.tab == *tab;
             let (count, what, hot) = sub(*tab);
             let count = if count == "0" { String::new() } else { count };
-            let left = format!(" {}  {name}", i + 1);
+            let num = match i { 0..=8 => (i + 1).to_string(), 9 => "0".into(), _ => " ".into() };
+            let left = format!(" {num}  {name}");
             let pad = w.saturating_sub(left.chars().count() + count.chars().count());
             lines.push(Line::from(vec![
-                Span::styled(format!(" {}", i + 1), if here { theme::bold(theme::orange()) } else { theme::fg(theme::dim()) }),
-                Span::styled(format!("  {name}"), theme::bold(if here { theme::ink() } else { theme::ink2() })),
+                Span::styled(format!(" {num}"), if here { theme::bold(theme::orange()) } else { theme::fg(theme::dim()) }),
+                Span::styled(format!("{}{name}", if here && self.in_menu { " ▸" } else { "  " }), theme::bold(if here { theme::ink() } else { theme::ink2() })),
                 Span::raw(" ".repeat(pad)),
                 Span::styled(count, if hot { theme::bold(theme::orange()) } else { theme::fg(theme::ink2()) }),
             ]));
@@ -766,12 +918,68 @@ impl TeamView {
         f.render_widget(Paragraph::new(lines).block(Block::new().borders(Borders::RIGHT).border_style(theme::fg(theme::line()))), area);
     }
 
+    /// Handovers you accepted: the packet the sender's agent wrote, and any clash.
+    fn draw_taken(&mut self, f: &mut Frame, area: Rect) {
+        let t = crate::team::taken();
+        let area = Rect { x: area.x + 1, width: area.width.saturating_sub(2), ..area };
+        if t.is_empty() {
+            f.render_widget(Paragraph::new("\n  Nothing taken over. When you accept a teammate's handover, it stays here with what's done, what's left and the files.")
+                .style(theme::fg(theme::dim())).wrap(Wrap { trim: false }), area);
+            return;
+        }
+        self.sel[TAKEN] = self.sel[TAKEN].min(t.len() - 1);
+        let w = area.width as usize;
+        let mut lines = vec![Line::raw("")];
+        let mut sel_line = 0;
+        for (n, i) in t.iter().enumerate() {
+            let on = n == self.sel[TAKEN];
+            if on { sel_line = lines.len() }
+            let at = i.history.iter().rev().find(|h| h.0 == Status::Accepted).map_or(i.ts, |h| h.1);
+            lines.push(Line::styled(clip(&format!("{} {} · from {} · accepted {}", if on { "▸" } else { " " },
+                clip(crate::team::bare(&i.text).lines().next().unwrap_or(""), 60), i.from, crate::team::ago(at)), w),
+                if on { theme::inverted() } else { theme::bold(theme::ink()) }));
+            let p = &i.packet;
+            if !p.is_object() {
+                lines.push(Line::styled("    no packet: their agent didn't write one (m asks them)", theme::fg(theme::dim())));
+            }
+            if let Some(b) = p["branch"].as_str().filter(|b| !b.is_empty()) { lines.push(Line::styled(format!("    branch {b}"), theme::fg(theme::ink2()))) }
+            let list = |k: &str| p[k].as_array().into_iter().flatten().filter_map(|x| x.as_str().map(String::from)).collect::<Vec<_>>();
+            if on {
+                for (head, k, mark) in [("DONE", "done", "✓"), ("LEFT", "left", "○")] {
+                    let v = list(k);
+                    if v.is_empty() { continue }
+                    lines.push(Line::styled(format!("    {head}"), theme::bold(theme::ink())));
+                    for x in v { lines.push(Line::styled(pad(&format!("{mark} {x}"), w), theme::fg(if k == "left" { theme::ink() } else { theme::ink2() }))) }
+                }
+                if let Some(x) = p["watch"].as_str().filter(|x| !x.is_empty()) {
+                    lines.push(Line::styled("    WATCH OUT", theme::bold(theme::ink())));
+                    for l in crate::ui::wrap(x, w.saturating_sub(6).max(10)) { lines.push(Line::styled(format!("    {l}"), theme::fg(theme::ink2()))) }
+                }
+            } else if p.is_object() {
+                lines.push(Line::styled(format!("    {} left", list("left").len()), theme::fg(theme::dim())));
+            }
+            let files = crate::team::packet_files(i);
+            if !files.is_empty() { lines.push(Line::styled(pad(&format!("files: {}", files.join(" · ")), w), theme::fg(theme::dim()))) }
+            for (who, both) in crate::team::clashes(i) {
+                lines.push(Line::styled(pad(&format!("⚠ clashes with {who}'s handover: {}", both.join(", ")), w), theme::bold(theme::orange())));
+            }
+            lines.push(Line::raw(""));
+        }
+        f.render_widget(Paragraph::new(lines).scroll((sel_line.saturating_sub(1) as u16, 0)), area);
+    }
+
     /// What you asked teammates, newest first, with where each one stands.
     fn draw_outgoing(&mut self, f: &mut Frame, area: Rect) {
         let rows = crate::team::outgoing().into_iter().map(|o| {
             let st = o.status();
             let words = if o.reply.is_empty() { String::new() } else { format!(": \"{}\"", o.reply) };
-            (o.to.clone(), clip(&o.text, 80), format!("{}{words} · {}", st.as_str(), crate::team::ago(o.history.last().map_or(o.ts, |h| h.1))))
+            let side = match crate::team::expires_in(&o) {
+                // from day 12 of 14: say so, and whether they ever opened it
+                Some(d) => format!("expires in {d}d{}", if o.history.iter().any(|h| h.0 == Status::Seen) { "" } else { ", never opened" }),
+                None if st == Status::Expired => format!("expired {} · s send again · x let it go", crate::team::ago(o.history.last().map_or(o.ts, |h| h.1))),
+                None => format!("{}{words} · {}", st.as_str(), crate::team::ago(o.history.last().map_or(o.ts, |h| h.1))),
+            };
+            (o.to.clone(), clip(&o.text, 80), side)
         }).collect();
         self.draw_list(f, area, rows, false, "", "you haven't asked anyone anything yet: a on Home asks a teammate's agent")
     }
@@ -825,6 +1033,21 @@ impl TeamView {
             let shown = if on { body.len() } else { body.len().min(2) };
             for l in &body[..shown] { lines.push(Line::raw(format!("    {l}"))) }
             if body.len() > shown { lines.push(Line::styled(format!("    … {} more lines (↑↓ to pick it)", body.len() - shown), Style::new().fg(theme::dim()))) }
+            if let Some(why) = i.packet["held"].as_str() {
+                lines.push(Line::styled(pad(&format!("{why}"), w), theme::fg(theme::orange())));
+                if let (true, Some((a, _))) = (on, &i.draft) {
+                    for l in crate::ui::wrap(&format!("answer ready: {a}"), w.saturating_sub(4).max(10)) { lines.push(Line::styled(format!("    {l}"), theme::fg(theme::ink2()))) }
+                    lines.push(Line::styled("    Enter sends it as written · d says no", theme::fg(theme::dim())));
+                }
+            } else if i.packet.is_object() {
+                let left = i.packet["left"].as_array().map_or(0, |a| a.len());
+                let files = crate::team::packet_files(i);
+                lines.push(Line::styled(pad(&format!("packet: {} done · {left} left{}", i.packet["done"].as_array().map_or(0, |a| a.len()),
+                    if files.is_empty() { String::new() } else { format!(" · {}", files.join(", ")) }), w), theme::fg(theme::ink2())));
+            }
+            for (who, files) in crate::team::clashes(i) {
+                lines.push(Line::styled(pad(&format!("⚠ clashes: {who} also handed you {}", files.join(", ")), w), theme::bold(theme::orange())));
+            }
             lines.push(Line::raw(""));
         }
         // the picked request from its top, so a long one is readable whole
@@ -902,7 +1125,9 @@ impl TeamView {
             let color = person_color(i);
             let busy: Vec<&Session> = p.sessions.iter().filter(|s| !matches!(s.status.as_str(), "idle" | "")).collect();
             let s = busy.first().copied().or(p.sessions.first());
+            let fo = if p.who.is_empty() { 0 } else { crate::team::focus_of(&p.who) };
             let (what, place, when) = match s {
+                _ if p.online && fo > now => (format!("◐ focusing till {}", crate::team::clock(fo)), String::new(), String::new()),
                 _ if !p.online => ("away".to_string(), String::new(), p.label.split("  ").nth(1).unwrap_or("").to_string()),
                 None => ("no sessions open".to_string(), String::new(), String::new()),
                 Some(s) => {
@@ -1093,6 +1318,24 @@ impl TeamView {
             Line::styled(if s.topic.is_empty() { "nothing asked yet".to_string() } else { s.topic.clone() },
                          Style::new().fg(if s.topic.is_empty() { theme::dim() } else { theme::ink() })),
         ];
+        if !s.who.is_empty() {
+            // what your agent sends them alone
+            let trusted = crate::team::role_of(&s.who) == "trusted";
+            let topics = crate::team::topics(&s.who);
+            lines.push(Line::from(vec![Span::styled("✓ ", theme::fg(theme::dim())), Span::styled("facts from the code", theme::fg(theme::ink2())),
+                                       Span::styled(" · everyone gets these", theme::fg(theme::dim()))]));
+            lines.push(if trusted {
+                Line::from(vec![Span::styled("✓ ", theme::bold(theme::orange())), Span::styled("promises", theme::bold(theme::ink())),
+                                Span::styled(if topics.is_empty() { " · on anything (+ to pick topics)".to_string() } else { format!(" · on: {}", topics.join(", ")) }, theme::fg(theme::dim()))])
+            } else {
+                Line::from(vec![Span::styled("✗ ", theme::fg(theme::dim())), Span::styled("promises", theme::fg(theme::ink2())),
+                                Span::styled(" · wait for you (t trusts them)", theme::fg(theme::dim()))])
+            });
+            lines.push(Line::from(vec![Span::styled("✗ ", theme::fg(theme::dim())), Span::styled("handovers", theme::fg(theme::ink2())),
+                                       Span::styled(" · always you, no matter what", theme::fg(theme::dim()))]));
+            let fo = crate::team::focus_of(&s.who);
+            if fo > crate::team::now() { lines.push(Line::styled(format!("◐ focusing till {}", crate::team::clock(fo)), theme::fg(theme::ink2()))) }
+        }
         if !s.now.is_empty() { lines.push(Line::styled(format!("now: {}", s.now), Style::new().fg(theme::orange()))) }
         if let Some(wt) = &s.waiting {
             lines.push(Line::styled(format!("waiting for {} to finish {} in {}", wt.on, wt.func, wt.file), Style::new().fg(theme::orange())));
@@ -1192,6 +1435,27 @@ impl TeamView {
     }
 }
 
+/// What your agent is told when you start on a handover: the request and its packet, beginning
+/// with the first thing left.
+fn handover_prompt(i: &crate::team::Incoming) -> String {
+    let p = &i.packet;
+    let list = |k: &str| p[k].as_array().into_iter().flatten().filter_map(|x| x.as_str()).map(|x| format!("- {x}")).collect::<Vec<_>>().join("\n");
+    let mut t = format!("{} handed this over to you: {}\n", i.from, crate::team::bare(&i.text));
+    if p.is_object() {
+        if let Some(b) = p["branch"].as_str().filter(|b| !b.is_empty()) { t += &format!("\nTheir commits are on branch {b} (switch to it first if you're not on it; ask me if the working tree isn't clean).\n") }
+        for (head, k) in [("Done", "done"), ("Left", "left")] {
+            let l = list(k);
+            if !l.is_empty() { t += &format!("\n{head}:\n{l}\n") }
+        }
+        if let Some(x) = p["watch"].as_str().filter(|x| !x.is_empty()) { t += &format!("\nWatch out: {x}\n") }
+        let files = crate::team::packet_files(i);
+        if !files.is_empty() { t += &format!("\nFiles: {}\n", files.join(", ")) }
+        if let Some(first) = p["left"].as_array().and_then(|a| a.first()).and_then(|x| x.as_str()) { t += &format!("\nStart with: {first}") }
+    }
+    for (who, both) in crate::team::clashes(i) { t += &format!("\nCareful: {who} also handed me {}; check their changes there first.", both.join(", ")) }
+    t
+}
+
 /// Contracts between people: (producer, consumer, name) where the consumer's fresh code uses
 /// something the producer changed lately. The producer's work should be merged first.
 /// Who has code that isn't on main yet, file by file: (person, file and functions, "").
@@ -1222,6 +1486,11 @@ fn person_color(i: usize) -> Color {
     // one accent: people are told apart by name and place, not colour
     let _ = i;
     theme::ink()
+}
+
+/// `clip` for a line indented four spaces (clip itself squeezes leading space out).
+fn pad(s: &str, n: usize) -> String {
+    format!("    {}", clip(s, n.saturating_sub(4)))
 }
 
 fn clip(s: &str, n: usize) -> String {
@@ -1275,5 +1544,128 @@ mod path_tests {
             assert!(in_project(&d.join("downloads/team"), &root), "the Mac disk ignores case");
         }
         std::fs::remove_dir_all(&d).ok();
+    }
+}
+
+#[cfg(test)]
+mod flow_screen_tests {
+    use super::*;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    fn screen(v: &mut TeamView, hub: &Hub, cwd: &Path) -> String {
+        let mut t = Terminal::new(TestBackend::new(150, 44)).unwrap();
+        t.draw(|f| v.draw(f, f.area(), hub, cwd)).unwrap();
+        let b = t.backend().buffer().clone();
+        (0..b.area.height).map(|y| (0..b.area.width).map(|x| b[(x, y)].symbol().to_string()).collect::<String>().trim_end().to_string())
+            .collect::<Vec<_>>().join("\n")
+    }
+
+    fn key(v: &mut TeamView, hub: &std::sync::Arc<Hub>, cwd: &Path, c: KeyCode) -> Act {
+        v.key(KeyEvent::new(c, KeyModifiers::NONE), hub, cwd)
+    }
+
+    /// Steps 6-8 on screen: every new page and key, drawn from one demo team. QH_SCREENS=<dir>
+    /// keeps each screen as a text file to look at.
+    #[test]
+    fn handovers_trust_and_focus_on_screen() {
+        let _env = crate::hub::tests::ENV.lock().unwrap_or_else(|e| e.into_inner());
+        // decisions write seen-lists and roles: into a scratch folder, not your real state
+        let root = std::env::temp_dir().join(format!("qh-flowscr-{}", std::process::id()));
+        std::env::set_var("QH_STATE_DIR", root.join("state"));
+        let repo = format!("flow/screens{}", std::process::id());
+        crate::team::tests::install_flow_demo(&repo);
+        let hub = Hub::new(crate::config::load_defaults(), Some(format!("flowscr-{}", std::process::id())), Box::new(|_, _| {}), true);
+        let cwd = std::env::temp_dir();
+        let mut v = TeamView { tab: 0, ..TeamView::default() };
+        let keep = |name: &str, s: &str| if let Ok(d) = std::env::var("QH_SCREENS") { let _ = std::fs::write(Path::new(&d).join(format!("{name}.txt")), s); };
+        let ok = |s: &str, want: &[&str]| for w in want { assert!(s.contains(w), "missing {w:?} in\n{s}") };
+
+        // the menu, and the card on Home warns of the clash; g jumps to it
+        let s = screen(&mut v, &hub, &cwd);
+        keep("1-home", &s);
+        ok(&s, &["Taken over", "Agent answered", "priya", "⚠ sam also handed you checkout.tsx", "g go to it", "f focus"]);
+        // the menu: ← takes it, ↓ moves pages (not people on the map), → goes back in
+        let person = v.person;
+        key(&mut v, &hub, &cwd, KeyCode::Left);
+        key(&mut v, &hub, &cwd, KeyCode::Down);
+        assert_eq!((v.tab, v.person), (REQUESTS, person), "↓ in the menu goes to Asked you, the map's pick stays");
+        key(&mut v, &hub, &cwd, KeyCode::Up);
+        key(&mut v, &hub, &cwd, KeyCode::Right);
+        assert_eq!(v.tab, 0);
+        key(&mut v, &hub, &cwd, KeyCode::Right);
+        assert_eq!(v.tab, 0, "→ on a page never changes the page");
+        key(&mut v, &hub, &cwd, KeyCode::Char('g'));
+        assert_eq!(v.tab, REQUESTS);
+        let s = screen(&mut v, &hub, &cwd);
+        keep("2-asked-you", &s);
+        ok(&s, &["packet: 2 done · 1 left · checkout.tsx", "⚠ clashes: sam also handed you checkout.tsx", "held for you: it promises total"]);
+
+        // later asks until when; the card goes away
+        key(&mut v, &hub, &cwd, KeyCode::Char('l'));
+        let s = screen(&mut v, &hub, &cwd);
+        keep("3-later", &s);
+        ok(&s, &["LATER, UNTIL WHEN?", "in 1 hour", "tomorrow morning", "when I'm done here"]);
+        assert!(matches!(key(&mut v, &hub, &cwd, KeyCode::Enter), Act::Note(n) if n.contains("comes back")));
+        let p = crate::team::pending();
+        assert!(p[0].snoozed && p[0].until > crate::team::now(), "priya's card is put off for an hour");
+        let s = screen(&mut v, &hub, &cwd);
+        assert!(s.contains("· later"));
+
+        // the held question: Enter sends the ready answer as written
+        key(&mut v, &hub, &cwd, KeyCode::Down);
+        let s = screen(&mut v, &hub, &cwd);
+        keep("4-held-question", &s);
+        ok(&s, &["answer ready: yes, always cents", "Enter sends it as written"]);
+        assert!(matches!(key(&mut v, &hub, &cwd, KeyCode::Enter), Act::Note(n) if n.contains("sent your agent's answer to ravi")));
+
+        // You asked: about to expire, and an expired one to send again or let go
+        key(&mut v, &hub, &cwd, KeyCode::Char('3'));
+        let s = screen(&mut v, &hub, &cwd);
+        keep("5-you-asked", &s);
+        ok(&s, &["expires in 2d, never opened", "s send again · x let it go"]);
+
+        // Taken over: the packet, the clash, Enter starts on the first thing left
+        key(&mut v, &hub, &cwd, KeyCode::Char('4'));
+        let s = screen(&mut v, &hub, &cwd);
+        keep("6-taken-over", &s);
+        ok(&s, &["refund button wiring · from sam", "branch sam/refund-btn", "LEFT", "○ partial amount field", "WATCH OUT", "pence",
+                 "⚠ clashes with priya's handover: checkout.tsx"]);
+        match key(&mut v, &hub, &cwd, KeyCode::Enter) {
+            Act::Work(role, text) => {
+                assert_eq!(role, "sam's handover");
+                assert!(text.contains("Start with: partial amount field") && text.contains("branch sam/refund-btn") && text.contains("priya also handed me"), "{text}");
+            }
+            _ => panic!("Enter on a taken handover starts the work"),
+        }
+
+        // Agent answered: facts and promises, and u takes one back
+        key(&mut v, &hub, &cwd, KeyCode::Char('0'));
+        assert_eq!(v.tab, ANSWERED);
+        let s = screen(&mut v, &hub, &cwd);
+        keep("7-agent-answered", &s);
+        ok(&s, &["can I rely on refunds being idempotent?", "promise", "fact", "ravi: is total in cents?"]);
+
+        // focus: the header goes grey with the count, the card holds; f again stops
+        key(&mut v, &hub, &cwd, KeyCode::Char('1'));
+        assert!(matches!(key(&mut v, &hub, &cwd, KeyCode::Char('f')), Act::Note(n) if n.starts_with("focusing till")));
+        let s = screen(&mut v, &hub, &cwd);
+        keep("8-focus", &s);
+        ok(&s, &["focusing till", "f stop focusing", "◐ focusing till"]);
+        assert!(!s.contains("g go to it"), "no card while focusing");
+        assert!(matches!(key(&mut v, &hub, &cwd, KeyCode::Char('f')), Act::Note(n) if n.starts_with("focus off")));
+
+        // People › sam: what your agent sends sam alone
+        key(&mut v, &hub, &cwd, KeyCode::Enter);
+        assert!(v.detail);
+        key(&mut v, &hub, &cwd, KeyCode::Down); // priya's ui, then sam's
+        let s = screen(&mut v, &hub, &cwd);
+        keep("9-people-sam", &s);
+        ok(&s, &["sam · ui", "facts from the code", "promises", "on: refunds", "handovers", "always you, no matter what", "◐ focusing till"]);
+        // + adds a topic, t stops trusting
+        key(&mut v, &hub, &cwd, KeyCode::Char('+'));
+        for c in "payouts".chars() { key(&mut v, &hub, &cwd, KeyCode::Char(c)); }
+        assert!(matches!(key(&mut v, &hub, &cwd, KeyCode::Enter), Act::Note(n) if n.contains("about payouts")));
+        assert_eq!(crate::team::topics("sam"), ["refunds", "payouts"]);
+        crate::team::tests::drop_demo(&repo);
     }
 }

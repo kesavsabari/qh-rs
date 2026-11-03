@@ -939,7 +939,21 @@ impl App {
                 let verb = match action.as_str() { "forgot" => "forgot", "proposed" => "proposed to the team", "declined" => "team note declined", _ => "remembered" };
                 self.note(&name, format!("{verb}: {what} ({scope}) · /memory"))
             }
-            Event::Changed => {}
+            Event::Changed => self.retake_teams(),
+        }
+    }
+
+    /// `qh team` closed after taking the team over from this window: connect it again, so holds
+    /// and claims work in its tabs.
+    fn retake_teams(&mut self) {
+        for repo in crate::team::take_retake() {
+            let tab = self.hub.names().into_iter().find(|n| self.hub.get(n)
+                .and_then(|m| crate::team::github_repo(&m.cwd())).is_some_and(|(_, r)| r == repo));
+            let Some(tab) = tab else { continue };
+            match self.start_team_in(&tab) {
+                Ok(_) => self.note(&tab, format!("team {repo} connected here again (`qh team` closed)")),
+                Err(e) => self.err(&tab, format!("team: {e}")),
+            }
         }
     }
 

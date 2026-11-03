@@ -1106,6 +1106,7 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks, background: bool) -> Re
         let mut last_link_ms = 0u64; // the address stamp in the last folder we wrote
         let mut fetched = false;
         let mut live = Live { last: None, at: Instant::now(), pulse: 0, told: vec![] };
+        let mut handed = false; // plain qh gave the team to `qh team`: it takes it back after
         // my folder: the files for git, and the commit message (presence); plus the data without
         // transcripts, for the direct line
         let build = |state_word: &str| -> (Vec<(String, String)>, Value, Option<Value>) {
@@ -1172,8 +1173,9 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks, background: bool) -> Re
             if last_poll.elapsed() >= POLL {
                 last_poll = Instant::now();
                 if wanted_elsewhere(&repo2) {
-                    log_to(&repo2, if held_as(&repo2) == "solo" {
-                        "`qh team` took over the team connection; holds and claims here pause until you reopen this qh"
+                    handed = held_as(&repo2) == "solo";
+                    log_to(&repo2, if handed {
+                        "`qh team` took over the team connection; holds and claims here pause until it closes"
                     } else { "the qh opened in this project took over the team connection" });
                     running.store(false, Relaxed);
                     break;
@@ -1245,6 +1247,12 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks, background: bool) -> Re
         let _ = publish(&root, &repo2, &me2, &tok, &files, &msg, &idc);
         release(&repo2);
         finished.store(true, Relaxed);
+        if handed {
+            // holds and claims work only while connected: once `qh team` closes, connect again
+            while !connection_free(&repo2) { std::thread::sleep(Duration::from_secs(20)) }
+            RETAKE.lock().unwrap().push(repo2.clone());
+            (hooks.refresh)();
+        }
     }).map_err(|e| e.to_string())?;
     remember(&repo, true);
     Ok(format!("team mode on for {repo} as {me} (shared data is encrypted for the team)"))
@@ -3892,6 +3900,18 @@ fn hold_connection_as(repo: &str, background: bool, team: bool) -> Result<(), St
     Ok(())
 }
 
+/// Nobody holds `repo`'s team connection (checked by taking the lock and letting it go).
+fn connection_free(repo: &str) -> bool {
+    std::fs::OpenOptions::new().read(true).write(true).open(per_repo("team-lock", repo)).is_ok_and(|f| f.try_lock().is_ok())
+}
+
+static RETAKE: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Projects plain qh handed to `qh team` that are free again: connect them.
+pub fn take_retake() -> Vec<String> {
+    std::mem::take(&mut *RETAKE.lock().unwrap())
+}
+
 fn release(repo: &str) {
     if let Some(m) = LOCKS.lock().unwrap().as_mut() { m.remove(repo); }
 }
@@ -5028,7 +5048,9 @@ pub(crate) mod tests {
         release(&repo);
         tw.join().unwrap().unwrap();
         assert!(std::fs::read_to_string(per_repo("team-owner", &repo)).unwrap().ends_with(" project"));
+        assert!(!connection_free(&repo), "plain qh waits while `qh team` is open");
         release(&repo);
+        assert!(connection_free(&repo), "and connects again once it closes");
     }
 
     #[test]

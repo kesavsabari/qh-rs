@@ -1,7 +1,7 @@
 name: e2e-model
 on:
   push:
-    paths: ["src/**", "windows/**", "scripts/e2e_serve.py", ".github/workflows/e2e-model.yml"]
+    paths: ["src/**", "windows/**", "scripts/e2e_serve.py", "scripts/e2e_tui.py", ".github/workflows/e2e-model.yml"]
   workflow_dispatch:
 env:
   MODEL: qwen2.5:0.5b
@@ -98,3 +98,26 @@ jobs:
       - if: always()
         uses: actions/upload-artifact@v4
         with: { name: e2e-screenshots, path: shots/ }
+  # the TUI itself in a real Windows console (ConPTY): keys, palette, modes, a sandboxed model turn
+  windows-tui:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - shell: pwsh
+        run: |
+          Invoke-WebRequest https://github.com/ollama/ollama/releases/latest/download/ollama-windows-amd64.zip -OutFile ollama.zip
+          Expand-Archive ollama.zip C:\ollama
+          $o = Get-Item C:\ollama\ollama.exe
+          Start-Process $o.FullName -ArgumentList "serve" -WindowStyle Hidden
+          for ($i = 0; $i -lt 60; $i++) { try { Invoke-RestMethod http://localhost:11434/api/tags | Out-Null; break } catch { Start-Sleep 1 } }
+          & $o.FullName pull $env:MODEL
+      - run: cargo build --release
+      - run: pip install pyte pywinpty
+      - run: python scripts/e2e_tui.py target/release/qh.exe ${{ env.MODEL }} tui-shots
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with: { name: windows-tui-screens, path: tui-shots/ }

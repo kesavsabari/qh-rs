@@ -2636,6 +2636,7 @@ then it's `git push -u origin {branch}` and `gh pr create --fill`.");
     fn start_team_at(&self, cwd: std::path::PathBuf, tab: &str, background: bool) -> Result<String, String> {
         let (hub, a) = (self.hub.clone(), tab.to_string());
         let root = crate::team::github_repo(&cwd).map(|(r, _)| r).unwrap_or_else(|| cwd.clone());
+        let root6 = root.clone();
         let summary = Box::new(move || {
             // only this project's sessions: other projects are none of this team's business
             let members: Vec<_> = lock(&hub.members).iter().filter(|m| crate::teamview::in_project(&m.cwd(), &root)).cloned().collect();
@@ -2680,10 +2681,15 @@ then it's `git push -u origin {branch}` and `gh pr create --fill`.");
             answered: Box::new(move |session: &str, text: &str| {
                 // busy: it reads the answer before its next model call; idle: it's woken with it
                 // (ctl held while queueing: the turn's end takes the queue under the same lock)
-                // a decision kept over a restart may name a tab that isn't open now: the first one
-                let Some(m) = h6.get(session).or_else(|| h6.names().first().and_then(|n| h6.get(n))) else { return };
+                // a decision kept over a restart may name a tab that isn't open now: it waits for
+                // a session in this project's next turn, never wakes one that didn't ask (or one
+                // in another project, which would act on it in the wrong checkout)
+                let (m, asked) = match h6.get(session) {
+                    Some(m) => (m, true),
+                    None => match fallback_session(&h6, &root6) { Some(m) => (m, false), None => return },
+                };
                 let c = lock(&m.ctl);
-                if c.running {
+                if c.running || !asked {
                     crate::team::queue_answer(&m.name, text);
                 } else {
                     drop(c);
@@ -3285,6 +3291,11 @@ fn draw_confirm(f: &mut Frame, c: &Confirm, queued: usize) {
     f.render_widget(Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: false }), inner);
 }
 
+/// An open session in the project at `root`, for a team answer whose own session is closed.
+fn fallback_session(hub: &Hub, root: &std::path::Path) -> Option<std::sync::Arc<crate::hub::Member>> {
+    hub.names().iter().filter_map(|n| hub.get(n)).find(|m| crate::teamview::in_project(&m.cwd(), root))
+}
+
 pub fn channel_pair() -> (Sender<Ui>, Receiver<Ui>) {
     channel()
 }
@@ -3434,5 +3445,27 @@ impl Remote {
         out.push(json!({"type": "active", "tab": app.active}));
         app.quit = false;
         out
+    }
+}
+
+#[cfg(test)]
+mod answered_tests {
+    use crate::hub::Hub;
+
+    /// A team answer whose session is closed used to go to the first open tab, whatever project
+    /// it was in.
+    #[test]
+    fn a_closed_sessions_answer_stays_in_its_project() {
+        let _env = crate::hub::tests::ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let base = std::env::temp_dir().join(format!("qh-answered-{}", std::process::id()));
+        let (here, other) = (base.join("here"), base.join("other"));
+        std::fs::create_dir_all(&here).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let hub = Hub::new(crate::config::load_defaults(), Some(format!("answered-{}", std::process::id())), Box::new(|_, _| {}), true);
+        hub.add("elsewhere", None, "", "", None, false, Some(other.clone())).unwrap();
+        assert!(super::fallback_session(&hub, &here).is_none(), "another project's tab never takes it");
+        hub.add("mine", None, "", "", None, false, Some(here.clone())).unwrap();
+        assert_eq!(super::fallback_session(&hub, &here).map(|m| m.name.clone()).as_deref(), Some("mine"));
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

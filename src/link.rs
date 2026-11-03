@@ -1641,7 +1641,10 @@ fn on_data(i: &mut Inner, k: usize, pkt: &[u8], from: Path, sends: &mut Vec<(Soc
             let count = u16::from_be_bytes(body[10..12].try_into().unwrap());
             let p = &i.peers[k];
             let held: usize = p.parts.values().map(|e| e.2).sum();
-            if !p.parts.contains_key(&id) && !p.done.contains(&id) && (p.parts.len() >= MAX_PARTIAL || held >= MAX_PARTIAL_BYTES) {
+            // the byte budget counts every part, not only a new message's first: 16 messages each
+            // grown to MAX_MSG would hold 256 MB
+            let new = !p.parts.contains_key(&id);
+            if !p.done.contains(&id) && ((new && p.parts.len() >= MAX_PARTIAL) || held + (body.len() - 12) > MAX_PARTIAL_BYTES) {
                 return; // too much half-received from them: no ack, so it comes again later (or by git)
             }
             let mut ack = vec![ACK];
@@ -2012,6 +2015,31 @@ mod tests {
             handle(&mut lock(&a.inner), &pkt, from, &mut sends, &mut events, 0);
         }
         assert!(lock(&a.inner).peers[0].parts.len() <= MAX_PARTIAL);
+        a.stop();
+        b.stop();
+    }
+
+    #[test]
+    fn a_teammate_cant_grow_half_messages_past_the_byte_budget() {
+        let ((a, ra), (b, _rb)) = (node(), node());
+        meet(&a, &b);
+        wait(&ra, 5, |e| matches!(e, Event::Up { .. })).expect("up");
+        let from = lock(&a.inner).peers[0].sess.as_ref().unwrap().path;
+        let count = (MAX_MSG / PART) as u16;
+        // two half-received messages already hold the whole budget
+        for id in 0..2u64 {
+            lock(&a.inner).peers[0].parts.insert(id, (vec![None; count as usize], Instant::now(), MAX_PARTIAL_BYTES / 2));
+        }
+        let mut f = vec![FRAG];
+        f.extend(1u64.to_be_bytes());
+        f.extend(5u16.to_be_bytes());
+        f.extend(count.to_be_bytes());
+        f.extend([7u8; PART]);
+        let pkt = sealed(&b, &f);
+        let (mut sends, mut events) = (vec![], vec![]);
+        handle(&mut lock(&a.inner), &pkt, from, &mut sends, &mut events, 0);
+        let held: usize = lock(&a.inner).peers[0].parts.values().map(|e| e.2).sum();
+        assert!(held <= MAX_PARTIAL_BYTES, "{held} held: a part for a message already started still counts");
         a.stop();
         b.stop();
     }

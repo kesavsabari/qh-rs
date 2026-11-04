@@ -27,6 +27,11 @@
 //! link.rs): the same sealed `data`, minus transcripts, goes over it the moment it changes, and
 //! is taken in exactly like a fetched folder. Everything still goes through git as well, so a
 //! dropped line loses nothing; it only gets slower.
+//!
+//! Two threads: one holds the line, the other does everything that waits on git or GitHub, so a
+//! stalled network can't hold up the line. Folders are kept in a bare repository of their own in
+//! the state folder, not in the project's .git. While a teammate has one of our sessions open,
+//! its transcript goes to them over the line too, only what changed.
 use crate::backend::http;
 use crate::teamcrypto::{self as tc, Key};
 use serde_json::{json, Value};
@@ -44,6 +49,12 @@ const QUIET_WRITE: Duration = Duration::from_secs(30); // everyone who's online 
 const MIN_LINK_WRITE: Duration = Duration::from_secs(1); // floor for the address-change exemption
 const KEEPALIVE: Duration = Duration::from_secs(120);
 const POLL: Duration = Duration::from_secs(3);
+const GIT_NET_LIMIT: Duration = Duration::from_secs(30); // a push or fetch stuck longer is stopped and tried again
+const LIVE_TRANSCRIPTS: &str = "0.2.8"; // the first version that asks for transcripts over the line
+const WATCH_EVERY: Duration = Duration::from_secs(5); // while a teammate's session is open, say so this often
+const WATCH_LIFE: Duration = Duration::from_secs(20); // and stop sending when they've gone quiet this long
+const TR_EVERY: Duration = Duration::from_secs(1); // a watched transcript goes out at most this often
+const BOARD_TIDY: u32 = 200; // writes between clearing out old folders from the board store
 const OFFLINE_AFTER: u64 = 300; // seconds without a write before someone counts as offline
 const ORPHAN_AFTER: u64 = 1800; // seconds every key holder must be gone before an admin starts a new key
 const CLAIM_HOT: u64 = 600;     // a function someone edited this recently is theirs: others pause
@@ -100,6 +111,7 @@ pub struct Peer {
     signed: bool,                           // the folder's signature checks out against `sign`
     qh: String,                             // the qh version they run (empty before 0.1.4)
     team_notes: String,                     // their copy of the team notes (see team_notes)
+    tr_seq: HashMap<String, u64>,           // session -> when its transcript last came over the line (their ms): an older git copy can't undo it
 }
 
 /// A member's keys as we know them: (member key, signing key, GitHub confirmed them).
@@ -352,6 +364,8 @@ struct State {
     flow: Flow,
     running: std::sync::Arc<AtomicBool>,
     finished: std::sync::Arc<AtomicBool>,
+    watching: Option<(String, String, Instant)>, // the teammate's session on screen (login, session), and when it was last drawn
+    watch_now: bool,                  // what we hold of it doesn't match theirs: ask again without waiting
 }
 
 /// Bumped whenever team state a client shows may have changed (board read, live line, chat,
@@ -415,6 +429,51 @@ fn git_raw(root: &Path, args: &[&str], input: Option<&[u8]>, env: &[(&str, Strin
 
 fn git(root: &Path, args: &[&str]) -> Option<String> {
     git_in(root, args, None, &[])
+}
+
+/// Run a command that may stall for as long as the network does, and stop it (helpers too) after
+/// `limit`. Says only whether it worked.
+fn run_limited(mut c: Command, limit: Duration) -> bool {
+    c.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    #[cfg(unix)]
+    { use std::os::unix::process::CommandExt; c.process_group(0); }
+    let Ok(mut child) = c.spawn() else { return false };
+    let t0 = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(st)) => return st.success(),
+            Err(_) => return false,
+            Ok(None) if t0.elapsed() >= limit => {
+                #[cfg(unix)]
+                unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL); }
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+        }
+    }
+}
+
+/// A push or fetch of the board.
+fn git_net(root: &Path, args: &[&str], env: &[(&str, String)]) -> bool {
+    let mut c = Command::new("git");
+    c.current_dir(root).args(args).env("GIT_TERMINAL_PROMPT", "0");
+    for (k, v) in env { c.env(k, v); }
+    run_limited(c, GIT_NET_LIMIT)
+}
+
+/// Where the team's folders live on this machine: a bare repository of their own, so a team's
+/// writes never touch the project's .git (no objects piling up, no cleanup set off there). Only
+/// the folders travel, so it needs none of the project's history.
+fn board_store(repo: &str, root: &Path) -> PathBuf {
+    let dir = per_repo("team-board", repo);
+    if dir.join("HEAD").exists() {
+        return dir;
+    }
+    let made = std::fs::create_dir_all(&dir).is_ok() && git(&dir, &["init", "-q", "--bare"]).is_some()
+        && git(&dir, &["config", "gc.auto", "0"]).is_some() && git(&dir, &["config", "maintenance.auto", "false"]).is_some();
+    if made { dir } else { root.to_path_buf() }
 }
 
 /// The repo's root and its GitHub owner/name, if `origin` is on GitHub.
@@ -486,8 +545,8 @@ fn blob(root: &Path, data: &str) -> Option<String> {
 /// commit (so that stays on the board). Names may have one folder level ("keys/bob").
 fn publish(root: &Path, repo: &str, me: &str, tok: &str, files: &[(String, String)], message: &Value, parent: &str) -> Result<String, String> {
     let commit = folder_commit(root, files, message, parent)?;
-    git_in(root, &["push", "-q", "-f", &format!("https://github.com/{repo}.git"), &format!("{commit}:refs/qh/peers/{me}")], None, &auth_env(tok))
-        .map(|_| commit).ok_or_else(|| "push to the board failed".into())
+    git_net(root, &["push", "-q", "-f", &format!("https://github.com/{repo}.git"), &format!("{commit}:refs/qh/peers/{me}")], &auth_env(tok))
+        .then_some(commit).ok_or_else(|| "push to the board failed".into())
 }
 
 fn folder_commit(root: &Path, files: &[(String, String)], message: &Value, parent: &str) -> Result<String, String> {
@@ -681,8 +740,9 @@ fn folder_files(root: &Path, sha: &str) -> Folder {
 
 /// Everyone's folders into refs/qh/board/*, listed as (login, commit).
 fn fetch_board(root: &Path, repo: &str, tok: &str) -> Result<Vec<(String, String)>, String> {
-    git_in(root, &["fetch", "-q", "--no-tags", "--prune", &format!("https://github.com/{repo}.git"), "+refs/qh/peers/*:refs/qh/board/*"],
-           None, &auth_env(tok)).ok_or("fetching the board failed")?;
+    if !git_net(root, &["fetch", "-q", "--no-tags", "--prune", &format!("https://github.com/{repo}.git"), "+refs/qh/peers/*:refs/qh/board/*"], &auth_env(tok)) {
+        return Err("fetching the board failed".into());
+    }
     let list = git(root, &["for-each-ref", "--format=%(refname:strip=3) %(objectname)", "refs/qh/board/"]).unwrap_or_default();
     Ok(list.lines().filter_map(|l| l.split_once(' ').map(|(a, b)| (a.to_string(), b.to_string()))).collect())
 }
@@ -1063,17 +1123,20 @@ pub fn set_join_code(repo: &str, code: &str) {
 pub type Summary = Box<dyn Fn() -> Value + Send>;
 
 /// Callbacks into the UI: say a line, deliver a message to a session, ask whether to allow one.
+/// A hook that takes a session and a text.
+pub type PairHook = Box<dyn Fn(&str, &str) + Send + Sync>;
+
 pub struct Hooks {
-    pub say: Box<dyn Fn(String) + Send>,
-    pub deliver: Box<dyn Fn(&str, &str) + Send>,
-    pub ask: Box<dyn Fn(&Incoming) + Send>,
-    pub refresh: Box<dyn Fn() + Send>, // redraw: the status line changed
+    pub say: Box<dyn Fn(String) + Send + Sync>,
+    pub deliver: PairHook,
+    pub ask: Box<dyn Fn(&Incoming) + Send + Sync>,
+    pub refresh: Box<dyn Fn() + Send + Sync>, // redraw: the status line changed
     /// Answer a teammate's question from a read-only copy of the asked session (returns at once).
     pub answer: std::sync::Arc<dyn Fn(Question) + Send + Sync>,
     /// An answer came back for one of our sessions: hand it over (now, or before its next call).
-    pub answered: Box<dyn Fn(&str, &str) + Send>,
+    pub answered: PairHook,
     /// A request arrived or left, or one of ours moved on: redraw what shows it.
-    pub changed: Box<dyn Fn(TeamEvent) + Send>,
+    pub changed: Box<dyn Fn(TeamEvent) + Send + Sync>,
 }
 
 /// Connect this folder's project (or just show it, if it's already connected).
@@ -1091,7 +1154,11 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks, background: bool) -> Re
     let me = std::env::var("QH_TEAM_LOGIN").ok().filter(|l| !l.is_empty()).unwrap_or(me); // testing two people on one machine
     let (secret, my_pub) = tc::identity();
     let sign_pub = tc::sign_pub(&secret);
-    let idc = identity_commit(&root, &me, &my_pub, &sign_pub).ok_or("git couldn't create your identity commit")?;
+    let board = board_store(&repo, &root);
+    let idc = identity_commit(&board, &me, &my_pub, &sign_pub).ok_or("git couldn't create your identity commit")?;
+    if board != root {
+        git(&board, &["update-ref", "refs/qh/me", &idc]); // every folder's parent: tidying keeps it
+    }
     let seen: HashMap<String, u64> = serde_json::from_str(&std::fs::read_to_string(per_repo("team-seen", &repo)).unwrap_or_default()).unwrap_or_default();
     let invites: HashMap<String, String> = serde_json::from_str(&std::fs::read_to_string(per_repo("team-invites", &repo)).unwrap_or_default()).unwrap_or_default();
     let chat: Vec<(u64, String, String)> = serde_json::from_str(&std::fs::read_to_string(per_repo("team-chat", &repo)).unwrap_or_default()).unwrap_or_default();
@@ -1122,7 +1189,7 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks, background: bool) -> Re
             .filter(|s| ["auto", "ask", "off"].contains(&s.as_str())).unwrap_or_else(|| "auto".into()),
         secret: Some(secret.clone()), my_dms: vec![], my_groups: vec![], my_gmsgs: vec![], groups: HashMap::new(), msgs: vec![],
         msg_ids: Default::default(), chan_unread: HashMap::new(), cleared: HashMap::new(), pinged: vec![],
-        dirty: true, running: running.clone(), finished: finished.clone(),
+        dirty: true, running: running.clone(), finished: finished.clone(), watching: None, watch_now: false,
     });
     with(&repo, load_private);
     with(&repo, |s| FOCUS.store(s.flow.focus, Relaxed));
@@ -1132,19 +1199,112 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks, background: bool) -> Re
     let (live_tx, live_rx) = std::sync::mpsc::channel();
     LIVE.lock().unwrap().get_or_insert_with(HashMap::new).insert(repo.clone(), live_tx);
     let line = link();
+    let hooks = std::sync::Arc::new(hooks);
+    let latest: std::sync::Arc<Mutex<(Option<Snapshot>, bool)>> = Default::default(); // the folder to write next, and whether something asked for a write
+    // The board's thread: everything that waits on git or GitHub. It can stall for as long as the
+    // network does, and the line must not stall with it.
+    let reader = {
+        let (repo2, me2, root, board, tok, secret, sign_pub, my_pub, idc, hooks, running, latest, line_up) =
+            (repo.clone(), me.clone(), root.clone(), board.clone(), tok.clone(), secret.clone(), sign_pub.clone(), my_pub.clone(), idc.clone(), hooks.clone(), running.clone(), latest.clone(), line.is_some());
+        std::thread::Builder::new().name(format!("qh-board-{repo}")).spawn(move || -> bool {
+            let mut etag: Option<String> = None;
+            let (mut last_files, mut last_write, mut last_poll): (Vec<(String, String)>, _, _) = (vec![], Instant::now() - KEEPALIVE, Instant::now() - POLL);
+            let mut last_link_ms = 0u64; // the address stamp in the last folder we wrote
+            let mut fetched = false;
+            let mut handed = false; // plain qh gave the team to `qh team`: it takes it back after
+            let mut folders: HashMap<String, (String, Folder)> = HashMap::new(); // login -> sha, its files: a commit never changes, so read each once
+            let (mut snap, mut wanted, mut last_data): (Option<Snapshot>, bool, Option<Value>) = (None, false, None);
+            let (mut failed, mut failed_at, mut writes) = (LINE_FAILED.load(Relaxed), None::<Instant>, 0u32);
+            while running.load(Relaxed) {
+                // read the board: one conditional request, a git fetch only when something changed
+                if last_poll.elapsed() >= POLL {
+                    last_poll = Instant::now();
+                    if wanted_elsewhere(&repo2) {
+                        handed = held_as(&repo2) == "solo";
+                        log_to(&repo2, if handed {
+                            "`qh team` took over the team connection; holds and claims here pause until it closes"
+                        } else { "the qh opened in this project took over the team connection" });
+                        running.store(false, Relaxed);
+                        break;
+                    }
+                    match api("GET", &format!("/repos/{repo2}/git/matching-refs/qh/peers/"), &tok, None, etag.as_deref()) {
+                        Ok((200, tag, v)) => {
+                            let changed = v.as_array().into_iter().flatten().any(|r| {
+                                let name = r["ref"].as_str().unwrap_or("").trim_start_matches("refs/qh/peers/");
+                                name != me2 && folders.get(name).map(|(s, _)| s.as_str()) != r["object"]["sha"].as_str()
+                            });
+                            etag = tag;
+                            if changed || !fetched {
+                                match fetch_board(&board, &repo2, &tok) {
+                                    Ok(list) => { fetched = true; absorb(&repo2, &board, &list, &mut folders, &secret, &tok, &hooks); bump(); (hooks.refresh)() }
+                                    Err(e) => set_error(&repo2, e),
+                                }
+                            }
+                        }
+                        Ok((404, _, _)) => { fetched = true; settle_key(&repo2) } // an empty board
+                        Ok(_) => {}
+                        Err(e) => set_error(&repo2, e),
+                    }
+                    stale_check(&repo2, &hooks);
+                    wake_check(&repo2, &root, &hooks);
+                }
+                // write my folder: when it changed (throttled), when asked (dirty), or as a keep-alive.
+                // Each write is a push (GitHub asks for at most 6 a minute per repository), so with
+                // everyone on the line data changes go out less often, and a change to a
+                // transcript alone waits for the next one: whoever's watching has it over the
+                // line. Who's in the team and addresses never wait.
+                {
+                    let mut l = latest.lock().unwrap();
+                    if let Some(n) = l.0.take() { snap = Some(n) }
+                    wanted |= std::mem::take(&mut l.1);
+                }
+                if LINE_FAILED.load(Relaxed) != failed {
+                    failed = LINE_FAILED.load(Relaxed);
+                    failed_at = Some(Instant::now());
+                }
+                if let Some(n) = &snap {
+                    let plain = |f: &[(String, String)]| -> Vec<String> { f.iter().filter(|(n, _)| n != "sig").map(|(n, c)| if n == "data" || n.contains('/') { n.clone() } else { format!("{n}={c}") }).collect() };
+                    let data = |f: &[(String, String)]| f.iter().find(|(n, _)| n == "data").map(|(_, c)| c.clone());
+                    let same = plain(&n.files) == plain(&last_files);
+                    let by_line = line_up && transcripts_by_line(&repo2);
+                    let changed = !same || if by_line && n.quick.is_some() { n.quick != last_data } else { data(&n.files) != data(&last_files) };
+                    let gap = if same && failed_at.is_none_or(|t| t.elapsed() >= QUIET_WRITE) && line_up && everyone_on_line(&repo2) { QUIET_WRITE } else { MIN_WRITE };
+                    // new line addresses skip the throttle: until they're out, teammates can't reach us directly
+                    let link_ms = link().map_or(0, |l| l.addrs_ms());
+                    let moved = link_ms != last_link_ms && last_write.elapsed() >= MIN_LINK_WRITE;
+                    if fetched && (((changed || wanted) && (last_write.elapsed() >= gap || moved)) || last_write.elapsed() >= KEEPALIVE) {
+                        let files = signed_files(&secret, &repo2, &me2, n.files.clone(), &n.msg);
+                        match publish(&board, &repo2, &me2, &tok, &files, &n.msg, &idc) {
+                            Ok(sha) => {
+                                last_files = files;
+                                last_data = n.quick.clone();
+                                last_link_ms = link_ms;
+                                wanted = false;
+                                with(&repo2, |s| { s.error.clear(); s.my_sha = sha });
+                                vouch(&repo2, &tok, &idc, &sign_pub, &my_pub);
+                                writes += 1;
+                                if writes % BOARD_TIDY == 0 && board != root {
+                                    git(&board, &["gc", "-q", "--prune=now"]);
+                                }
+                            }
+                            Err(e) => set_error(&repo2, e),
+                        }
+                        last_write = Instant::now();
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            handed
+        }).map_err(|e| e.to_string())?
+    };
     std::thread::Builder::new().name(format!("qh-team-{repo}")).spawn(move || {
-        let mut etag: Option<String> = None;
-        let (mut last_files, mut last_write, mut last_poll) = (vec![], Instant::now() - KEEPALIVE, Instant::now() - POLL);
-        let mut last_link_ms = 0u64; // the address stamp in the last folder we wrote
-        let mut fetched = false;
-        let mut live = Live { last: None, at: Instant::now(), pulse: 0, told: vec![], bytes: 0, failed: 0, failed_at: None };
-        let mut handed = false; // plain qh gave the team to `qh team`: it takes it back after
-        let mut folders: HashMap<String, (String, Folder)> = HashMap::new(); // login -> sha, its files: a commit never changes, so read each once
+        let mut live = Live { last: None, at: Instant::now(), pulse: 0, told: vec![], bytes: 0, failed: 0, watchers: vec![], asked: None };
         let mut sealed = Sealed::default();
         // my folder: the files for git, and the commit message (presence); plus the data without
         // transcripts, for the direct line
-        let mut build = |state_word: &str| -> (Vec<(String, String)>, Value, Option<Value>) {
+        let mut build = |state_word: &str| -> (Vec<(String, String)>, Value, Option<Value>, Value) {
             let mut quick = None;
+            let mut shown = Value::Null;
             let mut files = vec![("pub".to_string(), my_pub.clone())];
             let d = summary(); // outside the lock: it reads the hub
             with(&repo2, |s| {
@@ -1201,82 +1361,31 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks, background: bool) -> Re
                     }
                     files.push(("data".into(), sealed.data.clone()));
                     let mut q = d;
-                    if let Some(o) = q.as_object_mut() { o.remove("transcripts"); }
+                    if let Some(o) = q.as_object_mut() { shown = o.remove("transcripts").unwrap_or_default(); }
                     quick = Some(q);
                 }
             });
             let msg = json!({"v": 2, "state": state_word, "ts": now(), "ms": now_ms(), "qh": crate::update::VERSION});
             files.push(("sign".into(), sign_pub.clone()));
             files.push(("anchor".into(), idc.clone()));
-            (files, msg, quick)
-        };
-        let signed = |mut files: Vec<(String, String)>, msg: &Value| -> Vec<(String, String)> {
-            let sig = tc::sign_folder(&secret, &repo2, &me2, &msg.to_string(), &files);
-            files.push(("sig".into(), sig));
-            files
+            (files, msg, quick, shown)
         };
         while running.load(Relaxed) {
-            // read the board: one conditional request, a git fetch only when something changed
-            if last_poll.elapsed() >= POLL {
-                last_poll = Instant::now();
-                if wanted_elsewhere(&repo2) {
-                    handed = held_as(&repo2) == "solo";
-                    log_to(&repo2, if handed {
-                        "`qh team` took over the team connection; holds and claims here pause until it closes"
-                    } else { "the qh opened in this project took over the team connection" });
-                    running.store(false, Relaxed);
-                    break;
-                }
-                match api("GET", &format!("/repos/{repo2}/git/matching-refs/qh/peers/"), &tok, None, etag.as_deref()) {
-                    Ok((200, tag, v)) => {
-                        let changed = v.as_array().into_iter().flatten().any(|r| {
-                            let name = r["ref"].as_str().unwrap_or("").trim_start_matches("refs/qh/peers/");
-                            name != me2 && folders.get(name).map(|(s, _)| s.as_str()) != r["object"]["sha"].as_str()
-                        });
-                        etag = tag;
-                        if changed || !fetched {
-                            match fetch_board(&root, &repo2, &tok) {
-                                Ok(list) => { fetched = true; absorb(&repo2, &root, &list, &mut folders, &secret, &tok, &hooks); bump(); (hooks.refresh)() }
-                                Err(e) => set_error(&repo2, e),
-                            }
-                        }
-                    }
-                    Ok((404, _, _)) => { fetched = true; settle_key(&repo2) } // an empty board
-                    Ok(_) => {}
-                    Err(e) => set_error(&repo2, e),
-                }
-                stale_check(&repo2, &hooks);
-                wake_check(&repo2, &root, &hooks);
-            }
-            // write my folder: when it changed (throttled), when asked (dirty), or as a keep-alive.
-            // Wrapped keys and data are sealed again only when they change, and each write costs
-            // about 84 KB of loose objects in the project's .git, so with everyone on the line
-            // data changes go out less often. Who's in the team and addresses never wait.
-            let (files, msg, quick) = build("online");
-            if let (Some(l), Some(d)) = (&line, quick) {
+            // what asked for a write before this build is in it
+            let want = with(&repo2, |s| std::mem::take(&mut s.dirty)).unwrap_or(false);
+            let (files, msg, quick, shown) = build("online");
+            if let (Some(l), Some(d)) = (&line, &quick) {
                 push_live(&repo2, &me2, l, d, &mut live);
+                watch_round(&repo2, &me2, l, &shown, &mut live);
             }
-            let dirty = with(&repo2, |s| s.dirty).unwrap_or(false);
-            let plain = |f: &[(String, String)]| -> Vec<String> { f.iter().filter(|(n, _)| n != "sig").map(|(n, c)| if n == "data" || n.contains('/') { n.clone() } else { format!("{n}={c}") }).collect() };
-            let data = |f: &[(String, String)]| f.iter().find(|(n, _)| n == "data").map(|(_, c)| c.clone());
-            let same = plain(&files) == plain(&last_files);
-            let changed = !same || data(&files) != data(&last_files);
-            let gap = if same && live.failed_at.is_none_or(|t| t.elapsed() >= QUIET_WRITE) && line.is_some() && everyone_on_line(&repo2) { QUIET_WRITE } else { MIN_WRITE };
-            // new line addresses skip the throttle: until they're out, teammates can't reach us directly
-            let link_ms = line.as_ref().map_or(0, |l| l.addrs_ms());
-            let moved = link_ms != last_link_ms && last_write.elapsed() >= MIN_LINK_WRITE;
-            if fetched && (((changed || dirty) && (last_write.elapsed() >= gap || moved)) || last_write.elapsed() >= KEEPALIVE) {
-                let files = signed(files, &msg);
-                match publish(&root, &repo2, &me2, &tok, &files, &msg, &idc) {
-                    Ok(sha) => {
-                        last_files = files;
-                        last_link_ms = link_ms;
-                        with(&repo2, |s| { s.dirty = false; s.error.clear(); s.my_sha = sha });
-                        vouch(&repo2, &tok, &idc, &sign_pub, &my_pub);
-                    }
-                    Err(e) => set_error(&repo2, e),
-                }
-                last_write = Instant::now();
+            // the screen only redraws when something happens: drawing is how a session counts as still open
+            if with(&repo2, |s| s.watching.as_ref().is_some_and(|w| (WATCH_EVERY..WATCH_LIFE).contains(&w.2.elapsed()))).unwrap_or(false) {
+                (hooks.refresh)();
+            }
+            {
+                let mut l = latest.lock().unwrap();
+                l.0 = Some(Snapshot { files, msg, quick });
+                l.1 |= want;
             }
             // wait half a second, but take in what comes over the line at once, and go round
             // early when a message, answer or note of ours is waiting to go out
@@ -1284,7 +1393,7 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks, background: bool) -> Re
             while let Some(left) = until.checked_duration_since(Instant::now()) {
                 match live_rx.recv_timeout(left.min(Duration::from_millis(100))) {
                     Ok((from, bytes)) => {
-                        take_live(&repo2, &root, &from, &bytes, &hooks);
+                        take_live(&repo2, &root, &from, &bytes, &hooks, &mut live);
                         bump();
                         (hooks.refresh)();
                     }
@@ -1296,9 +1405,10 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks, background: bool) -> Re
             for (session, text) in crate::review::take_decisions() { (hooks.answered)(&session, &text) }
         }
         if let Some(m) = LIVE.lock().unwrap().as_mut() { m.remove(&repo2); }
-        let (files, msg, _) = build("offline");
-        let files = signed(files, &msg);
-        let _ = publish(&root, &repo2, &me2, &tok, &files, &msg, &idc);
+        let handed = reader.join().unwrap_or(false);
+        let (files, msg, _, _) = build("offline");
+        let files = signed_files(&secret, &repo2, &me2, files, &msg);
+        let _ = publish(&board, &repo2, &me2, &tok, &files, &msg, &idc);
         release(&repo2);
         finished.store(true, Relaxed);
         if handed {
@@ -1315,6 +1425,19 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks, background: bool) -> Re
     Ok(format!("team mode on for {repo} as {me} (shared data is encrypted for the team)"))
 }
 
+/// The folder as of the line's last round, for the board's thread to write.
+struct Snapshot {
+    files: Vec<(String, String)>,
+    msg: Value,
+    quick: Option<Value>, // the data without transcripts
+}
+
+fn signed_files(secret: &x25519_dalek::StaticSecret, repo: &str, me: &str, mut files: Vec<(String, String)>, msg: &Value) -> Vec<(String, String)> {
+    let sig = tc::sign_folder(secret, repo, me, &msg.to_string(), &files);
+    files.push(("sig".into(), sig));
+    files
+}
+
 /// What we sealed last, so an unchanged folder costs no crypto (it's built twice a second).
 #[derive(Default)]
 struct Sealed {
@@ -1323,6 +1446,12 @@ struct Sealed {
     wraps: Vec<(String, String)>,
     plain: String,
     data: String,
+}
+
+/// Whether whoever could watch our transcripts right now gets them over the line.
+fn transcripts_by_line(repo: &str) -> bool {
+    everyone_on_line(repo) && with(repo, |s| s.peers.values().filter(|p| p.online)
+        .all(|p| !p.qh.is_empty() && !crate::update::newer(LIVE_TRANSCRIPTS, &p.qh))).unwrap_or(false)
 }
 
 /// Whether everyone reading the board right now gets our data over the line anyway.
@@ -1382,6 +1511,7 @@ fn absorb(repo: &str, root: &Path, list: &[(String, String)], read: &mut HashMap
             }
         }
     }
+    let _one = APPLY.lock().unwrap();
     let mut new_chat = false;
     for (f, p) in &folders {
         let p = read_folder(f, repo, &p.login, key.as_ref());
@@ -1891,6 +2021,15 @@ fn take_in(repo: &str, me: &String, key: Option<Key>, mut p: Peer, hooks: &Hooks
     let mut g = STATES.lock().unwrap();
     let Some(s) = g.get_or_insert_with(HashMap::new).get_mut(repo) else { return };
     s.key = key;
+    // transcripts that came over the line after this copy was made stay
+    if let Some(old) = s.peers.get(login) {
+        p.tr_seq = old.tr_seq.clone();
+        for (session, ms) in &old.tr_seq {
+            if let Some(rows) = old.transcripts.get(session).filter(|_| *ms > p.seq) {
+                p.transcripts.insert(session.clone(), rows.clone());
+            }
+        }
+    }
     // a git copy older than what came over the link: keep the live data, take only what git alone carries
     if let Some(old) = s.peers.get(login).filter(|o| o.seq > p.seq) {
         let mut m = old.clone();
@@ -3960,7 +4099,14 @@ fn say_locked(repo: &str, _s: &mut State, hooks: &Hooks, text: String) {
 
 /// A teammate's session conversation, oldest first: (role, text).
 pub fn transcript_rows(login: &str, session: &str) -> Vec<(String, String)> {
-    cur(|s| s.peers.get(login).and_then(|p| p.transcripts.get(session)).cloned()).flatten().unwrap_or_default()
+    cur(|s| {
+        // on screen (or just read): keep it current over the line
+        match &mut s.watching {
+            Some((l, n, at)) if l == login && n == session => *at = Instant::now(),
+            w => *w = Some((login.to_string(), session.to_string(), Instant::now())),
+        }
+        s.peers.get(login).and_then(|p| p.transcripts.get(session)).cloned()
+    }).flatten().unwrap_or_default()
 }
 
 /// Teammates' sessions as (login, session, label), online people first.
@@ -4202,6 +4348,7 @@ use std::sync::Arc;
 
 static LINK: std::sync::OnceLock<Option<Arc<Link>>> = std::sync::OnceLock::new();
 static LIVE: Mutex<Option<HashMap<String, std::sync::mpsc::Sender<(String, Vec<u8>)>>>> = Mutex::new(None); // repo -> its team thread
+static APPLY: Mutex<()> = Mutex::new(()); // one teammate's folder taken in at a time: from git, or off the line
 static LINE_FAILED: AtomicU64 = AtomicU64::new(0); // messages the line gave up on
 static LINES: Mutex<Option<HashMap<String, String>>> = Mutex::new(None); // their member key -> path ("lan …", "via <key>")
 
@@ -4335,7 +4482,139 @@ struct Live {
     told: Vec<String>, // member keys that have our latest
     bytes: usize,      // size of the last message
     failed: u64,       // LINE_FAILED when we last looked
-    failed_at: Option<Instant>,
+    watchers: Vec<Watcher>,
+    asked: Option<(String, String, Instant)>, // the session we last said we're watching, and when
+}
+
+/// A teammate with one of our sessions open. They get only what changed, about once a second, for
+/// as long as they keep saying so; each time they also say what they hold, so a lost update mends itself.
+struct Watcher {
+    login: String,
+    key: String, // their member key: where the line sends
+    session: String,
+    until: Instant,
+    sent: Vec<(String, String)>, // the rows they should hold
+    before: u64,                 // the hash of what they held before the last send (it may still be on its way)
+    have: Option<u64>,           // the hash they last said they hold, not yet looked at
+    at: Instant,
+}
+
+/// A stable hash of transcript rows (both machines compute it, whatever their Rust version).
+fn rows_hash(rows: &[(String, String)]) -> u64 {
+    let mut h = 0xcbf29ce484222325u64;
+    for (role, text) in rows {
+        for b in role.bytes().chain([0]).chain(text.bytes()).chain([0]) {
+            h = (h ^ b as u64).wrapping_mul(0x100000001b3);
+        }
+    }
+    h
+}
+
+fn rows_of(v: &Value) -> Vec<(String, String)> {
+    v.as_array().into_iter().flatten().map(|m| (m[0].as_str().unwrap_or("").to_string(), m[1].as_str().unwrap_or("").to_string())).collect()
+}
+
+/// How `new` follows from `old`: drop this many rows off the front, keep this many of the rest,
+/// and add everything after them. Rows only leave from the front (the window moves on) or change at the end.
+fn rows_diff(old: &[(String, String)], new: &[(String, String)]) -> (usize, usize) {
+    (0..=old.len()).map(|drop| (drop, old[drop..].iter().zip(new).take_while(|(a, b)| a == b).count()))
+        .fold((0, 0), |best, c| if c.1 > best.1 { c } else { best })
+}
+
+/// One round of the live transcripts: tell the teammate we're watching that we are, and send those
+/// watching us whatever changed.
+fn watch_round(repo: &str, me: &str, l: &Link, shown: &Value, live: &mut Live) {
+    let Some(Some(key)) = with(repo, |s| s.key) else { return };
+    let lines = LINES.lock().unwrap().clone().unwrap_or_default();
+    let ask = with(repo, |s| {
+        let (login, session, drawn) = s.watching.clone()?;
+        if drawn.elapsed() >= WATCH_LIFE { return None }
+        let p = s.peers.get(&login)?;
+        let now = std::mem::take(&mut s.watch_now);
+        let p_key = p.pub_key.clone();
+        let have = rows_hash(p.transcripts.get(&session).map_or(&[][..], |r| &r[..]));
+        Some((login, session, p_key, have, now))
+    }).flatten();
+    if let Some((login, session, peer, have, now)) = ask {
+        let same = live.asked.as_ref().is_some_and(|(l, s, t)| *l == login && *s == session && t.elapsed() < WATCH_EVERY);
+        if (now || !same) && lines.contains_key(&peer) {
+            l.send(&peer, &file_msg(repo, me, &key, "watch", &json!({"session": session, "have": have})));
+            live.asked = Some((login, session, Instant::now()));
+        }
+    }
+    let now = Instant::now();
+    live.watchers.retain(|w| w.until > now && lines.contains_key(&w.key));
+    for w in &mut live.watchers {
+        let rows = rows_of(&shown[&w.session]);
+        let hash = rows_hash(&rows);
+        if let Some(have) = w.have.take() {
+            if have == hash {
+                w.sent = rows.clone();
+            } else if have != rows_hash(&w.sent) && have != w.before {
+                w.sent.clear(); // they lost something: send it whole
+            }
+        }
+        if rows == w.sent || w.at.elapsed() < TR_EVERY {
+            continue;
+        }
+        let (drop, keep) = rows_diff(&w.sent, &rows);
+        let body = json!({"session": w.session, "seq": now_ms(), "drop": drop, "keep": keep, "rows": rows[keep..].iter().map(|(r, t)| json!([r, t])).collect::<Vec<_>>(), "hash": hash});
+        l.send(&w.key, &file_msg(repo, me, &key, "tr", &body));
+        w.before = rows_hash(&w.sent);
+        w.sent = rows;
+        w.at = now;
+    }
+}
+
+/// A teammate opened one of our sessions, or still has it open.
+fn take_watch(repo: &str, from: &str, v: &Value, live: &mut Live) {
+    let login = v["login"].as_str().unwrap_or("").to_string();
+    let Some(Some(key)) = with(repo, |s| s.peers.get(&login).filter(|p| p.pub_key == from && p.joined && login != s.me).and(s.key)) else { return };
+    let Some(body) = open_file_msg(&key, v) else { return };
+    let session = body["session"].as_str().unwrap_or("").to_string();
+    let now = Instant::now();
+    let i = live.watchers.iter().position(|w| w.login == login).unwrap_or_else(|| {
+        live.watchers.push(Watcher { login: login.clone(), key: from.to_string(), session: session.clone(), until: now, sent: vec![], before: 0, have: None, at: now - TR_EVERY });
+        live.watchers.len() - 1
+    });
+    let w = &mut live.watchers[i];
+    if w.session != session {
+        w.session = session;
+        w.sent.clear();
+    }
+    w.until = now + WATCH_LIFE;
+    w.have = body["have"].as_u64();
+}
+
+/// What changed in a session we're watching. Applied to what we hold; if that isn't what they
+/// think we hold, ask again and they send it whole.
+fn take_rows(s: &mut State, login: &str, body: &Value) -> bool {
+    let (session, seq) = (body["session"].as_str().unwrap_or(""), body["seq"].as_u64().unwrap_or(0));
+    let (drop, keep) = (body["drop"].as_u64().unwrap_or(0) as usize, body["keep"].as_u64().unwrap_or(0) as usize);
+    let Some(p) = s.peers.get_mut(login) else { return false };
+    if seq <= p.tr_seq.get(session).copied().unwrap_or(0) {
+        return false;
+    }
+    let held = p.transcripts.get(session).map_or(&[][..], |r| &r[..]);
+    let rows = held.get(drop..drop.saturating_add(keep)).map(|k| [k, &rows_of(&body["rows"])[..]].concat());
+    match rows.filter(|r| r.len() <= 200 && Some(rows_hash(r)) == body["hash"].as_u64()) {
+        Some(r) => {
+            p.transcripts.insert(session.to_string(), r);
+            p.tr_seq.insert(session.to_string(), seq);
+            true
+        }
+        None => { s.watch_now = true; false }
+    }
+}
+
+fn take_rows_msg(repo: &str, from: &str, v: &Value, hooks: &Hooks) {
+    let login = v["login"].as_str().unwrap_or("").to_string();
+    let Some(Some(key)) = with(repo, |s| s.peers.get(&login).filter(|p| p.pub_key == from && p.joined && login != s.me).and(s.key)) else { return };
+    let Some(body) = open_file_msg(&key, v) else { return };
+    if with(repo, |s| take_rows(s, &login, &body)) == Some(true) {
+        bump();
+        (hooks.refresh)();
+    }
 }
 
 /// Changes worth sending at once (messages, answers, acks, notes, claims); the rest (status
@@ -4359,7 +4638,7 @@ fn pulse(repo: &str) -> u64 {
 
 /// Send my data to every teammate on the line: everyone when it changed, and anyone newly on
 /// the line (or back on it) whatever happens.
-fn push_live(repo: &str, me: &str, l: &Link, d: Value, live: &mut Live) {
+fn push_live(repo: &str, me: &str, l: &Link, d: &Value, live: &mut Live) {
     let Some((Some(key), members)) = with(repo, |s| (s.key, s.peers.values().filter(|p| p.joined).map(|p| p.pub_key.clone()).collect::<Vec<_>>())) else { return };
     let lines = LINES.lock().unwrap().clone().unwrap_or_default();
     let on: Vec<String> = members.into_iter().filter(|k| lines.contains_key(k)).collect();
@@ -4368,14 +4647,13 @@ fn push_live(repo: &str, me: &str, l: &Link, d: Value, live: &mut Live) {
     let failed = LINE_FAILED.load(Relaxed);
     if failed != live.failed {
         live.failed = failed;
-        live.failed_at = Some(Instant::now());
         live.told.clear();
     }
     let p = pulse(repo);
     // the whole state goes each time, so what isn't urgent is paced by its size: 1 s for a small
     // team, 4 s at 33 KB. A relayed line has 2 MB a minute and drops the rest.
     let every = Duration::from_millis((live.bytes as u64 / 8).max(1000));
-    let all = live.last.as_ref() != Some(&d) && (p != live.pulse || live.at.elapsed() >= every);
+    let all = live.last.as_ref() != Some(d) && (p != live.pulse || live.at.elapsed() >= every);
     if all {
         live.last = Some(d.clone());
         live.at = Instant::now();
@@ -4397,14 +4675,17 @@ fn push_live(repo: &str, me: &str, l: &Link, d: Value, live: &mut Live) {
 
 /// A teammate's data straight off the line. Only from someone git already showed us as a member,
 /// only from their own member key, and only if it's newer than what we have.
-fn take_live(repo: &str, root: &Path, from: &str, bytes: &[u8], hooks: &Hooks) {
+fn take_live(repo: &str, root: &Path, from: &str, bytes: &[u8], hooks: &Hooks, live: &mut Live) {
     let Ok(v) = serde_json::from_slice::<Value>(bytes) else { return };
     match v["kind"].as_str() {
         Some("file") => return take_file_req(repo, root, from, &v),
         Some("file_re") => return take_file_reply(repo, from, &v),
         Some("msg") => return take_quick_msg(repo, from, &v),
+        Some("watch") => return take_watch(repo, from, &v, live),
+        Some("tr") => return take_rows_msg(repo, from, &v, hooks),
         _ => {}
     }
+    let _one = APPLY.lock().unwrap();
     let login = v["login"].as_str().unwrap_or("").to_string();
     let Some((me, key, old)) = with(repo, |s| (s.me.clone(), s.key, s.peers.get(&login).cloned())) else { return };
     let (Some(k), Some(old)) = (key, old) else { return };
@@ -5197,7 +5478,7 @@ pub(crate) mod tests {
         s.peers.insert("bob".into(), bob);
         STATES.lock().unwrap().get_or_insert_with(HashMap::new).insert(repo.clone(), s);
         let live = json!({"login": "bob", "seq": 200, "data": tc::seal(&k, "data:bob", b"{}")});
-        take_live(&repo, Path::new("."), "bobkey", live.to_string().as_bytes(), &quiet());
+        take_live(&repo, Path::new("."), "bobkey", live.to_string().as_bytes(), &quiet(), &mut Live { last: None, at: Instant::now(), pulse: 0, told: vec![], bytes: 0, failed: 0, watchers: vec![], asked: None });
         let told = |repo: &str| with(repo, |s| {
             assert_eq!(s.peers["bob"].seq, 200, "the live copy landed");
             assert!(knows_status(s, "bob"), "still 0.2.6");
@@ -5436,10 +5717,105 @@ pub(crate) mod tests {
             asked_github: HashMap::new(), warned: vec![], my_sha: String::new(),
             chat: vec![], my_chat: vec![], chat_seen: HashMap::new(), my_notes: vec![], notes_seen: HashMap::new(), claims: HashMap::new(), unmerged: HashMap::new(),
             uses: HashMap::new(), waiting: vec![], sheets: HashMap::new(), asked: vec![], answered: vec![], answers: "auto".into(),
-            answerer: None, promises: vec![], last_answer: HashMap::new(), unread: 0, dirty: false, flow: Flow::default(), running: Default::default(), finished: Default::default(),
+            answerer: None, promises: vec![], last_answer: HashMap::new(), unread: 0, dirty: false, flow: Flow::default(), running: Default::default(), finished: Default::default(), watching: None, watch_now: false,
             secret: None, my_dms: vec![], my_groups: vec![], my_gmsgs: vec![], groups: HashMap::new(), msgs: vec![],
             msg_ids: Default::default(), chan_unread: HashMap::new(), cleared: HashMap::new(), pinged: vec![],
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stalled_git_call_is_stopped_with_its_helpers() {
+        let mark = std::env::temp_dir().join(format!("qh-limit-{}", std::process::id()));
+        let _ = std::fs::remove_file(&mark);
+        let mut c = Command::new("sh");
+        c.args(["-c", &format!("(sleep 2; touch {}) & wait", mark.display())]);
+        let t0 = Instant::now();
+        assert!(!run_limited(c, Duration::from_millis(200)), "stopped counts as failed");
+        assert!(t0.elapsed() < Duration::from_secs(1), "it took {:?}", t0.elapsed());
+        std::thread::sleep(Duration::from_millis(2300));
+        assert!(!mark.exists(), "the helper it started was stopped too");
+        let mut ok = Command::new("sh");
+        ok.args(["-c", "exit 0"]);
+        assert!(run_limited(ok, Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn the_board_stays_out_of_the_project() {
+        let base = std::env::temp_dir().join(format!("qh-store-{}", std::process::id()));
+        let (project, remote, store) = (base.join("project"), base.join("remote.git"), base.join("store"));
+        for d in [&project, &remote, &store] { std::fs::create_dir_all(d).unwrap(); }
+        assert!(git(&project, &["init", "-q"]).is_some() && git(&remote, &["init", "-q", "--bare"]).is_some() && git(&store, &["init", "-q", "--bare"]).is_some());
+        let count = |d: &Path| git(d, &["count-objects"]).unwrap_or_default();
+        let before = count(&project);
+        // a folder written the way the board's thread writes one: a commit on the identity commit
+        let idc = identity_commit(&store, "alice", "a", "b").unwrap();
+        let msg = json!({"state": "online"});
+        let commit = folder_commit(&store, &[("pub".to_string(), "a".to_string())], &msg, &idc).unwrap();
+        let url = remote.to_string_lossy().to_string();
+        assert!(git_net(&store, &["push", "-q", "-f", &url, &format!("{commit}:refs/qh/peers/alice")], &[]), "no project history is needed to push");
+        assert_eq!(count(&project), before, "nothing landed in the project's .git");
+        git(&store, &["update-ref", "refs/qh/me", &idc]);
+        assert!(git(&store, &["gc", "-q", "--prune=now"]).is_some());
+        assert!(folder_commit(&store, &[("pub".to_string(), "c".to_string())], &msg, &idc).is_ok(), "tidying keeps what the next folder needs");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    fn rows(list: &[&str]) -> Vec<(String, String)> {
+        list.iter().map(|t| ("user".to_string(), t.to_string())).collect()
+    }
+
+    /// What a sender would put in an update, from the rows it believes the watcher holds.
+    fn update(old: &[(String, String)], new: &[(String, String)], seq: u64) -> Value {
+        let (drop, keep) = rows_diff(old, new);
+        json!({"session": "main", "seq": seq, "drop": drop, "keep": keep, "hash": rows_hash(new),
+               "rows": new[keep..].iter().map(|(r, t)| json!([r, t])).collect::<Vec<_>>()})
+    }
+
+    #[test]
+    fn a_watched_transcript_sends_only_what_changed() {
+        assert_eq!(rows_diff(&rows(&["a", "b"]), &rows(&["a", "b", "c"])), (0, 2), "one more");
+        assert_eq!(rows_diff(&rows(&["a", "b", "c"]), &rows(&["b", "c", "d"])), (1, 2), "the window moved on");
+        assert_eq!(rows_diff(&rows(&["a", "b"]), &rows(&["a", "b2"])), (0, 1), "the last one changed");
+        assert_eq!(rows_diff(&[], &rows(&["a"])), (0, 0), "first time, whole");
+        assert_eq!(rows_diff(&rows(&["a"]), &rows(&["x", "y"])), (0, 0), "nothing in common");
+        let mut s = state("bob");
+        s.peers.insert("alice".into(), peer("alice", &["main"], true));
+        let (one, two, three) = (rows(&["a", "b"]), rows(&["a", "b", "c"]), rows(&["b", "c", "d"]));
+        assert!(take_rows(&mut s, "alice", &update(&[], &one, 10)));
+        assert!(take_rows(&mut s, "alice", &update(&one, &two, 20)));
+        assert_eq!(s.peers["alice"].transcripts["main"], two);
+        assert!(!take_rows(&mut s, "alice", &update(&one, &two, 15)), "an older update, late");
+        assert!(!s.watch_now);
+        // one went missing: they don't guess, they ask again, and what they hold stays
+        assert!(!take_rows(&mut s, "alice", &update(&rows(&["a", "b", "c", "z"]), &rows(&["a", "b", "c", "z", "y"]), 30)));
+        assert!(s.watch_now);
+        assert_eq!(s.peers["alice"].transcripts["main"], two);
+        assert!(take_rows(&mut s, "alice", &update(&two, &three, 40)));
+        assert_eq!(s.peers["alice"].transcripts["main"], three);
+    }
+
+    #[test]
+    fn an_older_git_copy_doesnt_undo_a_live_transcript() {
+        let repo = format!("req/live-tr{}", std::process::id());
+        let mut s = state("bob");
+        s.repo = repo.clone();
+        let mut alice = peer("alice", &["main"], true);
+        alice.seq = 100;
+        s.peers.insert("alice".into(), alice);
+        assert!(take_rows(&mut s, "alice", &update(&[], &rows(&["new"]), 500)));
+        STATES.lock().unwrap().get_or_insert_with(HashMap::new).insert(repo.clone(), s);
+        let from_git = |seq: u64, text: &str| {
+            let mut p = peer("alice", &["main"], true);
+            p.seq = seq;
+            p.transcripts.insert("main".into(), rows(&[text]));
+            p
+        };
+        take_in(&repo, &"bob".to_string(), None, from_git(200, "old"), &quiet(), &mut false);
+        assert_eq!(with(&repo, |s| s.peers["alice"].transcripts["main"].clone()).unwrap(), rows(&["new"]), "made before the live one");
+        take_in(&repo, &"bob".to_string(), None, from_git(900, "newer"), &quiet(), &mut false);
+        assert_eq!(with(&repo, |s| s.peers["alice"].transcripts["main"].clone()).unwrap(), rows(&["newer"]), "made after it");
+        STATES.lock().unwrap().get_or_insert_with(HashMap::new).remove(&repo);
     }
 
     fn quiet() -> Hooks {

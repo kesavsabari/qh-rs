@@ -2,6 +2,15 @@
 
 Each version starts with a one-line summary; the website shows it once the version is no longer recent.
 
+## 0.2.8 — 2026-11-04
+
+A stalled network no longer holds up requests, a teammate's session stays current while you watch it, and team mode stops writing into your project's `.git`.
+
+- **A stuck `git push` can't hold up requests.** Git and GitHub calls ran on the same thread as the direct line, with no time limit, so one stalled call stopped requests in both directions. They now have their own thread, and a push or fetch that takes over 30 seconds is stopped and tried again.
+- **Watch a teammate's session live.** While you have it open, its conversation comes over the direct line about once a second, sending only what changed. Nothing extra is sent when nobody is watching. Without a line, or with a teammate on an older qh, it still comes through git.
+- **Your project's `.git` stays yours.** Team data now lives in its own store in qh's state folder, cleaned up automatically, so it no longer adds objects to your project or sets off cleanup there. What's already in `.git` stays until git clears it, and teammates on older versions work as before.
+- **Fewer pushes.** When everyone online gets transcripts over the line, a transcript change alone no longer causes a push. GitHub recommends at most 6 pushes a minute per repository.
+
 ## 0.2.7 — 2026-11-04
 
 Handovers and agent answers now work as promised between two machines, and team mode costs far less to run.

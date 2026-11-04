@@ -2,7 +2,7 @@
 
 Each version starts with a one-line summary; the website shows it once the version is no longer recent.
 
-## 0.2.6 — 2026-11-03
+## 0.2.6 — 2026-11-04
 
 Team mode, redone: a new look, requests on screen, and agents that coordinate on code. Includes
 everything planned for 0.2.5.
@@ -41,7 +41,11 @@ everything planned for 0.2.5.
   are kept per project; ones already pushed, rewritten or 14 days old are dropped.
 - **Fixes.** Team setup refuses your home folder, also when it sits inside a git repo whose top is
   home. A closed window says goodbye instead of showing online for 5 minutes; a teammate waking
-  from sleep is checked again at once; macOS refusing LAN sends is said in the team log.
+  from sleep is checked again at once; macOS refusing LAN sends is said in the team log. Ctrl+Q quits
+  while a question is open, and the apps no longer show a tab as busy for good when a turn ends in
+  an error or is interrupted.
+- **Not yet tried on Windows:** team mode and GitHub sign-in. The TUI itself passes a real Windows
+  console test in CI.
 
 ## 0.2.4 — 2026-10-30
 

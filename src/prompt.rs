@@ -51,7 +51,7 @@ fn gitignore(root: &Path) -> Vec<String> {
         .collect()
 }
 
-fn is_code(f: &Path) -> bool {
+pub fn is_code(f: &Path) -> bool {
     const CODE: [&str; 22] = ["py", "rs", "js", "ts", "tsx", "jsx", "go", "java", "kt", "c", "h", "cc", "cpp", "hpp",
                               "rb", "php", "swift", "cs", "lua", "sh", "vue", "svelte"];
     f.extension().is_some_and(|e| CODE.contains(&e.to_string_lossy().as_ref()))

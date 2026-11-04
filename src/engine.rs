@@ -502,8 +502,8 @@ fn packet(args: &Value) -> Value {
 
 /// Answer a teammate agent's question from a read-only copy of this session: everything it
 /// knows, plus a few read-only lookups. Nothing is added to the session itself; the owner pays.
-/// Returns (answer, names the answer promises).
-pub fn answer_question(hub: &Arc<Hub>, m: &Arc<Member>, who: &str, question: &str) -> (String, Vec<String>) {
+/// Returns (answer, names it relies on, whether it commits the owner to something).
+pub fn answer_question(hub: &Arc<Hub>, m: &Arc<Member>, who: &str, question: &str) -> (String, Vec<String>, bool) {
     const LOOKS: usize = 8;
     let mut msgs = lock(&m.msgs).clone();
     repair(&mut msgs); // it may be mid-turn: close any open tool calls in the copy
@@ -513,7 +513,9 @@ Answer from what you know about your own work in this session. If you need to, l
 signatures, what's changing and when. If you don't know, or someone else owns it, say so and name them if you can. \
 The asker has their own clone: your uncommitted files aren't in it (they can read them with read_team_file, or get them once you push), \
 so never say they're in a shared workspace. \
-End with one line 'RELIED ON: <comma-separated function, type or field names your answer promises>' or 'RELIED ON: none'.")}));
+End with two lines. First 'RELIED ON: <comma-separated function, type or field names your answer is about>' or 'RELIED ON: none'. \
+Then 'PROMISE: yes' only if your answer commits to the future: that something won't change, or that work will happen. \
+Saying what the code does today is 'PROMISE: no'.")}));
     let schemas: Vec<Value> = lock(&m.set).tools.iter()
         .filter(|t| matches!(t["function"]["name"].as_str(), Some("read_file" | "grep" | "find_references"))).cloned().collect();
     let mut cwd = m.cwd();
@@ -547,34 +549,74 @@ End with one line 'RELIED ON: <comma-separated function, type or field names you
         }
     }
     settle(hub, m);
-    let (text, relied) = split_relied(&text);
-    (if text.is_empty() { "(no answer)".into() } else { text }, relied)
+    let (text, relied, promise) = split_relied(&text);
+    (if text.is_empty() { "(no answer)".into() } else { text }, relied, promise)
 }
 
-/// "… RELIED ON: get_user, `UserDto.name`, the schema" -> the answer without it, and the code
-/// names it lists (prose like "the schema" dropped). Models put the line anywhere.
-fn split_relied(text: &str) -> (String, Vec<String>) {
-    let Some(i) = text.rfind("RELIED ON:") else { return (text.trim().to_string(), vec![]) };
-    let names = text[i + "RELIED ON:".len()..].lines().next().unwrap_or("").split(',')
-        .map(|x| x.trim().trim_matches(|c| c == '`' || c == '.' || c == '*').trim_end_matches("()"))
+/// "… RELIED ON: get_user, `UserDto.name`, the schema, web.py PROMISE: no" -> the answer without
+/// them, the code names it lists (prose and file names dropped), and whether it promises anything.
+/// No PROMISE line: any name counts as one, so a model that forgets it still gets held. Models put
+/// the lines anywhere.
+fn split_relied(text: &str) -> (String, Vec<String>, bool) {
+    let (text, said) = match text.rfind("PROMISE:") {
+        Some(i) => {
+            let after = text[i + "PROMISE:".len()..].trim_start_matches([' ', '*', '`']);
+            let word: String = after.chars().take_while(|c| c.is_alphabetic()).collect();
+            let rest = after[word.len()..].trim_start_matches(['*', '`', '.']);
+            (format!("{}{rest}", text[..i].trim_end_matches([' ', '*', '`'])), Some(word.eq_ignore_ascii_case("yes")))
+        }
+        None => (text.to_string(), None),
+    };
+    let Some(i) = text.rfind("RELIED ON:") else { return (text.trim().to_string(), vec![], said.unwrap_or(false)) };
+    let names: Vec<String> = text[i + "RELIED ON:".len()..].lines().next().unwrap_or("").split(',')
+        .map(|x| x.trim().trim_matches(|c| c == '`' || c == '.' || c == '*').split('(').next().unwrap_or("").trim())
+        .filter(|x| !names_a_file(x))
         .map(|x| x.rsplit('.').next().unwrap_or(x).to_string())
         .filter(|x| x.len() > 1 && x != "none" && x.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
                 && x.chars().all(|c| c.is_alphanumeric() || c == '_'))
         .collect();
     let rest = text[i..].split_once('\n').map(|(_, r)| r).unwrap_or("");
-    (format!("{}\n{rest}", &text[..i]).trim().to_string(), names)
+    let promise = said.unwrap_or(!names.is_empty());
+    (format!("{}\n{rest}", text[..i].trim_end_matches([' ', '*', '`'])).trim().to_string(), names, promise)
+}
+
+/// "web.py", "src/web.py", "README.md": a file, not a function, type or field.
+fn names_a_file(x: &str) -> bool {
+    const OTHER: [&str; 13] = ["md", "txt", "json", "toml", "yaml", "yml", "html", "css", "sql", "lock", "cfg", "ini", "xml"];
+    let p = std::path::Path::new(x);
+    x.contains('/') || crate::prompt::is_code(p) || p.extension().is_some_and(|e| OTHER.contains(&e.to_string_lossy().as_ref()))
 }
 
 #[cfg(test)]
 mod relied_tests {
     #[test]
     fn relied_on_anywhere() {
-        let (t, n) = super::split_relied("It won't change. RELIED ON: price_with_tax, function signatures");
-        assert_eq!((t.as_str(), n), ("It won't change.", vec!["price_with_tax".to_string()]));
-        let (t, n) = super::split_relied("Yes.\nRELIED ON: `get_user()`, UserDto.full_name\n");
+        let (t, n, p) = super::split_relied("It won't change. RELIED ON: price_with_tax, function signatures");
+        assert_eq!((t.as_str(), n, p), ("It won't change.", vec!["price_with_tax".to_string()], true), "no PROMISE line: a name counts");
+        let (t, n, _) = super::split_relied("Yes.\nRELIED ON: `get_user()`, UserDto.full_name\n");
         assert_eq!((t.as_str(), n), ("Yes.", vec!["get_user".to_string(), "full_name".to_string()]));
         assert_eq!(super::split_relied("No idea.\nRELIED ON: none").1, Vec::<String>::new());
+        assert_eq!(super::split_relied("Yes.\nRELIED ON: `greet(name)`").1, vec!["greet".to_string()], "with its arguments");
         assert_eq!(super::split_relied("plain").0, "plain");
+    }
+
+    #[test]
+    fn promise_is_its_own_line() {
+        // a fact about a named function: the contract stays, nothing to hold
+        let (t, n, p) = super::split_relied("It returns a string.\nRELIED ON: greet\nPROMISE: no");
+        assert_eq!((t.as_str(), n, p), ("It returns a string.", vec!["greet".to_string()], false));
+        let (t, n, p) = super::split_relied("It stays.\nRELIED ON: greet\n**PROMISE:** yes.");
+        assert_eq!((t.as_str(), n, p), ("It stays.", vec!["greet".to_string()], true));
+        // same line, other order, no names: still read right
+        let (t, n, p) = super::split_relied("Done by Friday. PROMISE: YES RELIED ON: none");
+        assert_eq!((t.as_str(), n, p), ("Done by Friday.", vec![], true));
+    }
+
+    #[test]
+    fn file_names_are_not_code_names() {
+        let (_, n, p) = super::split_relied("A.\nRELIED ON: web.py, src/web.py, README.md, config.toml, UserDto.name");
+        assert_eq!((n, p), (vec!["name".to_string()], true));
+        assert!(!super::split_relied("A.\nRELIED ON: web.py").2, "only a file: nothing promised");
     }
 }
 

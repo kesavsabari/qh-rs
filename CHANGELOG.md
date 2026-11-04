@@ -2,6 +2,19 @@
 
 Each version starts with a one-line summary; the website shows it once the version is no longer recent.
 
+## 0.2.7 — 2026-11-04
+
+Handovers and agent answers now work as promised between two machines, and team mode costs far less to run.
+
+- **Accepting a handover gives the agent the packet.** Its decisions, files and notes went missing when you accepted a request, unless you later pressed Enter on Taken over. Both ways now pass it on.
+- **Request status arrives.** Delivered, seen and accepted could be lost on the direct line, because a teammate's version was forgotten after each update. A request's history now fills in on the sender's side.
+- **Facts go out alone, promises wait.** Your agent now says for itself whether an answer commits you to something, and only that holds it for you. A plain fact no longer waits because it names a function, and `web.py` no longer counts as a promise about `py`.
+- **Taking back an answer reaches the agent that asked.** It's told not to rely on it and to remove any copy it saved, and the contract the answer made ends. A teammate on an older qh gets a message, as before.
+- **Fixes.** Focus and later end on screen without a keypress, a clash shows one line per person, and an accepted request no longer shows "seen, back to it".
+- **Team mode runs lighter.** While a reply streams in the team room, about 1 git process a second instead of about 80. Idle, a third as many. Nothing is sealed or signed unless it changed.
+- **Fewer writes to your `.git`.** With everyone online on the direct line, your folder goes to git every 30 s, not every 10 s or so. A teammate's view of your conversation can lag that much.
+- **The direct line carries less, and recovers.** The whole team state is paced by its size, a message the line gives up on is sent again, and the outbox and chat in memory are capped. Requests took under a second both ways in our two-machine test.
+
 ## 0.2.6 — 2026-11-04
 
 Team mode, redone: a new look, requests on screen, and agents that coordinate on code. Includes

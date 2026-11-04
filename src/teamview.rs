@@ -379,7 +379,7 @@ impl TeamView {
     }
 
     fn root(cwd: &Path) -> std::path::PathBuf {
-        crate::team::github_repo(cwd).map(|(r, _)| r).unwrap_or_else(|| cwd.to_path_buf())
+        crate::team::github_repo_cached(cwd).map(|(r, _)| r).unwrap_or_else(|| cwd.to_path_buf())
     }
 
     /// The chat channel picked in the Chat tab.
@@ -1395,7 +1395,7 @@ impl TeamView {
                 .filter(|x| matches!(x["role"].as_str(), Some("user" | "assistant")))
                 .filter_map(|x| x["content"].as_str().filter(|c| !c.trim().is_empty() && !c.starts_with("[harness]"))
                     .map(|c| (x["role"].as_str().unwrap_or("").to_string(), c.to_string())))
-                .collect()).unwrap_or_default()
+                .rev().take(40).collect::<Vec<_>>().into_iter().rev().collect()).unwrap_or_default()
         } else {
             crate::team::transcript_rows(&s.who, &s.name)
         };
@@ -1445,22 +1445,7 @@ impl TeamView {
 /// What your agent is told when you start on a handover: the request and its packet, beginning
 /// with the first thing left.
 fn handover_prompt(i: &crate::team::Incoming) -> String {
-    let p = &i.packet;
-    let list = |k: &str| p[k].as_array().into_iter().flatten().filter_map(|x| x.as_str()).map(|x| format!("- {x}")).collect::<Vec<_>>().join("\n");
-    let mut t = format!("{} handed this over to you: {}\n", i.from, crate::team::bare(&i.text));
-    if p.is_object() {
-        if let Some(b) = p["branch"].as_str().filter(|b| !b.is_empty()) { t += &format!("\nTheir commits are on branch {b} (switch to it first if you're not on it; ask me if the working tree isn't clean).\n") }
-        for (head, k) in [("Done", "done"), ("Left", "left")] {
-            let l = list(k);
-            if !l.is_empty() { t += &format!("\n{head}:\n{l}\n") }
-        }
-        if let Some(x) = p["watch"].as_str().filter(|x| !x.is_empty()) { t += &format!("\nWatch out: {x}\n") }
-        let files = crate::team::packet_files(i);
-        if !files.is_empty() { t += &format!("\nFiles: {}\n", files.join(", ")) }
-        if let Some(first) = p["left"].as_array().and_then(|a| a.first()).and_then(|x| x.as_str()) { t += &format!("\nStart with: {first}") }
-    }
-    for (who, both) in crate::team::clashes(i) { t += &format!("\nCareful: {who} also handed me {}; check their changes there first.", both.join(", ")) }
-    t
+    format!("{} handed this over to you: {}\n\n{}", i.from, crate::team::bare(&i.text), crate::team::packet_brief(i))
 }
 
 /// Contracts between people: (producer, consumer, name) where the consumer's fresh code uses

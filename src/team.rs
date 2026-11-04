@@ -40,6 +40,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const API: &str = "https://api.github.com";
 const MIN_WRITE: Duration = Duration::from_secs(10);
+const QUIET_WRITE: Duration = Duration::from_secs(30); // everyone who's online has it over the line: git is only the fallback
 const MIN_LINK_WRITE: Duration = Duration::from_secs(1); // floor for the address-change exemption
 const KEEPALIVE: Duration = Duration::from_secs(120);
 const POLL: Duration = Duration::from_secs(3);
@@ -221,8 +222,10 @@ pub struct Answered {
     pub to: String,
     pub question: String,
     pub answer: String,
-    pub promise: bool, // it promised names (RELIED ON): only trusted teammates get those alone
+    pub promise: bool, // it committed us to something (PROMISE): only trusted teammates get those alone
     pub taken_back: bool,
+    pub session: String,      // their session that asked: a correction goes to its agent
+    pub relied: Vec<String>,  // names the answer counted on: taking it back ends those contracts
 }
 
 /// Steps 6-8: handovers you took, what your agent answered alone, trust topics, focus.
@@ -288,6 +291,8 @@ struct Asked {
     ts: u64,
 }
 
+const OUTBOX_MAX: usize = 300; // a teammate gone for good never acks: this rides in every folder and line message
+const CHAT_MAX: usize = 1000; // in memory; the file keeps the last 300
 const ANSWERS_PER_HOUR: usize = 20; // questions our agents answer for teammates, at our cost
 
 struct State {
@@ -419,6 +424,20 @@ pub fn github_repo(cwd: &Path) -> Option<(PathBuf, String)> {
     let rest = url.split_once("github.com").map(|(_, r)| r.trim_start_matches([':', '/']))?;
     let slug = rest.trim_end_matches('/').trim_end_matches(".git");
     (slug.split('/').count() == 2).then(|| (root, slug.to_string()))
+}
+
+/// `github_repo` for what runs on every frame: two git processes each time would be up to 360 a
+/// second while a reply streams. A few seconds out of date is fine for showing things.
+pub fn github_repo_cached(cwd: &Path) -> Option<(PathBuf, String)> {
+    static SEEN: Mutex<Option<HashMap<PathBuf, (Instant, Option<(PathBuf, String)>)>>> = Mutex::new(None);
+    let mut g = SEEN.lock().unwrap();
+    let m = g.get_or_insert_with(HashMap::new);
+    if let Some((at, r)) = m.get(cwd) {
+        if at.elapsed() < Duration::from_secs(5) { return r.clone() }
+    }
+    let r = github_repo(cwd);
+    m.insert(cwd.to_path_buf(), (Instant::now(), r.clone()));
+    r
 }
 
 /// A GitHub token: GH_TOKEN/GITHUB_TOKEN, the gh CLI's login, or git's stored credential.
@@ -620,6 +639,7 @@ fn confirmed(repo: &str, login: &str) -> bool {
 }
 
 /// A folder as pushed: the commit message and every file (path, exact contents).
+#[derive(Clone)]
 struct Folder {
     msg: String,
     files: Vec<(String, String)>,
@@ -870,13 +890,14 @@ fn outgoing_of(v: &Value) -> Outgoing {
 struct Saved { outbox: Vec<Value>, pending: Vec<Incoming>, sent: Vec<Outgoing>, fyi: Vec<Fyi>, ts: u64, flow: Flow }
 
 fn answered_json(a: &Answered) -> Value {
-    json!({"ts": a.ts, "to": a.to, "q": a.question, "a": a.answer, "promise": a.promise, "back": a.taken_back})
+    json!({"ts": a.ts, "to": a.to, "q": a.question, "a": a.answer, "promise": a.promise, "back": a.taken_back, "session": a.session, "relied": a.relied})
 }
 
 fn answered_of(v: &Value) -> Answered {
     Answered { ts: v["ts"].as_u64().unwrap_or(0), to: v["to"].as_str().unwrap_or("").into(), question: v["q"].as_str().unwrap_or("").into(),
                answer: v["a"].as_str().unwrap_or("").into(), promise: v["promise"].as_bool().unwrap_or(false),
-               taken_back: v["back"].as_bool().unwrap_or(false) }
+               taken_back: v["back"].as_bool().unwrap_or(false), session: v["session"].as_str().unwrap_or("").into(),
+               relied: v["relied"].as_array().into_iter().flatten().filter_map(|n| n.as_str().map(String::from)).collect() }
 }
 
 fn load_requests(repo: &str) -> Saved {
@@ -961,12 +982,22 @@ fn push_fyi(s: &mut State, kind: &str, text: String) {
 }
 
 /// Requests nobody acted on for two weeks: gone, and the sender is told.
+/// Over the cap: news about requests goes first, then the oldest of what's left.
+fn trim_outbox(s: &mut State) {
+    let mut over = s.outbox.len().saturating_sub(OUTBOX_MAX);
+    if over == 0 { return }
+    s.outbox.retain(|m| { let drop = over > 0 && m["kind"] == "s"; if drop { over -= 1 } !drop });
+    s.outbox.drain(..over);
+    s.dirty = true;
+}
+
 fn expire_locked(s: &mut State) -> Vec<(String, u64)> {
     let old: Vec<(String, u64)> = s.pending.iter().filter(|i| now().saturating_sub(i.arrived()) > REQUEST_LIFE)
         .map(|i| (i.from.clone(), i.id)).collect();
     for (from, id) in &old {
         decide_locked(s, from, *id, "expired");
     }
+    trim_outbox(s);
     old
 }
 
@@ -978,12 +1009,14 @@ fn wake_locked(s: &mut State) {
         i.until = 0;
         alert(format!("qh: back to {}'s request: {}", i.from, clip_to(bare(&i.text), 80)));
         s.dirty = true;
+        bump();
     }
     if s.flow.focus > 0 && s.flow.focus <= t && !s.flow.focus_told {
         s.flow.focus_told = true;
         let n = s.pending.iter().filter(|i| !i.snoozed).count();
         if n > 0 { ALERTS.lock().unwrap().push(format!("qh: focus over · {n} waiting for you")) }
         s.dirty = true;
+        bump(); // an idle screen still says "focusing" otherwise
     }
 }
 
@@ -1101,15 +1134,16 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks, background: bool) -> Re
     let line = link();
     std::thread::Builder::new().name(format!("qh-team-{repo}")).spawn(move || {
         let mut etag: Option<String> = None;
-        let mut shas: HashMap<String, String> = HashMap::new();
         let (mut last_files, mut last_write, mut last_poll) = (vec![], Instant::now() - KEEPALIVE, Instant::now() - POLL);
         let mut last_link_ms = 0u64; // the address stamp in the last folder we wrote
         let mut fetched = false;
-        let mut live = Live { last: None, at: Instant::now(), pulse: 0, told: vec![] };
+        let mut live = Live { last: None, at: Instant::now(), pulse: 0, told: vec![], bytes: 0, failed: 0, failed_at: None };
         let mut handed = false; // plain qh gave the team to `qh team`: it takes it back after
+        let mut folders: HashMap<String, (String, Folder)> = HashMap::new(); // login -> sha, its files: a commit never changes, so read each once
+        let mut sealed = Sealed::default();
         // my folder: the files for git, and the commit message (presence); plus the data without
         // transcripts, for the direct line
-        let build = |state_word: &str| -> (Vec<(String, String)>, Value, Option<Value>) {
+        let mut build = |state_word: &str| -> (Vec<(String, String)>, Value, Option<Value>) {
             let mut quick = None;
             let mut files = vec![("pub".to_string(), my_pub.clone())];
             let d = summary(); // outside the lock: it reads the hub
@@ -1119,11 +1153,16 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks, background: bool) -> Re
                 save_requests(s);
                 if let Some(k) = &s.key {
                     // the key goes to members, and to newcomers we approved; nobody else
-                    let mut wraps: Vec<(String, String)> = s.peers.values()
+                    let mut who: Vec<(String, String)> = s.peers.values()
                         .filter(|p| !p.pub_key.is_empty() && (p.joined || s.approved.contains(&p.login)) && !s.removed.contains(&p.login))
-                        .filter_map(|p| Some((format!("keys/{}", p.login), tc::wrap(k, &secret, &p.pub_key, &s.repo)?))).collect();
-                    wraps.sort();
-                    files.extend(wraps);
+                        .map(|p| (p.login.clone(), p.pub_key.clone())).collect();
+                    who.sort();
+                    if sealed.key != Some(*k) { sealed = Sealed { key: Some(*k), ..Default::default() } }
+                    if sealed.who != who {
+                        sealed.wraps = who.iter().filter_map(|(l, public)| Some((format!("keys/{l}"), tc::wrap(k, &secret, public, &s.repo)?))).collect();
+                        sealed.who = who;
+                    }
+                    files.extend(sealed.wraps.iter().cloned());
                     if s.epoch > 0 {
                         files.push(("epoch".into(), s.epoch.to_string()));
                     }
@@ -1155,7 +1194,12 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks, background: bool) -> Re
                         d["link"] = json!(l.addrs());
                         d["link_ms"] = json!(l.addrs_ms());
                     }
-                    files.push(("data".into(), tc::seal(k, &format!("data:{}", s.me), d.to_string().as_bytes())));
+                    let plain = d.to_string();
+                    if sealed.plain != plain {
+                        sealed.data = tc::seal(k, &format!("data:{}", s.me), plain.as_bytes());
+                        sealed.plain = plain;
+                    }
+                    files.push(("data".into(), sealed.data.clone()));
                     let mut q = d;
                     if let Some(o) = q.as_object_mut() { o.remove("transcripts"); }
                     quick = Some(q);
@@ -1164,9 +1208,12 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks, background: bool) -> Re
             let msg = json!({"v": 2, "state": state_word, "ts": now(), "ms": now_ms(), "qh": crate::update::VERSION});
             files.push(("sign".into(), sign_pub.clone()));
             files.push(("anchor".into(), idc.clone()));
+            (files, msg, quick)
+        };
+        let signed = |mut files: Vec<(String, String)>, msg: &Value| -> Vec<(String, String)> {
             let sig = tc::sign_folder(&secret, &repo2, &me2, &msg.to_string(), &files);
             files.push(("sig".into(), sig));
-            (files, msg, quick)
+            files
         };
         while running.load(Relaxed) {
             // read the board: one conditional request, a git fetch only when something changed
@@ -1184,12 +1231,12 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks, background: bool) -> Re
                     Ok((200, tag, v)) => {
                         let changed = v.as_array().into_iter().flatten().any(|r| {
                             let name = r["ref"].as_str().unwrap_or("").trim_start_matches("refs/qh/peers/");
-                            name != me2 && shas.get(name).map(|s| s.as_str()) != r["object"]["sha"].as_str()
+                            name != me2 && folders.get(name).map(|(s, _)| s.as_str()) != r["object"]["sha"].as_str()
                         });
                         etag = tag;
                         if changed || !fetched {
                             match fetch_board(&root, &repo2, &tok) {
-                                Ok(list) => { fetched = true; absorb(&repo2, &root, &list, &mut shas, &secret, &tok, &hooks); bump(); (hooks.refresh)() }
+                                Ok(list) => { fetched = true; absorb(&repo2, &root, &list, &mut folders, &secret, &tok, &hooks); bump(); (hooks.refresh)() }
                                 Err(e) => set_error(&repo2, e),
                             }
                         }
@@ -1202,18 +1249,24 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks, background: bool) -> Re
                 wake_check(&repo2, &root, &hooks);
             }
             // write my folder: when it changed (throttled), when asked (dirty), or as a keep-alive.
-            // Wrapped keys are fresh nonces each time, so compare without them.
+            // Wrapped keys and data are sealed again only when they change, and each write costs
+            // about 84 KB of loose objects in the project's .git, so with everyone on the line
+            // data changes go out less often. Who's in the team and addresses never wait.
             let (files, msg, quick) = build("online");
             if let (Some(l), Some(d)) = (&line, quick) {
                 push_live(&repo2, &me2, l, d, &mut live);
             }
             let dirty = with(&repo2, |s| s.dirty).unwrap_or(false);
-            let plain = |f: &[(String, String)]| -> Vec<String> { f.iter().map(|(n, c)| if n == "data" || n == "sig" || n.contains('/') { n.clone() } else { format!("{n}={c}") }).collect() };
-            let changed = plain(&files) != plain(&last_files) || data_changed(&repo2, &files, &last_files);
+            let plain = |f: &[(String, String)]| -> Vec<String> { f.iter().filter(|(n, _)| n != "sig").map(|(n, c)| if n == "data" || n.contains('/') { n.clone() } else { format!("{n}={c}") }).collect() };
+            let data = |f: &[(String, String)]| f.iter().find(|(n, _)| n == "data").map(|(_, c)| c.clone());
+            let same = plain(&files) == plain(&last_files);
+            let changed = !same || data(&files) != data(&last_files);
+            let gap = if same && live.failed_at.is_none_or(|t| t.elapsed() >= QUIET_WRITE) && line.is_some() && everyone_on_line(&repo2) { QUIET_WRITE } else { MIN_WRITE };
             // new line addresses skip the throttle: until they're out, teammates can't reach us directly
             let link_ms = line.as_ref().map_or(0, |l| l.addrs_ms());
             let moved = link_ms != last_link_ms && last_write.elapsed() >= MIN_LINK_WRITE;
-            if fetched && (((changed || dirty) && (last_write.elapsed() >= MIN_WRITE || moved)) || last_write.elapsed() >= KEEPALIVE) {
+            if fetched && (((changed || dirty) && (last_write.elapsed() >= gap || moved)) || last_write.elapsed() >= KEEPALIVE) {
+                let files = signed(files, &msg);
                 match publish(&root, &repo2, &me2, &tok, &files, &msg, &idc) {
                     Ok(sha) => {
                         last_files = files;
@@ -1244,6 +1297,7 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks, background: bool) -> Re
         }
         if let Some(m) = LIVE.lock().unwrap().as_mut() { m.remove(&repo2); }
         let (files, msg, _) = build("offline");
+        let files = signed(files, &msg);
         let _ = publish(&root, &repo2, &me2, &tok, &files, &msg, &idc);
         release(&repo2);
         finished.store(true, Relaxed);
@@ -1261,14 +1315,20 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks, background: bool) -> Re
     Ok(format!("team mode on for {repo} as {me} (shared data is encrypted for the team)"))
 }
 
-/// Whether the sealed `data` says something different (it's re-sealed with a new nonce every
-/// build, so compare what it decrypts to).
-fn data_changed(repo: &str, a: &[(String, String)], b: &[(String, String)]) -> bool {
-    with(repo, |s| {
-        let Some(k) = s.key else { return false };
-        let get = |f: &[(String, String)]| f.iter().find(|(n, _)| n == "data").and_then(|(_, c)| tc::open(&k, &format!("data:{}", s.me), c));
-        get(a) != get(b)
-    }).unwrap_or(false)
+/// What we sealed last, so an unchanged folder costs no crypto (it's built twice a second).
+#[derive(Default)]
+struct Sealed {
+    key: Option<Key>,
+    who: Vec<(String, String)>, // login, member key: who the wraps are for
+    wraps: Vec<(String, String)>,
+    plain: String,
+    data: String,
+}
+
+/// Whether everyone reading the board right now gets our data over the line anyway.
+fn everyone_on_line(repo: &str) -> bool {
+    let lines = LINES.lock().unwrap().clone().unwrap_or_default();
+    with(repo, |s| s.peers.values().filter(|p| p.online).all(|p| lines.contains_key(&p.pub_key))).unwrap_or(false)
 }
 
 fn set_error(repo: &str, e: String) {
@@ -1278,7 +1338,7 @@ fn set_error(repo: &str, e: String) {
 
 /// Take in freshly fetched folders: our key if someone wrapped it for us (or left it under our
 /// invite code), presence, newcomers, chat, transcripts, and messages to our sessions.
-fn absorb(repo: &str, root: &Path, list: &[(String, String)], shas: &mut HashMap<String, String>,
+fn absorb(repo: &str, root: &Path, list: &[(String, String)], read: &mut HashMap<String, (String, Folder)>,
           secret: &x25519_dalek::StaticSecret, tok: &str, hooks: &Hooks) {
     let Some((me, my_sha)) = with(repo, |s| (s.me.clone(), s.my_sha.clone())) else { return };
     // our own folder, rewritten by someone else: put ours back at once
@@ -1291,8 +1351,8 @@ fn absorb(repo: &str, root: &Path, list: &[(String, String)], shas: &mut HashMap
     }
     let mut folders = vec![];
     for (login, sha) in list.iter().filter(|(l, _)| *l != me) {
-        shas.insert(login.clone(), sha.clone());
-        let f = folder_files(root, sha);
+        let f = match read.get(login) { Some((s, f)) if s == sha => f.clone(), _ => folder_files(root, sha) };
+        read.insert(login.clone(), (sha.clone(), f.clone()));
         let p = read_folder(&f, repo, login, None);
         if vet(repo, tok, &p, hooks) {
             if crate::update::newer(&p.qh, crate::update::VERSION) {
@@ -1839,6 +1899,7 @@ fn take_in(repo: &str, me: &String, key: Option<Key>, mut p: Peer, hooks: &Hooks
         m.pub_key = std::mem::take(&mut p.pub_key);
         m.wrapped = std::mem::take(&mut p.wrapped);
         m.invites = std::mem::take(&mut p.invites);
+        m.qh = std::mem::take(&mut p.qh);
         if !p.transcripts.is_empty() { m.transcripts = std::mem::take(&mut p.transcripts) }
         p = m;
     }
@@ -1937,6 +1998,7 @@ fn take_in(repo: &str, me: &String, key: Option<Key>, mut p: Peer, hooks: &Hooks
             }
             o.history.push((st, inc.ts));
             if !text.is_empty() { o.reply = text.clone() }
+            else if o.reply.starts_with("seen, ") { o.reply.clear() } // that news is over
             let what = clip_to(bare(&o.text), 80);
             let line = match st {
                 Status::Replied => Some(format!("{login} replied to \"{what}\": {text}")),
@@ -2002,6 +2064,26 @@ fn take_in(repo: &str, me: &String, key: Option<Key>, mut p: Peer, hooks: &Hooks
                 (hooks.answered)(&q.session, &format!("[team answer from {from}] You asked: {}\n\n{}{}", q.q, inc.text,
                     if relied.is_empty() { String::new() } else { format!("\n\n(Their side now knows you rely on: {}. If they change those, they're told first. \
 If this answer matters a lot, the user can make it a checked promise with /promise.)", relied.join(", ")) }));
+            }
+            continue;
+        }
+        if m["kind"] == "c" {
+            // they took back what their agent told ours: its contracts end, and the agent is told
+            s.seen.insert(login.clone(), id);
+            s.dirty = true;
+            let (q, a) = (m["q"].as_str().unwrap_or(""), m["a"].as_str().unwrap_or(""));
+            if let Some(u) = s.uses.get_mut(&inc.session) {
+                for n in m["relied"].as_array().into_iter().flatten().filter_map(Value::as_str) { u.remove(n); }
+            }
+            if s.last_answer.get(&inc.session).is_some_and(|l| l.2 == format!("Q: {q} A: {a}")) { s.last_answer.remove(&inc.session); }
+            let line = format!("{login} took back their agent's answer to \"{}\"", clip_to(q, 80));
+            alert(format!("qh: {}", clip_to(&line, 100)));
+            push_fyi(s, "answer", line.clone());
+            say_locked(repo, s, hooks, line);
+            if !inc.session.is_empty() {
+                (hooks.answered)(&inc.session, &format!("[team correction from {login}] {login} took back the answer you were given to: {q}\n\nThat answer was: {a}\n\n\
+Don't rely on it any more, and if you saved it anywhere, remove it. If you already acted on it, tell the user what depends on it. Don't ask their agent \
+the same thing again: it could only repeat itself. If this matters, tell the user to ask {login} in person."));
             }
             continue;
         }
@@ -2216,6 +2298,7 @@ fn chat_locked(s: &mut State, text: &str) -> Value {
 fn insert_chat(s: &mut State, ts: u64, from: &str, text: &str) {
     let at = s.chat.iter().rposition(|(t, _, _)| *t <= ts).map_or(0, |i| i + 1);
     s.chat.insert(at, (ts, from.to_string(), text.to_string()));
+    if s.chat.len() > CHAT_MAX { s.chat.remove(0); }
 }
 
 /// Unread lines in every channel: the team chat, DMs and groups.
@@ -2249,9 +2332,31 @@ pub fn bare(text: &str) -> &str {
     text.strip_prefix('[').and_then(|t| t.split_once("] ")).map_or(text, |x| x.1)
 }
 
-/// What an accepted request says in our session.
+/// What an accepted request says in our session: the request, then its handover packet if it has one.
 fn accepted_text(inc: &Incoming) -> String {
-    format!("[accepted request from {}]: {}", inc.from, inc.text)
+    let brief = packet_brief(inc);
+    let head = format!("[accepted request from {}]: {}", inc.from, inc.text);
+    if brief.is_empty() { head } else { format!("{head}\n\n[handover packet]\n{brief}") }
+}
+
+/// A handover's packet in words for the agent, beginning with where to start: "" if it has none.
+pub fn packet_brief(i: &Incoming) -> String {
+    let p = &i.packet;
+    let list = |k: &str| p[k].as_array().into_iter().flatten().filter_map(|x| x.as_str()).map(|x| format!("- {x}")).collect::<Vec<_>>().join("\n");
+    let mut t = String::new();
+    if p.is_object() {
+        if let Some(b) = p["branch"].as_str().filter(|b| !b.is_empty()) { t += &format!("\nTheir commits are on branch {b} (switch to it first if you're not on it; ask me if the working tree isn't clean).\n") }
+        for (head, k) in [("Done", "done"), ("Left", "left")] {
+            let l = list(k);
+            if !l.is_empty() { t += &format!("\n{head}:\n{l}\n") }
+        }
+        if let Some(x) = p["watch"].as_str().filter(|x| !x.is_empty()) { t += &format!("\nWatch out: {x}\n") }
+        let files = packet_files(i);
+        if !files.is_empty() { t += &format!("\nFiles: {}\n", files.join(", ")) }
+        if let Some(first) = p["left"].as_array().and_then(|a| a.first()).and_then(|x| x.as_str()) { t += &format!("\nStart with: {first}") }
+    }
+    for (who, both) in clashes(i) { t += &format!("\nCareful: {who} also handed me {}; check their changes there first.", both.join(", ")) }
+    t.trim_start().to_string()
 }
 
 /// What the requester reads when the work we accepted is over: the agent's last words, or that it stopped.
@@ -2275,7 +2380,7 @@ pub fn request_done(cwd: &Path, request: &str, fin: &str) {
     let Some((from, text)) = request.strip_prefix("[accepted request from ").and_then(|r| r.split_once("]: ")) else { return };
     let Some((_, repo)) = repo_of(cwd) else { return };
     if !running_for(&repo) { return }
-    dm_now(&repo, from, &done_text(text.split("\n\n[from ").next().unwrap_or(text), fin));
+    dm_now(&repo, from, &done_text(text.split("\n\n[").next().unwrap_or(text), fin));
 }
 
 /// Take a waiting request off the list and mark it handled; the requester learns which way it
@@ -2326,7 +2431,7 @@ pub fn decide(from: &str, id: u64, answer: &str) -> Option<(String, String)> {
     if let Some(q) = inc.question {
         if let Some((text, relied)) = inc.draft {
             // held because it promised something: you looked and said yes, so it goes as written
-            with(&repo, |s| { reply_locked(s, &q, &text, &relied); log_answer(s, &q, &text, !relied.is_empty()) });
+            with(&repo, |s| { reply_locked(s, &q, &text, &relied); log_answer(s, &q, &text, &relied, true) });
             return Some((String::new(), format!("sent your agent's answer to {}", inc.from)));
         }
         with(&repo, |s| s.flow.approved.push((q.from.clone(), q.id)));
@@ -2458,37 +2563,39 @@ fn reply_locked(s: &mut State, q: &Question, text: &str, relied: &[String]) {
 }
 
 /// Our agent's answer to a teammate's question is ready. Facts go out alone to anyone; an answer
-/// that promises names (RELIED ON) goes alone only to someone trusted on that topic, else it's
-/// held in Asked you with the answer ready. Whatever goes out without you is logged.
-pub fn reply(q: &Question, text: &str, relied: &[String]) {
+/// that commits us to something (`promise`) goes alone only to someone trusted on that topic, else
+/// it's held in Asked you with the answer ready. Whatever goes out without you is logged.
+pub fn reply(q: &Question, text: &str, relied: &[String], promise: bool) {
+    let what = if relied.is_empty() { "something".to_string() } else { relied.join(", ") };
     let who = if q.from_session.is_empty() { q.from.clone() } else { format!("{}/{}", q.from, q.from_session) };
     let held = with(&q.repo, |s| {
         let pos = s.flow.approved.iter().position(|a| *a == (q.from.clone(), q.id));
         if let Some(i) = pos { s.flow.approved.remove(i); }
         let alone = pos.is_none() && !text.starts_with("(not answered");
-        if alone && !relied.is_empty() && !trusted_for(s, &q.from, &q.text) {
+        if alone && promise && !trusted_for(s, &q.from, &q.text) {
             let mut inc = Incoming { from: q.from.clone(), id: q.id, session: q.session.clone(), text: format!("question: {}", q.text),
                                      question: Some(q.clone()), ts: now(), from_session: q.from_session.clone(), kind: "question".into(),
                                      history: vec![(Status::Delivered, now())], draft: Some((text.to_string(), relied.to_vec())), ..Default::default() };
-            inc.packet = json!({"held": format!("held for you: it promises {}, and {} isn't trusted on this topic", relied.join(", "), q.from)});
+            inc.packet = json!({"held": format!("held for you: it promises {what}, and {} isn't trusted on this topic", q.from)});
             s.pending.push(inc);
             s.dirty = true;
             return true;
         }
         reply_locked(s, q, text, relied);
-        if alone { log_answer(s, q, text, !relied.is_empty()) }
+        if alone { log_answer(s, q, text, relied, promise) }
         false
     }).unwrap_or(false);
     if held {
         alert(format!("qh: {who}'s question waits for you: the answer promises something"));
-        log_to(&q.repo, &format!("held your {}'s answer to {who}: it promises {}", q.session, relied.join(", ")));
+        log_to(&q.repo, &format!("held your {}'s answer to {who}: it promises {what}", q.session));
     } else {
         log_to(&q.repo, &format!("your {} → {who}: {}", q.session, text.chars().take(300).collect::<String>()));
     }
 }
 
-fn log_answer(s: &mut State, q: &Question, text: &str, promise: bool) {
-    s.flow.log.push(Answered { ts: now(), to: q.from.clone(), question: q.text.clone(), answer: text.to_string(), promise, taken_back: false });
+fn log_answer(s: &mut State, q: &Question, text: &str, relied: &[String], promise: bool) {
+    s.flow.log.push(Answered { ts: now(), to: q.from.clone(), question: q.text.clone(), answer: text.to_string(), promise, taken_back: false,
+                               session: q.from_session.clone(), relied: relied.to_vec() });
     let n = s.flow.log.len();
     if n > 100 { s.flow.log.drain(..n - 100); }
     push_fyi(s, "answered", format!("your agent answered {}: {}", q.from, clip_to(&q.text, 80)));
@@ -2529,7 +2636,7 @@ pub fn later_choices() -> Vec<(String, u64)> {
     let lunch = next_at(14, 0);
     if lunch - now() < 12 * 3600 && lunch > now() + 3600 { v.push((format!("after lunch {}", clock(lunch)), lunch)) }
     let morning = next_at(9, 0);
-    v.push((format!("tomorrow morning {}", clock(morning)), morning + if morning - now() < 6 * 3600 { 86400 } else { 0 }));
+    v.push((format!("tomorrow morning {}", clock(morning).trim_start_matches("tomorrow ")), morning + if morning - now() < 6 * 3600 { 86400 } else { 0 }));
     v.push(("when I'm done here".to_string(), 0));
     v
 }
@@ -2579,12 +2686,21 @@ pub fn packet_files(i: &Incoming) -> Vec<String> {
 pub fn clashes(i: &Incoming) -> Vec<(String, Vec<String>)> {
     let mine = packet_files(i);
     if mine.is_empty() { return vec![] }
-    cur(|s| s.pending.iter().filter(|x| x.question.is_none()).chain(s.flow.taken.iter())
-        .filter(|x| !(x.from == i.from && x.id == i.id))
-        .filter_map(|x| {
-            let both: Vec<String> = packet_files(x).into_iter().filter(|f| mine.contains(f)).collect();
-            (!both.is_empty()).then(|| (x.from.clone(), both))
-        }).collect()).unwrap_or_default()
+    cur(|s| clashes_in(s, i, &mine)).unwrap_or_default()
+}
+
+/// One line per person, however many handovers of theirs touch the same files.
+fn clashes_in(s: &State, i: &Incoming, mine: &[String]) -> Vec<(String, Vec<String>)> {
+    let mut out: Vec<(String, Vec<String>)> = vec![];
+    for x in s.pending.iter().filter(|x| x.question.is_none()).chain(s.flow.taken.iter()).filter(|x| !(x.from == i.from && x.id == i.id)) {
+        for f in packet_files(x).into_iter().filter(|f| mine.contains(f)) {
+            match out.iter_mut().find(|o| o.0 == x.from) {
+                Some(o) => if !o.1.contains(&f) { o.1.push(f) },
+                None => out.push((x.from.clone(), vec![f])),
+            }
+        }
+    }
+    out
 }
 
 /// What our agent told teammates without us, newest first.
@@ -2602,9 +2718,23 @@ pub fn take_back(n: usize) -> Result<String, String> {
         s.dirty = true;
         Some(a.clone())
     }).flatten().ok_or("already taken back, or gone")?;
+    // 0.2.7 and later: to the agent that asked, which is the one building on it
+    if cur(|s| correct_out(s, &a)) == Some(true) {
+        return Ok(format!("took it back: {} and their agent get a correction", a.to));
+    }
     channel_send(&format!("@{}", a.to), &format!("Correction: please don't rely on my agent's answer to \"{}\" (\"{}\"). Ask me again.",
                                                   clip_to(&a.question, 120), clip_to(&a.answer, 120)))?;
     Ok(format!("took it back: {} gets a correction", a.to))
+}
+
+/// Put a correction in our outbox, if they run a qh that understands it (an older one would show
+/// an unknown kind as a request for work).
+fn correct_out(s: &mut State, a: &Answered) -> bool {
+    if !s.peers.get(&a.to).is_some_and(|p| !p.qh.is_empty() && !crate::update::newer("0.2.7", &p.qh)) { return false }
+    s.next_id += 1;
+    s.outbox.push(json!({"id": s.next_id, "to": a.to, "session": a.session, "kind": "c", "q": a.question, "a": a.answer, "relied": a.relied, "ts": now()}));
+    s.dirty = true;
+    true
 }
 
 /// The topics a trusted teammate's promises may cover (empty: any).
@@ -3666,9 +3796,8 @@ fn wake_check(repo: &str, root: &Path, hooks: &Hooks) {
     let now = now();
     // a commit, push or pull moves these: scan now, or a teammate who pulls our push straight
     // away is held for up to a minute on work that is already on main (seen live)
-    // one at a time: a clone of an empty repo has no origin/HEAD, and one bad name fails them all
-    let tips: String = ["HEAD", "origin/HEAD", "origin/main", "origin/master", "@{upstream}"].iter()
-        .filter_map(|r| git(root, &["rev-parse", "--verify", "-q", r])).collect();
+    // one process every few seconds, not one per name; %(HEAD) catches switching branch
+    let tips = git(root, &["for-each-ref", "--format=%(HEAD)%(objectname)", "refs/heads", "refs/remotes/origin"]).unwrap_or_default();
     let moved = LAST_TIPS.lock().unwrap().get_or_insert_with(HashMap::new).insert(repo.to_string(), tips.clone()) != Some(tips);
     let scan = every(&LAST_SCAN, 60, moved);
     if scan {
@@ -3974,7 +4103,7 @@ pub fn remember(repo: &str, on: bool) {
 }
 
 pub fn enabled_for(cwd: &Path) -> bool {
-    github_repo(cwd).is_some_and(|(_, r)| enabled(&r))
+    github_repo_cached(cwd).is_some_and(|(_, r)| enabled(&r))
 }
 
 pub fn enabled(repo: &str) -> bool {
@@ -4073,6 +4202,7 @@ use std::sync::Arc;
 
 static LINK: std::sync::OnceLock<Option<Arc<Link>>> = std::sync::OnceLock::new();
 static LIVE: Mutex<Option<HashMap<String, std::sync::mpsc::Sender<(String, Vec<u8>)>>>> = Mutex::new(None); // repo -> its team thread
+static LINE_FAILED: AtomicU64 = AtomicU64::new(0); // messages the line gave up on
 static LINES: Mutex<Option<HashMap<String, String>>> = Mutex::new(None); // their member key -> path ("lan …", "via <key>")
 
 fn now_ms() -> u64 {
@@ -4142,7 +4272,8 @@ fn on_line(e: LinkEvent) {
                     allow it in System Settings > Privacy & Security > Local Network, then restart qh");
             }
         }
-        LinkEvent::Delivered { .. } | LinkEvent::Failed { .. } => {} // git carries everything anyway
+        LinkEvent::Failed { .. } => { LINE_FAILED.fetch_add(1, Relaxed); }
+        LinkEvent::Delivered { .. } => {}
     }
 }
 
@@ -4202,6 +4333,9 @@ struct Live {
     at: Instant,
     pulse: u64,
     told: Vec<String>, // member keys that have our latest
+    bytes: usize,      // size of the last message
+    failed: u64,       // LINE_FAILED when we last looked
+    failed_at: Option<Instant>,
 }
 
 /// Changes worth sending at once (messages, answers, acks, notes, claims); the rest (status
@@ -4230,8 +4364,18 @@ fn push_live(repo: &str, me: &str, l: &Link, d: Value, live: &mut Live) {
     let lines = LINES.lock().unwrap().clone().unwrap_or_default();
     let on: Vec<String> = members.into_iter().filter(|k| lines.contains_key(k)).collect();
     live.told.retain(|k| on.contains(k));
+    // a message the line gave up on: nobody can be counted as having our latest
+    let failed = LINE_FAILED.load(Relaxed);
+    if failed != live.failed {
+        live.failed = failed;
+        live.failed_at = Some(Instant::now());
+        live.told.clear();
+    }
     let p = pulse(repo);
-    let all = live.last.as_ref() != Some(&d) && (p != live.pulse || live.at.elapsed() >= Duration::from_secs(1));
+    // the whole state goes each time, so what isn't urgent is paced by its size: 1 s for a small
+    // team, 4 s at 33 KB. A relayed line has 2 MB a minute and drops the rest.
+    let every = Duration::from_millis((live.bytes as u64 / 8).max(1000));
+    let all = live.last.as_ref() != Some(&d) && (p != live.pulse || live.at.elapsed() >= every);
     if all {
         live.last = Some(d.clone());
         live.at = Instant::now();
@@ -4244,6 +4388,7 @@ fn push_live(repo: &str, me: &str, l: &Link, d: Value, live: &mut Live) {
     }
     let msg = json!({"repo": repo, "login": me, "seq": now_ms(), "data": tc::seal(&key, &format!("data:{me}"), d.to_string().as_bytes())});
     let bytes = msg.to_string().into_bytes();
+    live.bytes = bytes.len();
     for k in to {
         l.send(&k, &bytes);
         live.told.push(k);
@@ -4271,7 +4416,7 @@ fn take_live(repo: &str, root: &Path, from: &str, bytes: &[u8], hooks: &Hooks) {
         .and_then(|b| serde_json::from_slice::<Value>(&b).ok()) else { return };
     let mut p = Peer {
         login: login.clone(), online: true, ts: now(), seq, pub_key: old.pub_key, wrapped: old.wrapped,
-        invites: old.invites, transcripts: old.transcripts, ..Default::default()
+        invites: old.invites, transcripts: old.transcripts, qh: old.qh, ..Default::default()
     };
     parse_data(&mut p, &d);
     let mut new_chat = false;
@@ -4858,6 +5003,16 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn clashes_name_each_person_once() {
+        let h = |from: &str, id, files: &[&str]| Incoming { from: from.into(), id, packet: json!({"files": files}), ..Default::default() };
+        let mut s = state("alice");
+        s.pending = vec![h("bob", 1, &["web.py"]), h("carol", 2, &["other.py"])];
+        s.flow.taken = vec![h("bob", 3, &["web.py", "api.py"])];
+        let mine = ["web.py".to_string(), "api.py".to_string()];
+        assert_eq!(clashes_in(&s, &h("dan", 9, &[]), &mine), [("bob".to_string(), vec!["web.py".to_string(), "api.py".to_string()])]);
+    }
+
+    #[test]
     fn a_handover_packet_arrives_is_kept_on_accept_and_clashes_are_found() {
         let (ra, rb) = (format!("req/pk-a{}", std::process::id()), format!("req/pk-b{}", std::process::id()));
         let mut alice = state("alice");
@@ -4925,6 +5080,11 @@ pub(crate) mod tests {
         p.outbox = vec![m.clone()];
         take_in(&repo, &"bob".to_string(), None, p, &quiet(), &mut false);
         assert!(with(&repo, |s| s.sent[0].reply.starts_with("seen, back to it")).unwrap());
+        // once they accept, the "back to it" news is over
+        let mut p = peer("alice", &["main"], true);
+        p.outbox = vec![json!({"id": m["id"].as_u64().unwrap() + 1, "to": "bob", "kind": "s", "re": 3, "status": "accepted", "text": "", "ts": now()})];
+        take_in(&repo, &"bob".to_string(), None, p, &quiet(), &mut false);
+        assert!(with(&repo, |s| s.sent[0].status() == Status::Accepted && s.sent[0].reply.is_empty()).unwrap());
         STATES.lock().unwrap().as_mut().unwrap().remove(&repo);
     }
 
@@ -4938,27 +5098,118 @@ pub(crate) mod tests {
         STATES.lock().unwrap().get_or_insert_with(HashMap::new).insert(repo.clone(), s);
         let q = |id, from: &str, text: &str| Question { repo: repo.clone(), from: from.into(), from_session: String::new(), id, session: "main".into(), text: text.into() };
         // a fact: goes to anyone, logged
-        reply(&q(1, "ravi", "which field?"), "currency", &[]);
+        reply(&q(1, "ravi", "which field?"), "currency", &[], false);
         // a promise to the trusted, on their topic: goes, logged as a promise
-        reply(&q(2, "sam", "are refunds idempotent?"), "yes, by refund id", &["refund_id".into()]);
+        reply(&q(2, "sam", "are refunds idempotent?"), "yes, by refund id", &["refund_id".into()], true);
         // a promise off their topic, and one to someone untrusted: held with the answer ready
-        reply(&q(3, "sam", "payout schedule for EU?"), "weekly", &["payout_day".into()]);
-        reply(&q(4, "ravi", "is total in cents?"), "yes", &["total".into()]);
+        reply(&q(3, "sam", "payout schedule for EU?"), "weekly", &["payout_day".into()], true);
+        reply(&q(4, "ravi", "is total in cents?"), "yes", &["total".into()], true);
+        // a fact that names something, to someone untrusted: goes, and stays a fact
+        reply(&q(5, "ravi", "what does greet return?"), "a string", &["greet".into()], false);
+        // a promise that names nothing still waits for you
+        reply(&q(6, "ravi", "when is it done?"), "by Friday", &[], true);
         with(&repo, |s| {
             let sent: Vec<u64> = s.outbox.iter().filter(|m| m["kind"] == "a").filter_map(|m| m["re"].as_u64()).collect();
-            assert_eq!(sent, [1, 2]);
-            assert_eq!(s.flow.log.iter().map(|a| (a.to.as_str(), a.promise)).collect::<Vec<_>>(), [("ravi", false), ("sam", true)]);
-            assert_eq!(s.pending.iter().map(|i| i.id).collect::<Vec<_>>(), [3, 4]);
+            assert_eq!(sent, [1, 2, 5]);
+            assert_eq!(s.flow.log.iter().map(|a| (a.to.as_str(), a.promise)).collect::<Vec<_>>(), [("ravi", false), ("sam", true), ("ravi", false)]);
+            assert_eq!(s.pending.iter().map(|i| i.id).collect::<Vec<_>>(), [3, 4, 6]);
+            assert!(s.pending[2].packet["held"].as_str().unwrap().contains("it promises something"));
             assert_eq!(s.pending[0].draft.as_ref().unwrap().0, "weekly");
             assert!(s.pending[0].packet["held"].as_str().unwrap().contains("isn't trusted on this topic"));
         });
         // a question you said yes to goes whatever it promises, and isn't logged as alone
         with(&repo, |s| s.flow.approved.push(("ravi".into(), 9)));
-        reply(&q(9, "ravi", "port?"), "8080", &["PORT".into()]);
+        reply(&q(9, "ravi", "port?"), "8080", &["PORT".into()], true);
         with(&repo, |s| {
             assert!(s.outbox.iter().any(|m| m["kind"] == "a" && m["re"] == 9));
-            assert_eq!(s.flow.log.len(), 2);
+            assert_eq!(s.flow.log.len(), 3);
         });
+        STATES.lock().unwrap().as_mut().unwrap().remove(&repo);
+    }
+
+    /// A direct-line update carries no version: losing it made a 0.2.6 teammate look old, and
+    /// their status news was dropped.
+    /// Taking back an answer: an older qh gets a DM (it would show the new kind as work), a 0.2.7
+    /// asker's agent is told and the contract the answer made ends.
+    #[test]
+    fn a_take_back_reaches_the_agent_that_asked() {
+        let a = Answered { ts: 1, to: "bob".into(), question: "is it stable?".into(), answer: "yes".into(), promise: true, taken_back: true,
+                           session: "main".into(), relied: vec!["greet".into()] };
+        let mut s = state("alice");
+        let mut old = peer("bob", &["main"], true);
+        old.qh = "0.2.6".into();
+        s.peers.insert("bob".into(), old);
+        assert!(!correct_out(&mut s, &a), "0.2.6 doesn't know it");
+        assert!(s.outbox.is_empty());
+        s.peers.get_mut("bob").unwrap().qh = "0.2.7".into();
+        assert!(correct_out(&mut s, &a));
+        assert_eq!(s.outbox[0]["kind"], "c");
+        assert_eq!(answered_of(&answered_json(&a)).relied, a.relied, "kept over a restart");
+
+        let repo = format!("req/back{}", std::process::id());
+        let mut b = state("bob");
+        b.repo = repo.clone();
+        b.uses.entry("main".into()).or_default().extend([("greet".to_string(), 1), ("other".to_string(), 1)]);
+        b.last_answer.insert("main".into(), ("alice/x".into(), vec!["greet".into()], "Q: is it stable? A: yes".into()));
+        STATES.lock().unwrap().get_or_insert_with(HashMap::new).insert(repo.clone(), b);
+        let told = std::sync::Arc::new(Mutex::new(vec![]));
+        let t2 = told.clone();
+        let hooks = Hooks { answered: Box::new(move |s, t| t2.lock().unwrap().push((s.to_string(), t.to_string()))), ..quiet() };
+        let mut alice = peer("alice", &["x"], true);
+        alice.outbox = s.outbox.clone();
+        take_in(&repo, &"bob".to_string(), None, alice, &hooks, &mut false);
+        let told = told.lock().unwrap();
+        assert_eq!(told[0].0, "main");
+        assert!(told[0].1.contains("took back") && told[0].1.contains("is it stable?") && told[0].1.contains("yes"), "{}", told[0].1);
+        with(&repo, |b| {
+            assert!(!b.uses["main"].contains_key("greet"), "the contract ended");
+            assert!(b.uses["main"].contains_key("other"), "others stay");
+            assert!(!b.last_answer.contains_key("main"));
+            assert!(b.pending.is_empty(), "not shown as work");
+        });
+        STATES.lock().unwrap().as_mut().unwrap().remove(&repo);
+    }
+
+    #[test]
+    fn the_outbox_and_chat_stay_bounded() {
+        let mut s = state("alice");
+        s.outbox.push(json!({"id": 1, "to": "bob", "kind": "q", "text": "oldest question"}));
+        for id in 2..=(OUTBOX_MAX as u64 + 10) { s.outbox.push(json!({"id": id, "to": "bob", "kind": "s"})) }
+        trim_outbox(&mut s);
+        assert_eq!(s.outbox.len(), OUTBOX_MAX);
+        assert_eq!(s.outbox[0]["kind"], "q", "news goes before a request");
+        s.outbox = (0..OUTBOX_MAX as u64 + 5).map(|id| json!({"id": id, "kind": "q"})).collect();
+        trim_outbox(&mut s);
+        assert_eq!((s.outbox.len(), s.outbox[0]["id"].as_u64()), (OUTBOX_MAX, Some(5)));
+        for i in 0..CHAT_MAX as u64 + 3 { insert_chat(&mut s, i, "bob", "x") }
+        assert_eq!((s.chat.len(), s.chat[0].0), (CHAT_MAX, 3));
+    }
+
+    #[test]
+    fn a_live_update_keeps_their_version() {
+        let repo = format!("req/ver{}", std::process::id());
+        let k: Key = [7; 32];
+        let mut s = state("alice");
+        s.repo = repo.clone();
+        s.key = Some(k);
+        let mut bob = peer("bob", &["main"], true);
+        (bob.pub_key, bob.qh, bob.seq) = ("bobkey".into(), "0.2.6".into(), 100);
+        s.peers.insert("bob".into(), bob);
+        STATES.lock().unwrap().get_or_insert_with(HashMap::new).insert(repo.clone(), s);
+        let live = json!({"login": "bob", "seq": 200, "data": tc::seal(&k, "data:bob", b"{}")});
+        take_live(&repo, Path::new("."), "bobkey", live.to_string().as_bytes(), &quiet());
+        let told = |repo: &str| with(repo, |s| {
+            assert_eq!(s.peers["bob"].seq, 200, "the live copy landed");
+            assert!(knows_status(s, "bob"), "still 0.2.6");
+            status_about(s, "bob", 1, Status::Delivered, "", "job");
+            s.outbox.iter().any(|m| m["kind"] == "s" && m["status"] == "delivered")
+        }).unwrap();
+        assert!(told(&repo));
+        // an older git copy keeps the live data but brings the version along
+        let mut git = peer("bob", &["main"], true);
+        (git.pub_key, git.qh, git.seq) = ("bobkey".into(), "0.2.7".into(), 150);
+        take_in(&repo, &"alice".to_string(), Some(k), git, &quiet(), &mut false);
+        with(&repo, |s| assert_eq!((s.peers["bob"].seq, s.peers["bob"].qh.as_str()), (200, "0.2.7")));
         STATES.lock().unwrap().as_mut().unwrap().remove(&repo);
     }
 
@@ -5638,6 +5889,14 @@ pub(crate) mod tests {
         // accept: delivered with the tag, nothing sent back
         let inc = decide_locked(&mut s, "bob", 1, "once").unwrap();
         assert_eq!(accepted_text(&inc), "[accepted request from bob]: [from bob's agent] build the backend");
+        // a handover: the agent gets its packet, and the requester's "finished" line still quotes only the request
+        let mut h = inc.clone();
+        h.packet = json!({"done": ["routes"], "left": ["add the test"], "watch": "single constant", "files": ["web.py"], "branch": "wip"});
+        let said = accepted_text(&h);
+        for part in ["branch wip", "- routes", "- add the test", "single constant", "Files: web.py", "Start with: add the test"] {
+            assert!(said.contains(part), "{part} missing from {said}");
+        }
+        assert_eq!(said.split("\n\n[").next().unwrap(), accepted_text(&inc));
         assert_eq!(done_text(&inc.text, " built it "), "finished your request \"build the backend\": built it");
         assert!(done_text(&inc.text, "interrupted").contains("stopped your request"));
         assert!(s.my_dms.is_empty());

@@ -2690,12 +2690,12 @@ then it's `git push -u origin {branch}` and `gh pr create --fill`.");
                 std::thread::spawn(move || {
                     let who = if q.from_session.is_empty() { q.from.clone() } else { format!("{}/{}", q.from, q.from_session) };
                     let Some(m) = hub.get(&q.session).or_else(|| hub.names().first().and_then(|n| hub.get(n))) else {
-                        crate::team::reply(&q, "(not answered: that session is closed)", &[]);
+                        crate::team::reply(&q, "(not answered: that session is closed)", &[], false);
                         return;
                     };
-                    let (text, relied) = crate::engine::answer_question(&hub, &m, &who, &q.text);
+                    let (text, relied, promise) = crate::engine::answer_question(&hub, &m, &who, &q.text);
                     if team_ui() { hub.emit(&m.name, Event::Notice(format!("answered {who}: {}", text.lines().next().unwrap_or("").chars().take(100).collect::<String>()))); }
-                    crate::team::reply(&q, &text, &relied);
+                    crate::team::reply(&q, &text, &relied, promise);
                 });
             }),
             answered: Box::new(move |session: &str, text: &str| {

@@ -12,6 +12,12 @@ if (-not ($path -split ';' | Where-Object { $_ -eq $dir })) {
     $env:Path += ";$dir"
     Write-Host "Added $dir to your PATH (new terminals pick it up)."
 }
-Write-Host "Installed. Run: qh"
+$code = 0
+try { & (Join-Path $dir 'qh.exe') --version | Out-Null; $code = $LASTEXITCODE } catch {}
+if ($code -eq -1073741515) {
+    Write-Warning "qh can't start: the Microsoft Visual C++ Runtime is missing."
+    Write-Host "Run: winget install Microsoft.VCRedist.2015+.x64"
+    Write-Host "Or: https://aka.ms/vs/17/release/vc_redist.x64.exe"
+} else { Write-Host "Installed. Run: qh" }
 Write-Host "Needs a model: install Ollama (https://ollama.com) and run 'ollama pull qwen3.5:9b',"
 Write-Host "or use a cloud provider: qh login openrouter"

@@ -2740,7 +2740,15 @@ then it's `git push -u origin {branch}` and `gh pr create --fill`.");
             refresh: Box::new(move || h4.emit("", Event::Changed)),
             changed: Box::new(move |_| h7.emit("", Event::Changed)),
         };
-        crate::team::start(&cwd, summary, hooks, background)
+        let started = crate::team::start(&cwd, summary, hooks, background);
+        // not through `say`, which only reaches the screen in `qh team`, nor in what we return, which
+        // several callers don't show: plain qh, qh serve and the desktop app must see this too
+        if started.is_ok() {
+            if let Some(w) = crate::team::github_repo(&cwd).and_then(|(_, r)| crate::team::store_warning(&r)) {
+                self.hub.emit(tab, Event::Notice(w));
+            }
+        }
+        started
     }
 
     fn status_line(&self) -> String {

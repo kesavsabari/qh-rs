@@ -2,6 +2,20 @@
 
 Each version starts with a one-line summary; the website shows it once the version is no longer recent.
 
+## 0.2.9 — 2026-11-06
+
+qh now starts on a clean Windows, team mode gets through stalled networks and leftover git locks, and quitting never waits long on a stuck remote.
+
+- **Windows: no Visual C++ runtime needed.** The exe stopped at once, with no message, on a machine without the runtime. It now carries what it needs.
+- **Quitting can't get stuck.** A stalled remote could hold up closing for 30 seconds. qh now leaves within 5 seconds, says it's going offline when it can, and leaves no git process behind.
+- **Stuck git calls end properly.** A stopped push or fetch takes its helper processes with it, on Windows too, and what a killed call leaves behind no longer breaks the next fetch.
+- **Works with stricter git settings.** Team data keeps working under `safe.bareRepository=explicit` and whichever ref and hash formats git defaults to. If a store can't be used, qh tells you when it falls back to the project's `.git`.
+- **Failures back off and say why.** Failing fetches and pushes wait longer each time, teammates don't retry in step, and the error says what happened and stays until that side works again.
+- **No wrong team keys.** A repo qh can't read, or a board it couldn't list, is now an error rather than an empty team, so it can't create a second key.
+- **Only GitHub counts as GitHub.** A remote such as `https://evil.com/github.com/o/r` used to pass as `o/r`, and names with `..` could reach outside qh's state folder. Both are refused. An SSH alias like `github.com-work` is too: use the plain host.
+- **Fixes.** Branch names work in reftable repositories, a lost transcript update mends itself, and very large team stores get tidied. The Mac app no longer refetches on every tick.
+- **If teammates can't read you after upgrading.** This only applies if you ran 0.2.8 with a git that defaults to sha256: your store never reached GitHub, so a team key it made was never shared. Have a teammate invite you again.
+
 ## 0.2.8 — 2026-11-04
 
 A stalled network no longer holds up requests, a teammate's session stays current while you watch it, and team mode stops writing into your project's `.git`.

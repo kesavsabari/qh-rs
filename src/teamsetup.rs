@@ -251,7 +251,7 @@ pub fn join(repo: &str, code: Option<&str>) -> i32 {
 
 pub fn join_inner(repo: &str, invite_code: Option<&str>) -> Result<PathBuf, String> {
     let repo = repo.trim().trim_start_matches("https://github.com/").trim_end_matches(".git").trim_end_matches('/');
-    if repo.split('/').count() != 2 { return Err("use the form owner/repo, e.g. qh join kesavsabari/webshop".into()) }
+    if !crate::team::valid_slug(repo) { return Err("use the form owner/repo, e.g. qh join kesavsabari/webshop".into()) }
     let tok = token().ok_or("no GitHub login found: install the GitHub CLI and run `gh auth login`, or set GITHUB_TOKEN")?;
     let (_, _, me) = api("GET", "/user", &tok, None, None)?;
     let me = me["login"].as_str().unwrap_or("").to_string();

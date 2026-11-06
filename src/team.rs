@@ -622,25 +622,29 @@ fn board_store(repo: &str, root: &Path) -> PathBuf {
     board_store_in(&per_repo("team-board", repo), root)
 }
 
-/// A store made while git defaulted to sha256 can never fetch from or push to GitHub ("mismatched
-/// algorithms"), so nothing in it ever went anywhere and nothing in it is the only copy: it holds
-/// folders we build from our state, and the identity commit, which comes out the same each time.
+/// A store made while git defaulted to sha256 can't push to GitHub, or fetch any folder from it
+/// ("mismatched algorithms"; with no folders to fetch, a fetch exits 0 and brings nothing). So
+/// nothing in it ever went anywhere and nothing in it is the only copy: it holds folders we build
+/// from our state, and the identity commit, which comes out the same each time.
 /// We hold the team lock here, so no qh is using it. Moved aside first, since a rename either
 /// happens or doesn't: a delete cut short by a file in use on Windows would leave half a store.
+/// Aside means `team-board-old/<slug>`, next to `team-board`: same disk, and no repo's name can
+/// reach it, as `<slug>.something` would (that's the store of a repo called that).
 /// False if it's still there.
 fn replace_sha256_store(dir: &Path) -> bool {
     if !dir.join("HEAD").exists() || git(dir, &["rev-parse", "--show-object-format"]).as_deref() != Some("sha256") {
         return true;
     }
-    let mut aside = dir.as_os_str().to_owned();
-    aside.push(".old-sha256");
-    let aside = PathBuf::from(aside);
+    let (Some(boards), Some(name)) = (dir.parent(), dir.file_name()) else { return false };
+    let mut old = boards.as_os_str().to_owned();
+    old.push("-old");
+    let old = PathBuf::from(old);
+    let aside = old.join(name);
     let _ = std::fs::remove_dir_all(&aside);
-    if std::fs::rename(dir, &aside).is_err() {
-        return false;
-    }
+    let moved = std::fs::create_dir_all(&old).is_ok() && std::fs::rename(dir, &aside).is_ok();
     let _ = std::fs::remove_dir_all(&aside);
-    std::fs::create_dir_all(dir).is_ok()
+    let _ = std::fs::remove_dir(&old); // only if nothing else is in it
+    moved && std::fs::create_dir_all(dir).is_ok()
 }
 
 fn board_store_in(dir: &Path, root: &Path) -> PathBuf {
@@ -666,13 +670,50 @@ fn board_store_in(dir: &Path, root: &Path) -> PathBuf {
     root.to_path_buf()
 }
 
+/// Why a project's team data isn't in its own store, if it isn't. The `say` hook only reaches the
+/// screen in `qh team`, and this has to reach everyone: see the caller of `start` in ui.rs.
+pub fn store_warning(repo: &str) -> Option<String> {
+    let dir = per_repo("team-board", repo);
+    (!is_store(&dir)).then(|| format!("git can't use the team's own store ({}): team data goes in this project's .git until that's sorted out", dir.display()))
+}
+
 /// The repo's root and its GitHub owner/name, if `origin` is on GitHub.
 pub fn github_repo(cwd: &Path) -> Option<(PathBuf, String)> {
     let root = PathBuf::from(git(cwd, &["rev-parse", "--show-toplevel"])?);
     let url = git(&root, &["remote", "get-url", "origin"])?;
-    let rest = url.split_once("github.com").map(|(_, r)| r.trim_start_matches([':', '/']))?;
-    let slug = rest.trim_end_matches('/').trim_end_matches(".git");
-    (slug.split('/').count() == 2).then(|| (root, slug.to_string()))
+    Some((root, github_slug(&url)?))
+}
+
+fn github_slug(url: &str) -> Option<String> {
+    // a URL, or git's short form for ssh: [user@]host:path
+    let (authority, path) = match url.split_once("://") {
+        Some((scheme, rest)) => {
+            if !["https", "http", "ssh", "git"].iter().any(|k| scheme.eq_ignore_ascii_case(k)) { return None }
+            rest.split_once('/')?
+        }
+        None => url.split_once(':').filter(|(a, _)| !a.contains('/'))?,
+    };
+    // these end the host before any @ does, whatever a parser that stops at the last @ would think
+    if authority.contains(['?', '#', '\\']) { return None }
+    let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    let host = match (host.split_once(':'), url.contains("://")) {
+        (Some((h, port)), true) if port.bytes().all(|b| b.is_ascii_digit()) => h,
+        (None, _) => host,
+        _ => return None,
+    };
+    // exactly these. Not an ssh alias like github.com-work: its name says nothing about where it
+    // leads, and anyone can name a repo's remote that
+    if !host.eq_ignore_ascii_case("github.com") && !host.eq_ignore_ascii_case("www.github.com") { return None }
+    let slug = path.trim_start_matches('/').trim_end_matches('/').trim_end_matches(".git");
+    valid_slug(slug).then(|| slug.to_string())
+}
+
+/// owner/name, each as GitHub allows it. These become folder names (`per_repo`), so nothing that
+/// could lead out of the state folder gets through: on Windows `..\` works as well as `../`.
+pub fn valid_slug(slug: &str) -> bool {
+    let parts: Vec<&str> = slug.split('/').collect();
+    parts.len() == 2 && parts.iter().all(|p| !p.is_empty() && *p != "." && *p != ".."
+        && p.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-')))
 }
 
 /// `github_repo` for what runs on every frame: two git processes each time would be up to 360 a
@@ -1419,9 +1460,7 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks, background: bool) -> Re
     LIVE.lock().unwrap().get_or_insert_with(HashMap::new).insert(repo.clone(), live_tx);
     let line = link();
     let hooks = std::sync::Arc::new(hooks);
-    if board == root {
-        warn_once(&repo, Some(&*hooks), "store", format!("git can't use the team's own store ({}): team data goes in this project's .git until that's sorted out", per_repo("team-board", &repo).display()));
-    }
+    if let Some(w) = store_warning(&repo) { log_to(&repo, &w) }
     let latest: std::sync::Arc<Mutex<(Option<Snapshot>, bool)>> = Default::default(); // the folder to write next, and whether something asked for a write
     let stop = std::sync::Arc::new(AtomicBool::new(false)); // the board's git calls end now, not at their limit
     let fetched = std::sync::Arc::new(AtomicBool::new(false)); // we've read the board at least once
@@ -1667,7 +1706,8 @@ fn signed_files(secret: &x25519_dalek::StaticSecret, repo: &str, me: &str, mut f
     files
 }
 
-/// When quitting began, if it has (see `stop_and_flush`).
+/// When quitting began, if it has. Set once and never cleared: `stop_and_flush` is only for when
+/// the process is on its way out, not for disconnecting (that's `stop`).
 static QUIT_AT: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 
 fn quit_began() -> Option<Instant> {
@@ -2655,6 +2695,7 @@ the same thing again: it could only repeat itself. If this matters, tell the use
 /// Nobody on the board holds a team key yet: the first member creates it. If someone already
 /// did (their data is sealed, or they wrap keys), wait for them to wrap a copy for us.
 fn settle_key(repo: &str, stop: &AtomicBool) {
+    if stop.load(Relaxed) { return } // see `vet`
     with(repo, |s| {
         if s.key.is_some() {
             // Two people started on an empty board at the same moment and both made a key, so
@@ -4583,7 +4624,8 @@ pub fn stop() {
     cur(|s| s.running.store(false, Relaxed));
 }
 
-/// Disconnect every project and wait (up to 5 s) for the "offline" writes, at quit.
+/// Disconnect every project and wait (up to 5 s) for the "offline" writes, at quit. Only as the
+/// process exits: a second call shares the first one's 5 s (`QUIT_AT`).
 pub fn stop_and_flush() {
     let t0 = *QUIT_AT.get_or_init(Instant::now); // one wait, however many of us run it
     let flags: Vec<std::sync::Arc<AtomicBool>> = STATES.lock().unwrap().get_or_insert_with(HashMap::new).values()
@@ -6692,22 +6734,37 @@ pub(crate) mod tests {
         let idc = identity_commit(&store, "alice", "a", "b").unwrap();
         let (stalled, pid) = stalled_remote(&base, "push");
         let env = [("GIT_ALLOW_PROTOCOL", "ext".to_string())];
-        // each file is a git process: enough of them make a commit that takes most of a second
-        let files: Vec<(String, String)> = (0..1000).map(|i| (format!("f{i}"), format!("{i}"))).collect();
-        let t = Instant::now();
-        folder_commit(&store, &files, &json!({"try": 0}), &idc).unwrap();
-        let commit_takes = t.elapsed();
-        assert!(commit_takes >= Duration::from_millis(500), "too quick to show anything: {commit_takes:?}");
-        // the commit ends with just enough left for a push: a limit worked out before it would run 'commit_takes' over
-        let since = Instant::now() - Duration::from_millis(3900).saturating_sub(commit_takes);
-        assert!(last_write(&store, &stalled, "alice", &env, (&files, &json!({"try": 1}), &idc), since).is_err());
-        assert!(since.elapsed() < Duration::from_secs(5), "ended {:?} after quitting began; the commit takes {commit_takes:?}", since.elapsed());
-        gone(&pid);
         // out of time before the push: none is started, so none can outlive us
         let since = Instant::now() - Duration::from_millis(4200);
         let t0 = Instant::now();
-        assert!(last_write(&store, &stalled, "alice", &env, (&files[..1], &json!({"try": 2}), &idc), since).is_err());
+        assert!(last_write(&store, &stalled, "alice", &env, (&[("pub".to_string(), "a".to_string())], &json!({"try": 2}), &idc), since).is_err());
         assert!(t0.elapsed() < Duration::from_millis(1000), "it took {:?}", t0.elapsed());
+        // Each file in a commit is a git process. Enough of them to take about 800 ms on this machine:
+        // past 500 ms, a limit worked out before the commit would run over the 5 s
+        let t = Instant::now();
+        for i in 0..5 { blob(&store, &format!("timing {i}")).unwrap(); }
+        let spawn = (t.elapsed() / 5).max(Duration::from_micros(100));
+        let mut count = (800_000 / spawn.as_micros().max(1)).clamp(20, 4000) as usize;
+        let files = |n: usize| -> Vec<(String, String)> { (0..n).map(|i| (format!("f{i}"), format!("{i}"))).collect() };
+        let mut commit_takes;
+        loop {
+            let t = Instant::now();
+            folder_commit(&store, &files(count), &json!({"try": 0}), &idc).unwrap();
+            commit_takes = t.elapsed();
+            if commit_takes >= Duration::from_millis(500) || count >= 4000 { break }
+            count *= 2;
+        }
+        if commit_takes > Duration::from_secs(3) || commit_takes < Duration::from_millis(500) {
+            println!("skipped: a commit of {count} files takes {commit_takes:?} here, which leaves nothing to show");
+            let _ = std::fs::remove_dir_all(&base);
+            return;
+        }
+        // the commit ends with just enough left for a push: a limit worked out before it would run 'commit_takes' over
+        let since = Instant::now() - Duration::from_millis(3900).saturating_sub(commit_takes);
+        assert!(last_write(&store, &stalled, "alice", &env, (&files(count), &json!({"try": 1}), &idc), since).is_err());
+        assert!(since.elapsed() < Duration::from_secs(5), "ended {:?} after quitting began; the commit takes {commit_takes:?}", since.elapsed());
+        // no pid: this commit ran long enough that no push was started, which is right too
+        if pid.exists() { gone(&pid) }
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -6916,6 +6973,111 @@ pub(crate) mod tests {
         assert!(!is_store(&store));
         assert!(store.join("HEAD").exists(), "left as it was");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // second review, item 2
+    #[test]
+    fn replacing_a_sha256_store_leaves_a_team_called_after_its_old_copy_alone() {
+        let base = std::env::temp_dir().join(format!("qh-sha256-other-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("project")).unwrap();
+        let boards = base.join("team-board");
+        // the repo o/r.old-sha256 keeps its store here: a real team's
+        let (ours, theirs) = (boards.join("o__r"), boards.join("o__r.old-sha256"));
+        assert_eq!(board_store_in(&theirs, &base.join("project")), theirs);
+        let sha = identity_commit(&theirs, "bob", "a", "b").unwrap();
+        std::fs::create_dir_all(&ours).unwrap();
+        assert!(git_in(&ours, &["init", "-q", "--bare"], None, &[("GIT_DEFAULT_HASH", "sha256".to_string())]).is_some());
+        if !git_raw(&ours, &["--git-dir=.", "rev-parse", "--show-object-format"], None, &[]).is_some_and(|o| o.starts_with(b"sha256")) {
+            let _ = std::fs::remove_dir_all(&base);
+            return; // a git too old to make one
+        }
+        assert_eq!(board_store_in(&ours, &base.join("project")), ours);
+        assert_eq!(git(&ours, &["rev-parse", "--show-object-format"]).as_deref(), Some("sha1"));
+        assert_eq!(git(&theirs, &["cat-file", "-t", &sha]).as_deref(), Some("commit"), "the other team's store is still there");
+        assert!(!base.join("team-board-old").exists(), "and ours left nothing behind");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn only_github_itself_counts_as_github() {
+        for url in ["https://github.com/o/r", "https://github.com/o/r.git", "https://github.com/o/r/", "https://github.com/o/r.git/", "http://github.com/o/r",
+                    "https://user@github.com/o/r", "https://user:tok@github.com/o/r", "git@github.com:o/r", "git@github.com:o/r.git", "git@github.com:/o/r", "github.com:o/r",
+                    "ssh://git@github.com/o/r", "ssh://git@github.com:22/o/r", "git://github.com/o/r", "https://github.com:443/o/r",
+                    "https://www.github.com/o/r", "git@www.github.com:o/r", "https://GitHub.COM/o/r", "git@GITHUB.com:o/r", "SSH://git@github.com/o/r"] {
+            assert_eq!(github_slug(url).as_deref(), Some("o/r"), "{url}");
+        }
+        for url in ["https://evil.com/github.com/o/r", "notgithub.com:o/r", "git@notgithub.com:o/r", "https://notgithub.com/o/r", "https://github.com.evil.com/o/r", "git@github.com.evil.com:o/r",
+                    "https://evil.com/?x=github.com/o/r", "https://github.com@evil.com/o/r", "https://github.com:x@evil.com/o/r", "git@evil.com:github.com/o/r",
+                    // what's before the @ is only a login if nothing before it ends the host first
+                    "https://evil.com?x=@github.com/o/r", "https://evil.com#@github.com/o/r", "https://evil.com\\@github.com/o/r", "https://evil.com/@github.com/o/r",
+                    "https://github.com:x/o/r", "file:///tmp/github.com/o/r", "/tmp/github.com:o/r", "./github.com:o/r", "ext::sh github.com:o/r", "ftp://github.com/o/r",
+                    // an ssh alias says nothing about where it leads
+                    "git@github.com-work:o/r", "github.com-work:o/r", "ssh://git@github.com-work/o/r"] {
+            assert_eq!(github_slug(url), None, "{url}");
+        }
+    }
+
+    // second review, item 3
+    #[test]
+    fn only_a_plain_owner_and_name_make_a_team_folder() {
+        let slug = |u: &str| github_slug(u);
+        for (url, want) in [("https://github.com/o/r.git", "o/r"), ("git@github.com:o/r.git", "o/r"), ("https://github.com/o/r/", "o/r"),
+                            ("ssh://git@github.com/my-org/re_po.v2", "my-org/re_po.v2"), ("https://x@github.com/O/R", "O/R")] {
+            assert_eq!(slug(url).as_deref(), Some(want), "{url}");
+        }
+        for url in ["https://github.com/o/..\\..\\x", "https://github.com/..\\x/r", "https://github.com/../r", "https://github.com/o/..", "https://github.com/./r",
+                    "https://github.com/o/.", "https://github.com/o/r x", "https://github.com/o/r\nz", "https://github.com//r", "https://github.com/o/a/b",
+                    "https://github.com/o/r:x", "https://github.com/o", "https://example.com/o/r"] {
+            assert_eq!(slug(url), None, "{url}");
+        }
+        // the other way a name gets here; refused before it asks anyone anything
+        assert!(crate::teamsetup::join_inner("o/..\\..\\x", None).is_err_and(|e| e.contains("owner/repo")));
+    }
+
+    // second review, item 4
+    #[test]
+    fn a_store_we_cant_use_is_said_to_whoever_started_the_team() {
+        let Ok(base) = std::env::var("QH_TEST_BASE") else {
+            let base = std::env::temp_dir().join(format!("qh-warnstore-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&base);
+            std::fs::create_dir_all(base.join("project")).unwrap();
+            rerun("a_store_we_cant_use_is_said_to_whoever_started_the_team", &[("QH_TEST_BASE", &base.to_string_lossy()), ("QH_STATE_DIR", &base.to_string_lossy())]);
+            let _ = std::fs::remove_dir_all(&base);
+            return;
+        };
+        let root = Path::new(&base).join("project");
+        // git can't read it: we're told, naming the folder and where the data goes instead
+        let dir = per_repo("team-board", "o/broken");
+        assert_eq!(board_store_in(&dir, &root), dir);
+        std::fs::write(dir.join("HEAD"), "not a ref\n").unwrap();
+        assert_eq!(board_store(&"o/broken".to_string(), &root), root);
+        let w = store_warning("o/broken").expect("said");
+        assert!(w.contains("team-board") && w.contains(".git"), "{w}");
+        // all's well: not a word
+        assert_eq!(board_store(&"o/fine".to_string(), &root), per_repo("team-board", "o/fine"));
+        assert_eq!(store_warning("o/fine"), None);
+    }
+
+    // second review, item 6
+    #[test]
+    fn settling_the_key_does_nothing_once_stopped() {
+        let Ok(_) = std::env::var("QH_TEST_BASE") else {
+            let base = std::env::temp_dir().join(format!("qh-settlestop-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&base);
+            std::fs::create_dir_all(&base).unwrap();
+            rerun("settling_the_key_does_nothing_once_stopped", &[("QH_TEST_BASE", &base.to_string_lossy()), ("QH_STATE_DIR", &base.to_string_lossy())]);
+            let _ = std::fs::remove_dir_all(&base);
+            return;
+        };
+        let repo = "o/settle-stop";
+        let mut st = state("alice");
+        st.repo = repo.into();
+        STATES.lock().unwrap().get_or_insert_with(HashMap::new).insert(repo.to_string(), st);
+        settle_key(repo, &AtomicBool::new(true));
+        assert!(with(repo, |s| s.key.is_none()).unwrap() && !per_repo("team-keys", repo).exists(), "the lock may be someone else's by now");
+        settle_key(repo, &AtomicBool::new(false));
+        assert!(with(repo, |s| s.key.is_some()).unwrap());
     }
 
     #[test]

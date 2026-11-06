@@ -70,21 +70,84 @@ pub fn checkout(cwd: &Path) -> Option<PathBuf> {
 /// can have this name, because git doesn't allow one to start with a dot.
 pub const REFTABLE_HEAD: &str = "ref: refs/heads/.invalid";
 
-/// The branch checked out at `dir`, asking git; None on a detached HEAD. Branch names are read for
-/// every frame, and a process each time would be up to hundreds a second, so a few seconds out of
-/// date will do.
+/// The branch checked out at `dir`, asking git; None on a detached HEAD or until git has answered.
+/// Branch names are read for every frame, so what comes back is what we already know, and git is
+/// asked off to the side when that's a few seconds old: a process each time would be up to hundreds
+/// a second, and a git that hangs must not stop the screen.
 pub fn branch_from_git(dir: &Path) -> Option<String> {
-    use std::{collections::HashMap, sync::Mutex, time::{Duration, Instant}};
-    type Seen = HashMap<PathBuf, (Instant, Option<String>)>;
-    static SEEN: Mutex<Option<Seen>> = Mutex::new(None);
-    let mut g = SEEN.lock().unwrap_or_else(|e| e.into_inner());
-    let m = g.get_or_insert_with(HashMap::new);
-    if let Some((at, b)) = m.get(dir) {
-        if at.elapsed() < Duration::from_secs(5) { return b.clone() }
+    branch_cached(dir, ask_git_for_branch)
+}
+
+/// What git said about a folder's branch. `None`: it never answered. `Some(None)`: there is no branch.
+type BranchAnswer = Option<Option<String>>;
+
+static BRANCHES: std::sync::Mutex<Option<std::collections::HashMap<PathBuf, BranchSeen>>> = std::sync::Mutex::new(None);
+
+#[derive(Default)]
+struct BranchSeen {
+    at: Option<std::time::Instant>,
+    branch: Option<String>,
+    asking: bool,
+}
+
+impl BranchSeen {
+    fn answered(&mut self, answer: BranchAnswer) {
+        if let Some(b) = answer { self.branch = b }
+        self.at = Some(std::time::Instant::now());
+        self.asking = false;
     }
-    let b = git(dir, &["symbolic-ref", "--short", "HEAD"]).ok();
-    m.insert(dir.to_path_buf(), (Instant::now(), b.clone()));
-    b
+}
+
+fn branch_cached(dir: &Path, ask: fn(&Path) -> BranchAnswer) -> Option<String> {
+    let mut g = BRANCHES.lock().unwrap_or_else(|e| e.into_inner());
+    let e = g.get_or_insert_with(Default::default).entry(dir.to_path_buf()).or_default();
+    let known = e.branch.clone();
+    if e.asking || e.at.is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(5)) {
+        return known;
+    }
+    e.asking = true;
+    drop(g); // never held across a process
+    let d = dir.to_path_buf();
+    let asked = std::thread::Builder::new().name("qh-branch".into()).spawn(move || {
+        let answer = ask(&d);
+        let mut g = BRANCHES.lock().unwrap_or_else(|e| e.into_inner());
+        g.get_or_insert_with(Default::default).entry(d).or_default().answered(answer);
+    });
+    if asked.is_err() {
+        let mut g = BRANCHES.lock().unwrap_or_else(|e| e.into_inner());
+        g.get_or_insert_with(Default::default).entry(dir.to_path_buf()).or_default().answered(None);
+    }
+    known
+}
+
+fn ask_git_for_branch(dir: &Path) -> BranchAnswer {
+    let mut c = Command::new("git");
+    c.arg("-C").arg(dir).args(["symbolic-ref", "--short", "HEAD"]);
+    ask_bounded(c, std::time::Duration::from_secs(3))
+}
+
+/// The first line a command prints, if it worked. None if it's still going after `limit`.
+fn ask_bounded(mut c: Command, limit: std::time::Duration) -> BranchAnswer {
+    use std::io::Read;
+    c.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null());
+    let Ok(mut child) = c.spawn() else { return Some(None) };
+    let t0 = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(st)) => {
+                let mut out = String::new();
+                if let Some(mut o) = child.stdout.take() { let _ = o.read_to_string(&mut out); }
+                return Some(st.success().then(|| out.lines().next().unwrap_or("").to_string()).filter(|b| !b.is_empty()));
+            }
+            Err(_) => return Some(None),
+            Ok(None) if t0.elapsed() >= limit => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(5)),
+        }
+    }
 }
 
 /// The current branch of the checkout containing cwd, read from HEAD (for the pane title).
@@ -261,15 +324,26 @@ mod tests {
         Some(d)
     }
 
+    /// Ask about `d`, and wait until git has answered.
+    fn settled(d: &Path) {
+        let _ = branch_from_git(d);
+        let t0 = std::time::Instant::now();
+        let answered = || BRANCHES.lock().unwrap().as_ref().and_then(|m| m.get(d)).is_some_and(|e| e.at.is_some());
+        while !answered() && t0.elapsed() < std::time::Duration::from_secs(10) { std::thread::sleep(std::time::Duration::from_millis(5)) }
+        assert!(answered());
+    }
+
     #[test]
     fn the_branch_is_right_in_a_reftable_repository() {
         let Some(d) = reftable_repo() else { return };
         assert_eq!(std::fs::read_to_string(d.join(".git/HEAD")).unwrap().trim(), "ref: refs/heads/.invalid", "what the file says there");
+        settled(&d);
         assert_eq!(branch(&d).as_deref(), Some("main"));
         assert_eq!(crate::teamview::branch(&d), "main");
         // a linked checkout: its HEAD says the same, in its own git dir
         let other = d.with_extension("linked");
         git(&d, &["worktree", "add", "-q", "-b", "side", &other.to_string_lossy()]).unwrap();
+        settled(&other);
         assert_eq!(branch(&other).as_deref(), Some("side"));
         assert_eq!(crate::teamview::branch(&other), "side");
         let _ = std::fs::remove_dir_all(&other);
@@ -280,6 +354,7 @@ mod tests {
     fn no_branch_in_a_reftable_repository_is_no_name_at_all() {
         let Some(d) = reftable_repo() else { return };
         git(&d, &["checkout", "-q", "--detach"]).unwrap();
+        settled(&d);
         assert_eq!(branch(&d), None, "never \".invalid\"");
         assert_eq!(crate::teamview::branch(&d), "");
         let _ = std::fs::remove_dir_all(&d);
@@ -288,6 +363,7 @@ mod tests {
     #[test]
     fn asking_git_for_the_branch_is_not_done_on_every_frame() {
         let Some(d) = reftable_repo() else { return };
+        settled(&d);
         assert_eq!(branch(&d).as_deref(), Some("main"));
         git(&d, &["checkout", "-q", "-b", "later"]).unwrap();
         assert_eq!(branch(&d).as_deref(), Some("main"), "a few seconds out of date is fine for showing it");
@@ -295,10 +371,66 @@ mod tests {
     }
 
     #[test]
+    fn a_hung_git_doesnt_hold_up_drawing() {
+        use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+        use std::time::{Duration, Instant};
+        static ASKED: AtomicUsize = AtomicUsize::new(0);
+        fn hung(_: &Path) -> BranchAnswer {
+            ASKED.fetch_add(1, Relaxed);
+            std::thread::sleep(Duration::from_millis(1500));
+            Some(Some("late".into()))
+        }
+        fn quick(_: &Path) -> BranchAnswer { Some(Some("other".into())) }
+        let d = PathBuf::from(format!("/qh-test/hung-{}", std::process::id()));
+        let t0 = Instant::now();
+        assert_eq!(branch_cached(&d, hung), None, "nothing known yet");
+        assert!(t0.elapsed() < Duration::from_millis(500), "the frame waited {:?}", t0.elapsed());
+        // every frame after it: no wait, no second git
+        let t0 = Instant::now();
+        assert_eq!(branch_cached(&d, hung), None);
+        assert!(t0.elapsed() < Duration::from_millis(500), "the frame waited {:?}", t0.elapsed());
+        // nor is any other folder held up by it
+        let t0 = Instant::now();
+        let other = d.with_extension("other");
+        let _ = branch_cached(&other, quick);
+        assert!(t0.elapsed() < Duration::from_millis(500), "the other folder waited {:?}", t0.elapsed());
+        let t0 = Instant::now();
+        while branch_cached(&d, hung).is_none() && t0.elapsed() < Duration::from_secs(5) { std::thread::sleep(Duration::from_millis(20)) }
+        assert_eq!(branch_cached(&d, hung).as_deref(), Some("late"), "it shows when it comes");
+        assert_eq!(ASKED.load(Relaxed), 1);
+    }
+
+    #[test]
+    fn a_git_that_never_answers_is_given_up_on_and_changes_nothing() {
+        use std::time::{Duration, Instant};
+        #[cfg(unix)]
+        {
+            let mut c = Command::new("sh");
+            c.args(["-c", "sleep 30"]);
+            let t0 = Instant::now();
+            assert_eq!(ask_bounded(c, Duration::from_millis(200)), None);
+            assert!(t0.elapsed() < Duration::from_secs(2), "it took {:?}", t0.elapsed());
+            let mut c = Command::new("sh");
+            c.args(["-c", "echo main"]);
+            assert_eq!(ask_bounded(c, Duration::from_secs(5)), Some(Some("main".to_string())));
+            let mut c = Command::new("sh");
+            c.args(["-c", "exit 1"]);
+            assert_eq!(ask_bounded(c, Duration::from_secs(5)), Some(None), "git says there's no branch: that's an answer");
+        }
+        let mut seen = BranchSeen { branch: Some("main".into()), ..Default::default() };
+        seen.answered(None);
+        assert_eq!(seen.branch.as_deref(), Some("main"), "no answer keeps what we knew");
+        assert!(seen.at.is_some() && !seen.asking, "and asks again in a while");
+        seen.answered(Some(None));
+        assert_eq!(seen.branch, None);
+    }
+
+    #[test]
     fn create_edit_merge() {
         let d = repo();
         let w = create(&d, "t1").unwrap();
         assert_eq!(info(&w.path.join("sub")).map(|x| x.name), Some("t1".into()));
+        settled(&w.path); // a reftable repository, if that's this machine's default: git has to be asked
         assert_eq!(branch(&w.path).as_deref(), Some("qh/t1"));
         assert!(std::fs::read_to_string(d.join(".git/info/exclude")).unwrap().contains("/.qh/worktrees/"));
         assert!(git(&d, &["status", "--porcelain"]).unwrap().is_empty());

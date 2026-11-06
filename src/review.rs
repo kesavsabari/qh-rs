@@ -914,7 +914,7 @@ new file mode 100644
         // a restart: what's in memory is gone, the file brings it back
         let restart = || {
             HELD.lock().unwrap().retain(|h| h.repo != "t/held");
-            PUSH_ANYWAY.lock().unwrap().retain(|h| h.len() != 40); // this test's heads are real commits
+            PUSH_ANYWAY.lock().unwrap().retain(|h| h.len() != 40 && h.len() != 64); // this test's heads are real commits (sha1 or sha256)
             load_held("t/held");
         };
         held("t/held", &repo, &head, "s1", &["erin".into()]);

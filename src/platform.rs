@@ -11,20 +11,36 @@ pub fn home() -> PathBuf {
 
 /// Config folder: ~/.config/qh, or %APPDATA%\qh on Windows.
 pub fn config_base() -> PathBuf {
+    #[cfg(test)]
+    return test_base("config");
+    #[cfg(not(test))]
+    {
     static P: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     P.get_or_init(|| {
         let base = if cfg!(windows) { std::env::var_os("APPDATA").map(PathBuf::from) } else { None };
         moved(&base.unwrap_or_else(|| home().join(".config")))
     }).clone()
+    }
+}
+
+/// Where a test's config and state go: never the real ones (and never `moved`, which renames them).
+#[cfg(test)]
+fn test_base(what: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("qh-test-{what}-{}", std::process::id()))
 }
 
 /// State folder: ~/.local/state/qh, or %LOCALAPPDATA%\qh on Windows.
 pub fn state_base() -> PathBuf {
+    #[cfg(test)]
+    return test_base("state");
+    #[cfg(not(test))]
+    {
     static P: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     P.get_or_init(|| {
         let base = if cfg!(windows) { std::env::var_os("LOCALAPPDATA").map(PathBuf::from) } else { None };
         moved(&base.unwrap_or_else(|| home().join(".local/state")))
     }).clone()
+    }
 }
 
 /// `parent/qh`, first moving a `parent/qwen-harness` folder from before the rename over to it.

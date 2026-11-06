@@ -323,6 +323,7 @@ struct State {
     sent: Vec<Outgoing>,        // our requests and their statuses (the last 100)
     fyi: Vec<Fyi>,              // answers, reviews, mentions (the last 50)
     last_open: u64,             // when qh last had this project open before this run
+    away_until: u64,            // when the first read of the board finished; 0 until it has
     roles: HashMap<String, String>, // login -> viewer | trusted (member when absent); our own rules for our sessions
     approved: Vec<String>,          // people we'll let in without asking (invited, or let in before)
     asking: Vec<String>,            // newcomers waiting for "let in"
@@ -735,6 +736,7 @@ pub fn token() -> Option<String> {
     for v in ["GH_TOKEN", "GITHUB_TOKEN"] {
         if let Ok(t) = std::env::var(v) { if !t.is_empty() { return Some(t) } }
     }
+    if cfg!(test) { return None } // a test has no business with the real login
     if let Ok(o) = Command::new("gh").args(["auth", "token"]).stdin(Stdio::null()).output() {
         let t = String::from_utf8_lossy(&o.stdout).trim().to_string();
         if o.status.success() && !t.is_empty() { return Some(t) }
@@ -1128,7 +1130,12 @@ pub fn set_role(repo: &str, login: &str, role: &str) -> Result<String, String> {
     let p = per_repo("team-roles", repo);
     let _ = std::fs::create_dir_all(p.parent().unwrap_or(&p));
     std::fs::write(&p, serde_json::to_string(&roles).unwrap_or_default()).map_err(|e| e.to_string())?;
-    with(repo, |s| { s.roles = roles; s.dirty = true; });
+    with(repo, |s| {
+        s.roles = roles;
+        s.dirty = true;
+        // topics narrow a trust: with the trust gone they mean nothing, and must not come back with the next one
+        if role != "trusted" { s.flow.topics.remove(login); }
+    });
     Ok(format!("{login} is now a {role} in your sessions: {}", role_help(role)))
 }
 
@@ -1433,7 +1440,7 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks, background: bool) -> Re
     let (running, finished) = (std::sync::Arc::new(AtomicBool::new(true)), std::sync::Arc::new(AtomicBool::new(false)));
     STATES.lock().unwrap().get_or_insert_with(HashMap::new).insert(repo.clone(), State {
         repo: repo.clone(), me: me.clone(), peers: HashMap::new(), error: String::new(), key: load_key(&repo),
-        outbox: saved.outbox, next_id, seen, pending: saved.pending, sent: saved.sent, fyi: saved.fyi, last_open: saved.ts, flow: saved.flow,
+        outbox: saved.outbox, next_id, seen, pending: saved.pending, sent: saved.sent, fyi: saved.fyi, last_open: saved.ts, away_until: 0, flow: saved.flow,
         roles: load_roles(&repo),
         approved: load_list("team-approved", &repo), asking: vec![], invites, chat,
         epoch: std::fs::read_to_string(per_repo("team-epoch", &repo)).ok().and_then(|e| e.trim().parse().ok()).unwrap_or(0),
@@ -1489,7 +1496,9 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks, background: bool) -> Re
                             Ok(list) => {
                                 retry.worked(Instant::now());
                                 if push.fails == 0 { with(&repo2, |s| s.error.clear()); }
+                                let was = fetched.load(Relaxed);
                                 take_in_board(&fetched, &stop, || absorb(&repo2, &board, &list, &mut folders, &secret, &tok, &hooks, &stop));
+                                caught_up(&repo2, was, &fetched);
                                 bump();
                                 (hooks.refresh)();
                             }
@@ -3161,7 +3170,13 @@ pub fn clock(ts: u64) -> String {
     let (day, today) = (local(ts).div_euclid(86400), local(now()).div_euclid(86400));
     let m = local(ts).rem_euclid(86400) / 60;
     let hm = format!("{:02}:{:02}", m / 60, m % 60);
-    match day - today { 0 => hm, 1 => format!("tomorrow {hm}"), _ => format!("in {}d {hm}", day - today) }
+    match day - today {
+        0 => hm,
+        1 => format!("tomorrow {hm}"),
+        -1 => format!("yesterday {hm}"),
+        d if d < 0 => format!("{}d ago {hm}", -d),
+        d => format!("in {d}d {hm}"),
+    }
 }
 
 /// The next local `hh:mm` from now (today if it's still ahead, else tomorrow).
@@ -3567,12 +3582,25 @@ pub fn pending_summary() -> (usize, Option<u64>) {
 
 /// What came in since qh last had this project open.
 pub fn away() -> Away {
-    cur(|s| {
-        let since = s.last_open;
-        let mut needs_you: Vec<Incoming> = s.pending.iter().filter(|i| since > 0 && i.arrived() > since).cloned().collect();
-        needs_you.sort_by_key(|i| i.arrived());
-        Away { since_ts: since, needs_you, fyi: s.fyi.iter().filter(|f| since > 0 && f.ts > since).cloned().collect() }
-    }).unwrap_or_default()
+    cur(|s| away_of(s)).unwrap_or_default()
+}
+
+/// What came between `last_open` and the end of the first read of the board. Not "before this run
+/// started": what was sent while we were away is stamped when it arrives, during that read. What
+/// comes after it, we were here for.
+fn away_of(s: &State) -> Away {
+    let since = s.last_open;
+    let within = |t: u64| since > 0 && t > since && (s.away_until == 0 || t <= s.away_until);
+    let mut needs_you: Vec<Incoming> = s.pending.iter().filter(|i| within(i.arrived())).cloned().collect();
+    needs_you.sort_by_key(|i| i.arrived());
+    Away { since_ts: since, needs_you, fyi: s.fyi.iter().filter(|f| within(f.ts)).cloned().collect() }
+}
+
+/// The first read of the board just finished, if it did.
+fn caught_up(repo: &str, was_fetched: bool, fetched: &AtomicBool) {
+    if !was_fetched && fetched.load(Relaxed) {
+        with(repo, |s| s.away_until = now());
+    }
 }
 
 /// Our requests, newest first.
@@ -5817,6 +5845,12 @@ pub(crate) mod tests {
             assert!(s.outbox.iter().any(|m| m["kind"] == "a" && m["re"] == 9));
             assert_eq!(s.flow.log.len(), 3);
         });
+        // stop trusting them and their topics go too: trusted again, it's on anything until you pick
+        set_role(&repo, "sam", "member").unwrap();
+        assert!(with(&repo, |s| !s.flow.topics.contains_key("sam")).unwrap(), "topics belong to the trust");
+        set_role(&repo, "sam", "trusted").unwrap();
+        reply(&q(7, "sam", "payout schedule for EU?"), "weekly", &["payout_day".into()], true);
+        assert!(with(&repo, |s| s.outbox.iter().any(|m| m["kind"] == "a" && m["re"] == 7)).unwrap(), "no topics: on anything");
         STATES.lock().unwrap().as_mut().unwrap().remove(&repo);
     }
 
@@ -5907,6 +5941,16 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn focus_ending_moves_the_generation_so_an_idle_screen_redraws() {
+        let mut st = state("alice");
+        st.flow.focus = now() - 1;
+        let before = generation();
+        wake_locked(&mut st);
+        assert!(generation() > before);
+        assert!(st.flow.focus_told);
+    }
+
+    #[test]
     fn expiry_shows_from_day_twelve() {
         let o = |age: u64| Outgoing { id: 1, ts: now() - age, history: vec![(Status::Delivered, now() - age)], ..Default::default() };
         assert_eq!(expires_in(&o(11 * 86400)), None);
@@ -5915,6 +5959,21 @@ pub(crate) mod tests {
         let mut done = o(13 * 86400);
         done.history.push((Status::Accepted, now()));
         assert_eq!(expires_in(&done), None);
+        // past two weeks, still open: nothing here ends it, so don't count down to it
+        let old = o(14 * 86400 + 100);
+        assert_eq!(expires_in(&old), Some(0));
+        assert_eq!(crate::teamview::outgoing_side(&old), "two weeks old · still open on their side");
+        assert!(crate::teamview::outgoing_side(&o(12 * 86400)).starts_with("expires in 2d"));
+    }
+
+    #[test]
+    fn clock_says_when_in_words_whichever_way() {
+        let at = |d: i64| clock((now() as i64 + d * 86400) as u64);
+        assert!(at(0).len() == 5 && at(0).as_bytes()[2] == b':', "{}", at(0));
+        assert!(at(1).starts_with("tomorrow "), "{}", at(1));
+        assert!(at(-1).starts_with("yesterday "), "{}", at(-1));
+        assert!(at(-3).starts_with("3d ago "), "{}", at(-3));
+        assert!(at(5).starts_with("in 5d "), "{}", at(5));
     }
 
     #[test]
@@ -6117,13 +6176,17 @@ pub(crate) mod tests {
         set_current(repo);
     }
 
+    pub(crate) fn add_outgoing(repo: &str, o: Outgoing) {
+        with(repo, |s| s.sent.push(o));
+    }
+
     pub(crate) fn drop_demo(repo: &str) {
         STATES.lock().unwrap().as_mut().unwrap().remove(repo);
     }
 
     fn state(me: &str) -> State {
         State {
-            repo: "o/r".into(), me: me.into(), peers: HashMap::new(), error: String::new(), key: None, outbox: vec![], next_id: 0, sent: vec![], fyi: vec![], last_open: 0,
+            repo: "o/r".into(), me: me.into(), peers: HashMap::new(), error: String::new(), key: None, outbox: vec![], next_id: 0, sent: vec![], fyi: vec![], last_open: 0, away_until: 0,
             seen: HashMap::new(), pending: vec![], roles: HashMap::new(), approved: vec![], asking: vec![], invites: HashMap::new(),
             epoch: 0, removed: vec![], admins: HashMap::new(), pins: HashMap::new(), gh_login: me.into(), git_ms: HashMap::new(),
             asked_github: HashMap::new(), warned: vec![], my_sha: String::new(),
@@ -7078,6 +7141,37 @@ pub(crate) mod tests {
         assert!(with(repo, |s| s.key.is_none()).unwrap() && !per_repo("team-keys", repo).exists(), "the lock may be someone else's by now");
         settle_key(repo, &AtomicBool::new(false));
         assert!(with(repo, |s| s.key.is_some()).unwrap());
+    }
+
+    #[test]
+    fn while_you_were_away_ends_with_the_first_read_of_the_board() {
+        let inc = |ts: u64| Incoming { id: ts, ts, ..Default::default() };
+        let fyi = |ts: u64| Fyi { ts, kind: "reply".into(), text: "x".into() };
+        let mut st = state("alice");
+        st.last_open = 100;
+        st.pending = vec![inc(50), inc(200), inc(400)];
+        st.fyi = vec![fyi(50), fyi(200), fyi(400)];
+        let got = |s: &State| { let a = away_of(s); (a.needs_you.iter().map(|i| i.ts).collect::<Vec<_>>(), a.fyi.iter().map(|f| f.ts).collect::<Vec<_>>()) };
+        // still catching up: what arrives now was sent while we were away, whatever its stamp
+        assert_eq!(got(&st), (vec![200, 400], vec![200, 400]));
+        // caught up at 300: what came after that came with us here
+        st.away_until = 300;
+        assert_eq!(got(&st), (vec![200], vec![200]));
+        // the first read that finishes sets it, and only the first
+        let repo = format!("req/caught-{}", std::process::id());
+        let mut st = state("alice");
+        st.repo = repo.clone();
+        STATES.lock().unwrap().get_or_insert_with(HashMap::new).insert(repo.clone(), st);
+        let until = || with(&repo, |s| s.away_until).unwrap();
+        caught_up(&repo, false, &AtomicBool::new(false));
+        assert_eq!(until(), 0, "quit during it: still catching up");
+        caught_up(&repo, false, &AtomicBool::new(true));
+        let first = until();
+        assert!(first >= now() - 2, "{first}");
+        with(&repo, |s| s.away_until = 1);
+        caught_up(&repo, true, &AtomicBool::new(true));
+        assert_eq!(until(), 1, "later reads leave it");
+        STATES.lock().unwrap().get_or_insert_with(HashMap::new).remove(&repo);
     }
 
     #[test]

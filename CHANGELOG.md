@@ -13,6 +13,8 @@ qh now starts on a clean Windows, team mode gets through stalled networks and le
 - **Failures back off and say why.** Failing fetches and pushes wait longer each time, teammates don't retry in step, and the error says what happened and stays until that side works again.
 - **No wrong team keys.** A repo qh can't read, or a board it couldn't list, is now an error rather than an empty team, so it can't create a second key.
 - **Only GitHub counts as GitHub.** A remote such as `https://evil.com/github.com/o/r` used to pass as `o/r`, and names with `..` could reach outside qh's state folder. Both are refused. An SSH alias like `github.com-work` is too: use the plain host.
+- **The screen keeps up while idle.** A Later coming due and the end of a focus now show within seconds, without a keypress.
+- **Team room fixes.** Transcripts keep their line breaks. Old GitHub events no longer show as just now. A trust topic can be removed, with `-`, and turning trust off clears them. Past dates read yesterday or 2d ago, not in -2d. While you were away only lists what happened while you were away. Esc goes back to Home first, and the menu fits an 80x24 terminal.
 - **Fixes.** Branch names work in reftable repositories, a lost transcript update mends itself, and very large team stores get tidied. The Mac app no longer refetches on every tick.
 - **If teammates can't read you after upgrading.** This only applies if you ran 0.2.8 with a git that defaults to sha256: your store never reached GitHub, so a team key it made was never shared. Have a teammate invite you again.
 

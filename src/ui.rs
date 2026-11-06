@@ -226,6 +226,8 @@ struct App {
     quit: bool,
     sugg_sel: usize, // highlighted row of the / autocomplete
     team_view: Option<crate::teamview::TeamView>, // Ctrl+T overview
+    tick_seen: u64, // the team's generation at the last idle redraw
+    tick_at: Instant,
     outside: Option<Vec<String>>, // a terminal step with the UI suspended: ["create", friends…] or ["join", repo]
     // the two spaces Ctrl+Space flips between: the last personal project and the last team one
     last_personal: std::path::PathBuf,
@@ -436,6 +438,12 @@ pub fn emitter(tx: Sender<Ui>) -> crate::hub::Emit {
 
 static KEYS_PAUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Whether an idle screen is due a redraw: something on the team changed, or the times it shows
+/// ("3m ago") have moved on.
+fn tick_due(gen: u64, seen: u64, running: bool, since: Duration) -> bool {
+    gen != seen || (running && since >= Duration::from_secs(30))
+}
+
 pub fn run(hub: Arc<Hub>, tx: Sender<Ui>, rx: Receiver<Ui>) -> std::io::Result<()> {
     let mut term = ratatui::init();
     let _ = execute!(std::io::stdout(), event::EnableBracketedPaste, event::EnableFocusChange);
@@ -499,7 +507,7 @@ pub fn run(hub: Arc<Hub>, tx: Sender<Ui>, rx: Receiver<Ui>) -> std::io::Result<(
     if crate::sandbox::enabled(&hub.cfg) {
         if let Some(s) = crate::sandbox_windows::offer_once() { app.note(&active, s) }
     }
-    let res = loop {
+    let res = 'run: loop {
         if let Err(e) = term.draw(|f| app.draw(f)) {
             break Err(e);
         }
@@ -512,8 +520,15 @@ pub fn run(hub: Arc<Hub>, tx: Sender<Ui>, rx: Receiver<Ui>) -> std::io::Result<(
                 Err(_) => break Ok(()),
             }
         } else {
-            let Ok(first) = rx.recv() else { break Ok(()) };
-            app.handle(first);
+            // nothing to do but look at the team now and then: what it changed by itself doesn't
+            // redraw otherwise (a focus ending, someone going offline, an error). At most once a second
+            loop {
+                match rx.recv_timeout(Duration::from_secs(1)) {
+                    Ok(x) => { app.handle(x); break }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => if app.team_tick() { app.hub.changed() },
+                    Err(_) => break 'run Ok(()),
+                }
+            }
         }
         // at most one frame per FRAME: a fast stream is batched, not drawn token by token
         loop {
@@ -747,7 +762,7 @@ impl App {
             hub, views: HashMap::new(), active: String::new(), grid: false, recent: vec![],
             log: VecDeque::new(), show_log: false, replies: false, input: vec![], cur: 0, chips: vec![], hist: vec![], hist_i: 0,
             confirms: VecDeque::new(), picker: None, secret: None, map: None,
-            tab_hits: vec![], body: Rect::default(), picker_rows: None, quit: false, sugg_sel: 0, team_view: None, outside: None,
+            tab_hits: vec![], body: Rect::default(), picker_rows: None, quit: false, sugg_sel: 0, team_view: None, tick_seen: 0, tick_at: Instant::now(), outside: None,
             last_personal: std::path::PathBuf::new(), last_team: std::path::PathBuf::new(), map_was_open: false, wt_hinted: false,
             notifier: Default::default(),
         }
@@ -770,6 +785,15 @@ impl App {
         }
         drop(msgs);
         self.views.insert(name.to_string(), v);
+    }
+
+    /// Whether to redraw an idle screen (see `tick_due`).
+    fn team_tick(&mut self) -> bool {
+        let gen = crate::team::generation();
+        if !tick_due(gen, self.tick_seen, crate::team::running(), self.tick_at.elapsed()) { return false }
+        self.tick_seen = gen;
+        self.tick_at = Instant::now();
+        true
     }
 
     fn note(&mut self, name: &str, s: impl Into<String>) {
@@ -2327,9 +2351,10 @@ $ARGUMENTS is replaced by what you type after the command".into()
         } else {
             Line::from(vec![Span::styled(prompt, Style::new().fg(pc)), Span::raw(shown_text)])
         };
-        f.render_widget(Paragraph::new(line), input);
+        // keys go to the team screen while it's open: a prompt and cursor would say they don't
+        if self.team_view.is_none() { f.render_widget(Paragraph::new(line), input) }
         f.render_widget(input_block, input_box);
-        f.set_cursor_position((input.x + 2 + cx as u16, input.y));
+        if self.team_view.is_none() { f.set_cursor_position((input.x + 2 + cx as u16, input.y)) }
         // three hints for the moment; ⌃K has everything else
         let working = self.hub.get(&self.active).is_some_and(|m| matches!(m.status(), "working" | "waiting-model"));
         let hints = if working {
@@ -3478,6 +3503,23 @@ impl Remote {
         out.push(json!({"type": "active", "tab": app.active}));
         app.quit = false;
         out
+    }
+}
+
+#[cfg(test)]
+mod tick_tests {
+    use super::*;
+
+    #[test]
+    fn an_idle_screen_is_redrawn_when_the_team_changes_and_now_and_then() {
+        let (s, half, long) = (Duration::from_secs(1), Duration::from_secs(29), Duration::from_secs(30));
+        for (gen, seen, running, since, want) in [
+            (5, 5, false, s, false), (5, 5, true, s, false), (5, 5, true, half, false),
+            (6, 5, false, s, true), (6, 5, true, s, true),
+            (5, 5, true, long, true), (5, 5, false, long, false),
+        ] {
+            assert_eq!(tick_due(gen, seen, running, since), want, "{gen} {seen} {running} {since:?}");
+        }
     }
 }
 

@@ -173,29 +173,7 @@ fn gh_refresh(repo: &str, force: bool) {
                 }
                 // pushes and pull requests, into the Activity tab (oldest first, each once)
                 if let Ok(v) = get(&format!("/repos/{repo}/events?per_page=30")) {
-                    let mut seen = SEEN_EVENTS.lock().unwrap();
-                    let first = seen.is_empty();
-                    for e in v.as_array().into_iter().flatten().rev() {
-                        let id = e["id"].as_str().unwrap_or("").to_string();
-                        if id.is_empty() || seen.contains(&id) { continue }
-                        seen.push(id);
-                        let who = e["actor"]["login"].as_str().unwrap_or("someone");
-                        let line = match e["type"].as_str().unwrap_or("") {
-                            "PushEvent" => {
-                                let br = e["payload"]["ref"].as_str().unwrap_or("").trim_start_matches("refs/heads/");
-                                let n = e["payload"]["size"].as_u64().or(e["payload"]["distinct_size"].as_u64()).unwrap_or(0);
-                                if n > 0 { format!("↑ {who} pushed {n} commit{} to {br}", if n == 1 { "" } else { "s" }) }
-                                else { format!("↑ {who} pushed to {br}") }
-                            }
-                            "PullRequestEvent" => format!("⇄ {who} {} PR #{}: {}", e["payload"]["action"].as_str().unwrap_or("updated"),
-                                e["payload"]["number"], e["payload"]["pull_request"]["title"].as_str().unwrap_or("")),
-                            "IssuesEvent" => format!("● {who} {} issue #{}: {}", e["payload"]["action"].as_str().unwrap_or("updated"),
-                                e["payload"]["issue"]["number"], e["payload"]["issue"]["title"].as_str().unwrap_or("")),
-                            _ => continue,
-                        };
-                        // the first load only fills in history quietly; later ones are news
-                        if !first || seen.len() <= 30 { crate::team::log_to(&repo, &line) }
-                    }
+                    for line in events_news(&repo, &v, &mut SEEN_EVENTS.lock().unwrap()) { crate::team::log_to(&repo, &line) }
                 }
                 if let Ok(v) = get(&format!("/repos/{repo}/pulls?state=open&per_page=30")) {
                     for p in v.as_array().into_iter().flatten() {
@@ -209,6 +187,71 @@ fn gh_refresh(repo: &str, force: bool) {
         }
         *GH.lock().unwrap() = Some((Instant::now(), d));
     });
+}
+
+/// What's new in a page of GitHub events, as Activity lines.
+///
+/// `seen` is shared by every repo, so each entry says whose it is. A repo's first load only fills
+/// in history quietly: those events aren't happening now.
+fn events_news(repo: &str, v: &Value, seen: &mut Vec<String>) -> Vec<String> {
+    let mine = format!("{repo}#");
+    let first = !seen.iter().any(|k| k.starts_with(&mine));
+    if first { seen.push(mine.clone()) } // an empty first page was a first load too
+    let mut news = vec![];
+        for e in v.as_array().into_iter().flatten().rev() {
+            let id = e["id"].as_str().unwrap_or("").to_string();
+            let key = format!("{mine}{id}");
+            if id.is_empty() || seen.contains(&key) { continue }
+            seen.push(key);
+            let who = e["actor"]["login"].as_str().unwrap_or("someone");
+            let line = match e["type"].as_str().unwrap_or("") {
+                "PushEvent" => {
+                    let br = e["payload"]["ref"].as_str().unwrap_or("").trim_start_matches("refs/heads/");
+                    let n = e["payload"]["size"].as_u64().or(e["payload"]["distinct_size"].as_u64()).unwrap_or(0);
+                    if n > 0 { format!("↑ {who} pushed {n} commit{} to {br}", if n == 1 { "" } else { "s" }) }
+                    else { format!("↑ {who} pushed to {br}") }
+                }
+                "PullRequestEvent" => format!("⇄ {who} {} PR #{}: {}", e["payload"]["action"].as_str().unwrap_or("updated"),
+                    e["payload"]["number"], e["payload"]["pull_request"]["title"].as_str().unwrap_or("")),
+                "IssuesEvent" => format!("● {who} {} issue #{}: {}", e["payload"]["action"].as_str().unwrap_or("updated"),
+                    e["payload"]["issue"]["number"], e["payload"]["issue"]["title"].as_str().unwrap_or("")),
+                _ => continue,
+            };
+            if !first { news.push(line) }
+        }
+    news
+}
+
+/// One message of a transcript as screen lines, keeping its line breaks.
+fn transcript_lines(role: &str, text: &str) -> Vec<Line<'static>> {
+    let user = role == "user";
+    let style = if user { Style::new().add_modifier(Modifier::BOLD) } else { Style::new() };
+    let text = text.trim();
+    let mut rows: Vec<&str> = text.lines().collect();
+    if rows.is_empty() { rows.push("") }
+    rows.into_iter().enumerate().map(|(i, row)| if i == 0 {
+        Line::from(vec![
+            Span::styled(if user { "▸ " } else { "◂ " }, Style::new().fg(if user { theme::ink2() } else { theme::ink() })),
+            Span::styled(row.to_string(), style),
+        ])
+    } else {
+        Line::from(vec![Span::raw("  "), Span::styled(row.to_string(), style)])
+    }).collect()
+}
+
+/// Where a request of ours stands, in a row of You asked.
+pub(crate) fn outgoing_side(o: &crate::team::Outgoing) -> String {
+    let st = o.status();
+    let words = if o.reply.is_empty() { String::new() } else { format!(": \"{}\"", o.reply) };
+    let when = crate::team::ago(o.history.last().map_or(o.ts, |h| h.1));
+    match crate::team::expires_in(o) {
+        // from day 12 of 14: say so, and whether they ever opened it
+        Some(0) => "two weeks old · still open on their side".into(), // nothing here ends it
+        Some(d) => format!("expires in {d}d{}", if o.history.iter().any(|h| h.0 == Status::Seen) { "" } else { ", never opened" }),
+        None if st == Status::Expired => format!("expired {when} · s send again · x let it go"),
+        None if o.reply.starts_with("seen, ") => format!("{} · {when}", o.reply), // it says it all: "seen, back to it 14:00"
+        None => format!("{}{words} · {when}", st.as_str()),
+    }
 }
 
 fn ci_mark(v: &Value) -> String {
@@ -317,6 +360,7 @@ enum To {
     Reply(String, u64),       // writing back to a waiting request
     SendBack(String, String), // what a held push needs before it goes: (pusher, commit)
     Decline(String, u64),     // why we're saying no to a request (may be left empty)
+    TopicOff(String),         // a topic to take off that list
     Topic(String),            // a topic a trusted teammate's promises may cover
 }
 
@@ -352,6 +396,11 @@ const MENU: [(usize, Option<&str>, &str); 11] = [
     (ACTIVITY, None, "Activity"),
 ];
 const MENU_W: u16 = 34;
+
+/// Too short for every page's second line and the gaps between groups.
+fn menu_compact(h: u16) -> bool {
+    h < 28
+}
 
 fn menu_pos(tab: usize) -> usize {
     MENU.iter().position(|m| m.0 == tab).unwrap_or(0)
@@ -414,17 +463,20 @@ impl TeamView {
     pub fn click(&mut self, col: u16, row: u16) -> bool {
         let m = self.menu_at;
         if col < m.x || col >= m.x + m.width || row < m.y || row >= m.y + m.height { return false }
+        // the same rows `draw_menu` draws
+        let compact = menu_compact(m.height);
+        let (head, step) = if compact { (1, 1) } else { (2, 2) };
         let mut y = m.y;
         for (tab, group, _) in MENU.iter() {
-            if group.is_some() { y += 2 }
-            if row == y || row == y + 1 {
+            if group.is_some() { y += head }
+            if row >= y && row < y + step {
                 self.tab = *tab;
                 self.scroll = 0;
                 self.detail = false;
                 self.in_menu = false;
                 return true;
             }
-            y += 2;
+            y += step;
         }
         true
     }
@@ -447,6 +499,7 @@ impl TeamView {
                     if text.is_empty() { return Act::None }
                     let r = match to {
                         To::Topic(who) => crate::team::set_topic(&who, &text, false),
+                        To::TopicOff(who) => crate::team::set_topic(&who, &text, true),
                         To::Chat(c) => crate::team::channel_send(&c, &text),
                         To::Question(who, s) => crate::team::ask_person_agent(&who, &s, &text),
                         To::Task(who, s) => crate::team::send(&who, &s, &text),
@@ -592,6 +645,7 @@ impl TeamView {
                                          Err(e) => Act::Err(e) };
                     }
                     KeyCode::Char('+') => { self.typing = Some((To::Topic(s.who.clone()), String::new())); return Act::None }
+                    KeyCode::Char('-') => { self.typing = Some((To::TopicOff(s.who.clone()), String::new())); return Act::None }
                     _ => {}
                 }
             }
@@ -638,6 +692,7 @@ impl TeamView {
         let n = self.rows(hub, &root);
         let sel = &mut self.sel[self.tab];
         match k.code {
+            KeyCode::Esc if self.tab != 0 => { self.tab = 0; self.scroll = 0 }
             KeyCode::Esc => return Act::Close,
             KeyCode::Char('t') if k.modifiers.contains(KeyModifiers::CONTROL) => return Act::Close,
             KeyCode::Left => self.in_menu = true,
@@ -840,6 +895,7 @@ impl TeamView {
                 To::SendBack(who, _) => format!(" send {who}'s push back: what must change › "),
                 To::Decline(who, _) => format!(" why not, {who}? (Enter alone just says no) › "),
                 To::Topic(who) => format!(" a topic {who}'s questions may get promises on (e.g. refunds) › "),
+                To::TopicOff(who) => format!(" a topic to take off {who}'s list › "),
             };
             f.render_widget(Paragraph::new(Line::from(vec![
                 Span::styled(label, Style::new().fg(accent).add_modifier(Modifier::BOLD)),
@@ -849,9 +905,10 @@ impl TeamView {
         let keys = match (self.typing.is_some(), self.tab) {
             _ if self.later.is_some() => "↑↓ pick · Enter put it off till then · Esc cancel",
             (false, _) if self.in_menu => "↑↓ pages · → or Enter go into the page · Esc back",
-            (true, _) => "Enter send · Esc cancel · @login pings someone, @team everyone",
+            (true, _) if matches!(self.typing, Some((To::Chat(_), _))) => "Enter send · Esc cancel · @login pings someone, @team everyone",
+            (true, _) => "Enter send · Esc cancel",
             (_, 0) if !self.detail => "↑↓ pick · Enter open · a ask their agent · p private message · m message the team · 1-9 pages · Esc back",
-            (_, 0) => "↑↓ sessions · Enter open yours / give their agent a task · t trust or stop · + topic · m message · Esc back to the map",
+            (_, 0) => "↑↓ sessions · Enter open yours / give their agent a task · t trust or stop · + topic · - drop a topic · m message · Esc back to the map",
             (_, CHAT) => "↑↓ channel · Enter or m write · x clear a private thread · /dm <login> and /team group <name> <logins> from the prompt · ← menu · Esc back",
             (_, REQUESTS) if self.sel[REQUESTS] < open_holds().len() => "↑↓ pick · Enter or a approve the push · s send back with a note · r talk it through · ← menu · Esc back",
             (_, REQUESTS) => "↑↓ pick · Enter or a accept · r reply · d decline (say why) · l later · A always answer their questions · ← menu · Esc back",
@@ -905,10 +962,11 @@ impl TeamView {
             }
         };
         let w = area.width.saturating_sub(2) as usize;
+        let compact = menu_compact(area.height);
         let mut lines: Vec<Line> = vec![];
         for (i, (tab, group, name)) in MENU.iter().enumerate() {
             if let Some(g) = group {
-                lines.push(Line::raw(""));
+                if !compact { lines.push(Line::raw("")) }
                 lines.push(Line::styled(format!(" {g}"), theme::bold(theme::dim())));
             }
             let here = self.tab == *tab;
@@ -923,7 +981,7 @@ impl TeamView {
                 Span::raw(" ".repeat(pad)),
                 Span::styled(count, if hot { theme::bold(theme::orange()) } else { theme::fg(theme::ink2()) }),
             ]));
-            lines.push(Line::styled(format!("    {}", clip(&what, w.saturating_sub(4))), theme::fg(theme::dim())));
+            if !compact { lines.push(Line::styled(format!("    {}", clip(&what, w.saturating_sub(4))), theme::fg(theme::dim()))) }
         }
         f.render_widget(Paragraph::new(lines).block(Block::new().borders(Borders::RIGHT).border_style(theme::fg(theme::line()))), area);
     }
@@ -980,17 +1038,7 @@ impl TeamView {
 
     /// What you asked teammates, newest first, with where each one stands.
     fn draw_outgoing(&mut self, f: &mut Frame, area: Rect) {
-        let rows = crate::team::outgoing().into_iter().map(|o| {
-            let st = o.status();
-            let words = if o.reply.is_empty() { String::new() } else { format!(": \"{}\"", o.reply) };
-            let side = match crate::team::expires_in(&o) {
-                // from day 12 of 14: say so, and whether they ever opened it
-                Some(d) => format!("expires in {d}d{}", if o.history.iter().any(|h| h.0 == Status::Seen) { "" } else { ", never opened" }),
-                None if st == Status::Expired => format!("expired {} · s send again · x let it go", crate::team::ago(o.history.last().map_or(o.ts, |h| h.1))),
-                None => format!("{}{words} · {}", st.as_str(), crate::team::ago(o.history.last().map_or(o.ts, |h| h.1))),
-            };
-            (o.to.clone(), clip(&o.text, 80), side)
-        }).collect();
+        let rows = crate::team::outgoing().into_iter().map(|o| (o.to.clone(), clip(&o.text, 80), outgoing_side(&o))).collect();
         self.draw_list(f, area, rows, false, "", "you haven't asked anyone anything yet: a on Home asks a teammate's agent")
     }
 
@@ -1404,11 +1452,7 @@ impl TeamView {
         };
         if rows.is_empty() { lines.push(Line::styled("no conversation yet", Style::new().fg(theme::dim()))) }
         for (r, t) in rows.iter().rev().take(40).collect::<Vec<_>>().into_iter().rev() {
-            let user = r == "user";
-            lines.push(Line::from(vec![
-                Span::styled(if user { "▸ " } else { "◂ " }, Style::new().fg(if user { theme::ink2() } else { theme::ink() })),
-                Span::styled(t.trim().to_string(), if user { Style::new().add_modifier(Modifier::BOLD) } else { Style::new() }),
-            ]));
+            lines.extend(transcript_lines(r, t));
         }
         // stick to the bottom, like a chat; PgUp scrolls back
         let p = Paragraph::new(lines).wrap(Wrap { trim: false });
@@ -1546,6 +1590,8 @@ mod path_tests {
 mod flow_screen_tests {
     use super::*;
     use ratatui::{backend::TestBackend, Terminal};
+    use serde_json::json;
+    use std::path::PathBuf;
 
     fn screen(v: &mut TeamView, hub: &Hub, cwd: &Path) -> String {
         let mut t = Terminal::new(TestBackend::new(150, 44)).unwrap();
@@ -1557,6 +1603,138 @@ mod flow_screen_tests {
 
     fn key(v: &mut TeamView, hub: &std::sync::Arc<Hub>, cwd: &Path, c: KeyCode) -> Act {
         v.key(KeyEvent::new(c, KeyModifiers::NONE), hub, cwd)
+    }
+
+    fn demo(name: &str) -> (std::sync::MutexGuard<'static, ()>, String, std::sync::Arc<Hub>, PathBuf) {
+        let env = crate::hub::tests::ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let root = std::env::temp_dir().join(format!("qh-{name}-{}", std::process::id()));
+        std::env::set_var("QH_STATE_DIR", root.join("state"));
+        let repo = format!("flow/{name}{}", std::process::id());
+        crate::team::tests::install_flow_demo(&repo);
+        let hub = Hub::new(crate::config::load_defaults(), Some(format!("{name}-{}", std::process::id())), Box::new(|_, _| {}), true);
+        (env, repo, hub, std::env::temp_dir())
+    }
+
+    #[test]
+    fn esc_goes_home_first_and_closes_from_there() {
+        let (_env, repo, hub, cwd) = demo("escape");
+        let mut v = TeamView { tab: OUTGOING, scroll: 3, ..TeamView::default() };
+        assert!(matches!(key(&mut v, &hub, &cwd, KeyCode::Esc), Act::None));
+        assert_eq!((v.tab, v.scroll), (0, 0), "from a page, to Home");
+        assert!(matches!(key(&mut v, &hub, &cwd, KeyCode::Esc), Act::Close), "from Home, away");
+        let mut v = TeamView { tab: OUTGOING, ..TeamView::default() };
+        assert!(matches!(v.key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL), &hub, &cwd), Act::Close), "Ctrl+T closes from anywhere");
+        crate::team::tests::drop_demo(&repo);
+    }
+
+    #[test]
+    fn the_outgoing_screen_says_where_things_stand_in_plain_words() {
+        let (_env, repo, hub, cwd) = demo("outgoing");
+        let t = crate::team::now();
+        crate::team::tests::add_outgoing(&repo, crate::team::Outgoing { id: 8, to: "sam".into(), session: "ui".into(), text: "put off".into(), ts: t - 60,
+            reply: "seen, back to it 14:00".into(), history: vec![(Status::Delivered, t - 60), (Status::Seen, t - 30)], ..Default::default() });
+        crate::team::tests::add_outgoing(&repo, crate::team::Outgoing { id: 9, to: "sam".into(), session: "ui".into(), text: "old one".into(), ts: t - 14 * 86400 - 100,
+            history: vec![(Status::Delivered, t - 14 * 86400 - 100)], ..Default::default() });
+        let mut v = TeamView { tab: OUTGOING, ..TeamView::default() };
+        let s = screen(&mut v, &hub, &cwd);
+        assert!(s.contains("seen, back to it 14:00 · "), "{s}");
+        assert!(!s.contains(": \"seen, "), "no status in front of it, no quotes:\n{s}");
+        assert!(s.contains("two weeks old · still open on their side"), "{s}");
+        assert!(!s.contains("expires in 0d"), "{s}");
+        crate::team::tests::drop_demo(&repo);
+    }
+
+    #[test]
+    fn a_box_only_offers_pings_where_pings_work() {
+        let (_env, repo, hub, cwd) = demo("hints");
+        let mut v = TeamView { tab: CHAT, ..TeamView::default() };
+        key(&mut v, &hub, &cwd, KeyCode::Char('m'));
+        assert!(screen(&mut v, &hub, &cwd).contains("@login pings someone"));
+        let mut v = TeamView { typing: Some((To::Topic("sam".into()), String::new())), ..TeamView::default() };
+        let s = screen(&mut v, &hub, &cwd);
+        assert!(s.contains("Enter send · Esc cancel") && !s.contains("@login pings"), "{s}");
+        crate::team::tests::drop_demo(&repo);
+    }
+
+    #[test]
+    fn a_topic_comes_off_as_it_went_on() {
+        let (_env, repo, hub, cwd) = demo("topicoff");
+        crate::team::set_topic("sam", "payouts", false).unwrap();
+        let before = crate::team::topics("sam");
+        assert!(before.contains(&"payouts".to_string()));
+        let mut v = TeamView { tab: 0, detail: true, ..TeamView::default() };
+        // down to sam's session, where + and - work
+        for _ in 0..12 {
+            screen(&mut v, &hub, &cwd);
+            key(&mut v, &hub, &cwd, KeyCode::Char('-'));
+            if matches!(&v.typing, Some((To::TopicOff(w), _)) if w == "sam") { break }
+            v.typing = None;
+            key(&mut v, &hub, &cwd, KeyCode::Down);
+        }
+        assert!(matches!(v.typing, Some((To::TopicOff(_), _))), "- asks which topic");
+        let who = if let Some((To::TopicOff(w), _)) = &v.typing { w.clone() } else { String::new() };
+        assert_eq!(who, "sam");
+        assert!(screen(&mut v, &hub, &cwd).contains("topic to take off"));
+        for c in "payouts".chars() { key(&mut v, &hub, &cwd, KeyCode::Char(c)); }
+        assert!(matches!(key(&mut v, &hub, &cwd, KeyCode::Enter), Act::Note(n) if n.contains("dropped topic payouts")));
+        assert!(!crate::team::topics("sam").contains(&"payouts".to_string()));
+        crate::team::tests::drop_demo(&repo);
+    }
+
+    #[test]
+    fn the_menu_fits_a_small_terminal_and_clicks_land() {
+        let (_env, repo, hub, cwd) = demo("smallmenu");
+        assert!(menu_compact(24) && menu_compact(27) && !menu_compact(28));
+        let mut t = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        let mut v = TeamView { tab: 0, ..TeamView::default() };
+        t.draw(|f| v.draw(f, f.area(), &hub, &cwd)).unwrap();
+        let b = t.backend().buffer().clone();
+        let m = v.menu_at;
+        let row_of = |name: &str| (m.y..m.y + m.height).find(|y| (m.x..m.x + m.width).map(|x| b[(x, *y)].symbol().to_string()).collect::<String>().contains(name));
+        for (tab, _, name) in MENU.iter() {
+            let y = row_of(name).unwrap_or_else(|| panic!("{name} isn't on an 80x24 screen"));
+            let mut w = TeamView { tab: 0, menu_at: m, ..TeamView::default() };
+            assert!(w.click(m.x + 3, y));
+            assert_eq!(w.tab, *tab, "clicking {name}");
+        }
+        // and at full size the two-line rows still land
+        let mut t = Terminal::new(TestBackend::new(150, 44)).unwrap();
+        let mut v = TeamView { tab: 0, ..TeamView::default() };
+        t.draw(|f| v.draw(f, f.area(), &hub, &cwd)).unwrap();
+        let b = t.backend().buffer().clone();
+        let m = v.menu_at;
+        let y = (m.y..m.y + m.height).find(|y| (m.x..m.x + m.width).map(|x| b[(x, *y)].symbol().to_string()).collect::<String>().contains("Activity")).unwrap();
+        for row in [y, y + 1] {
+            let mut w = TeamView { tab: 0, menu_at: m, ..TeamView::default() };
+            assert!(w.click(m.x + 3, row));
+            assert_eq!(w.tab, ACTIVITY);
+        }
+        crate::team::tests::drop_demo(&repo);
+    }
+
+    #[test]
+    fn a_message_keeps_its_line_breaks() {
+        let show = |l: &Line| l.spans.iter().map(|s| s.content.to_string()).collect::<String>();
+        let got: Vec<String> = transcript_lines("user", "one\n\nthree\n").iter().map(show).collect();
+        assert_eq!(got, ["▸ one", "  ", "  three"]);
+        let got: Vec<String> = transcript_lines("assistant", "only").iter().map(show).collect();
+        assert_eq!(got, ["◂ only"]);
+        assert_eq!(transcript_lines("assistant", "").len(), 1, "an empty message is still one row");
+    }
+
+    #[test]
+    fn events_are_news_only_after_a_first_quiet_load_per_repo() {
+        let ev = |id: &str| json!({"id": id, "type": "PushEvent", "actor": {"login": "sam"}, "payload": {"ref": "refs/heads/main", "size": 1}});
+        let mut seen = vec![];
+        let page = |ids: &[&str]| Value::from(ids.iter().rev().map(|i| ev(i)).collect::<Vec<_>>());
+        assert_eq!(events_news("o/a", &page(&["1", "2"]), &mut seen).len(), 0, "the first load is history, not news");
+        assert_eq!(events_news("o/a", &page(&["1", "2", "3"]), &mut seen).len(), 1, "only what's new");
+        assert_eq!(events_news("o/a", &page(&["1", "2", "3"]), &mut seen).len(), 0);
+        assert_eq!(events_news("o/b", &page(&["1", "2", "3", "4"]), &mut seen).len(), 0, "another repo's first load is quiet too, same ids or not");
+        assert_eq!(events_news("o/b", &page(&["5"]), &mut seen).len(), 1);
+        // nothing at first is still a first load
+        assert_eq!(events_news("o/c", &page(&[]), &mut seen).len(), 0);
+        assert_eq!(events_news("o/c", &page(&["1"]), &mut seen).len(), 1);
     }
 
     /// Steps 6-8 on screen: every new page and key, drawn from one demo team. QH_SCREENS=<dir>

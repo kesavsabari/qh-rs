@@ -54,6 +54,9 @@ const LIVE_TRANSCRIPTS: &str = "0.2.8"; // the first version that asks for trans
 const WATCH_EVERY: Duration = Duration::from_secs(5); // while a teammate's session is open, say so this often
 const WATCH_LIFE: Duration = Duration::from_secs(20); // and stop sending when they've gone quiet this long
 const TR_EVERY: Duration = Duration::from_secs(1); // a watched transcript goes out at most this often
+const TR_LOST_AFTER: Duration = Duration::from_secs(15); // an update they haven't got by now isn't coming
+const GC_LIMIT: Duration = Duration::from_secs(60);
+const LOOSE_TIDY: u64 = 2000; // loose objects in a store at startup that make it worth tidying
 const BOARD_TIDY: u32 = 200; // writes between clearing out old folders from the board store
 const OFFLINE_AFTER: u64 = 300; // seconds without a write before someone counts as offline
 const ORPHAN_AFTER: u64 = 1800; // seconds every key holder must be gone before an admin starts a new key
@@ -405,6 +408,13 @@ pub fn repo() -> Option<String> {
     cur(|s| s.repo.clone())
 }
 
+/// `d` ago, or just now if the clock doesn't go back that far: on Windows it starts at boot, and
+/// `Instant::now() - d` would panic.
+fn instant_ago(d: Duration) -> Instant {
+    let now = Instant::now();
+    now.checked_sub(d).unwrap_or(now)
+}
+
 pub(crate) fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
@@ -414,8 +424,8 @@ fn git_in(root: &Path, args: &[&str], input: Option<&[u8]>, env: &[(&str, String
 }
 
 fn git_raw(root: &Path, args: &[&str], input: Option<&[u8]>, env: &[(&str, String)]) -> Option<Vec<u8>> {
-    let mut c = Command::new("git");
-    c.current_dir(root).args(args).env("GIT_TERMINAL_PROMPT", "0")
+    let mut c = git_cmd(root);
+    c.args(args).env("GIT_TERMINAL_PROMPT", "0")
         .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() }) // never the UI's terminal
         .stdout(Stdio::piped()).stderr(Stdio::piped());
     for (k, v) in env { c.env(k, v); }
@@ -431,49 +441,229 @@ fn git(root: &Path, args: &[&str]) -> Option<String> {
     git_in(root, args, None, &[])
 }
 
+/// The team stores in use on this machine (see `board_store_in`). A list, not a look at the
+/// folder: these wrappers also run in folders we didn't make, and a bare repository that came
+/// with a clone must stay refused where the user's git refuses it (`safe.bareRepository`).
+static STORES: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+fn is_store(dir: &Path) -> bool {
+    STORES.lock().unwrap().iter().any(|d| d == dir)
+}
+
+/// git in `root`. A store is named outright, and whatever the environment says about some other
+/// repository doesn't apply to it. `--git-dir` alone wouldn't do that: it overrides `GIT_DIR` but
+/// not, say, `GIT_OBJECT_DIRECTORY`.
+fn git_cmd(root: &Path) -> Command {
+    let mut c = Command::new("git");
+    c.current_dir(root);
+    if is_store(root) {
+        c.arg("--git-dir=.");
+        for v in GIT_LOCAL_ENV { c.env_remove(v); }
+    }
+    c
+}
+
 /// Run a command that may stall for as long as the network does, and stop it (helpers too) after
-/// `limit`. Says only whether it worked.
-fn run_limited(mut c: Command, limit: Duration) -> bool {
+/// `limit`, or as soon as `stop` is set. If it didn't work, says how in words fit to show: never
+/// what it ran, or its output (which goes nowhere: `http.extraHeader` carries the token).
+fn run_limited(mut c: Command, limit: Duration, stop: Option<&AtomicBool>) -> Result<(), String> {
+    let stopped = || stop.is_some_and(|f| f.load(Relaxed));
+    if stopped() {
+        return Err("stopped".into()); // the board's thread can get this far after the team was told to go
+    }
     c.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     #[cfg(unix)]
     { use std::os::unix::process::CommandExt; c.process_group(0); }
-    let Ok(mut child) = c.spawn() else { return false };
+    let Ok(mut child) = c.spawn() else { return Err("couldn't start it".into()) };
     let t0 = Instant::now();
     loop {
         match child.try_wait() {
-            Ok(Some(st)) => return st.success(),
-            Err(_) => return false,
+            Ok(Some(st)) if st.success() => return Ok(()),
+            Ok(Some(st)) => return Err(st.code().map_or("ended by a signal".into(), |c| format!("exit code {c}"))),
+            Err(e) => return Err(format!("lost track of it: {e}")),
+            Ok(None) if stopped() => {
+                stop_tree(&mut child, Duration::from_millis(300));
+                return Err("stopped".into());
+            }
             Ok(None) if t0.elapsed() >= limit => {
-                #[cfg(unix)]
-                unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL); }
-                let _ = child.kill();
-                let _ = child.wait();
-                return false;
+                // a short limit means someone is waiting on us: the call at quit has seconds at most
+                stop_tree(&mut child, if limit < Duration::from_secs(5) { Duration::from_millis(300) } else { Duration::from_secs(2) });
+                return Err(format!("timed out after {} s", limit.as_secs()));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(50)),
         }
     }
 }
 
+/// End a command and everything it started. git removes its lockfiles when asked (seen: SIGTERM
+/// clears a held ref lock, SIGKILL leaves it), so ask, give it `grace`, then make sure of the rest.
+#[cfg(unix)]
+fn stop_tree(child: &mut std::process::Child, grace: Duration) {
+    let group = -(child.id() as i32);
+    unsafe { libc::kill(group, libc::SIGTERM); }
+    let t0 = Instant::now();
+    while matches!(child.try_wait(), Ok(None)) && t0.elapsed() < grace {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    std::thread::sleep(Duration::from_millis(50)); // helpers got the same request: their turn
+    unsafe { libc::kill(group, libc::SIGKILL); }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// End a command and everything it started. There's no asking on Windows: `/F` leaves no cleanup,
+/// which is what `sweep_store` is for.
+#[cfg(windows)]
+fn stop_tree(child: &mut std::process::Child, _grace: Duration) {
+    kill_tree_bounded(child.id());
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// `taskkill /T` for at most 3 s: it's what we're using to get unstuck, so it mustn't stick too
+/// (hence no `.output()`), and no console may flash up.
+#[cfg(windows)]
+fn kill_tree_bounded(pid: u32) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let Ok(mut k) = Command::new("taskkill").args(["/T", "/F", "/PID", &pid.to_string()])
+        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).creation_flags(CREATE_NO_WINDOW).spawn() else { return };
+    let t0 = Instant::now();
+    while matches!(k.try_wait(), Ok(None)) {
+        if t0.elapsed() >= Duration::from_secs(3) {
+            let _ = k.kill();
+            let _ = k.wait();
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 /// A push or fetch of the board.
-fn git_net(root: &Path, args: &[&str], env: &[(&str, String)]) -> bool {
-    let mut c = Command::new("git");
-    c.current_dir(root).args(args).env("GIT_TERMINAL_PROMPT", "0");
+fn git_net(root: &Path, args: &[&str], env: &[(&str, String)], limit: Duration, stop: Option<&AtomicBool>) -> Result<(), String> {
+    let mut c = git_cmd(root);
+    c.args(args).env("GIT_TERMINAL_PROMPT", "0");
     for (k, v) in env { c.env(k, v); }
-    run_limited(c, GIT_NET_LIMIT)
+    run_limited(c, limit, stop)
+}
+
+/// What `git rev-parse --local-env-vars` lists: settings that belong to one repository.
+const GIT_LOCAL_ENV: [&str; 15] = ["GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT", "GIT_OBJECT_DIRECTORY",
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_IMPLICIT_WORK_TREE", "GIT_GRAFT_FILE", "GIT_INDEX_FILE", "GIT_NO_REPLACE_OBJECTS", "GIT_REPLACE_REF_BASE", "GIT_PREFIX",
+    "GIT_SHALLOW_FILE", "GIT_COMMON_DIR"];
+
+/// Clear out old folders from a store.
+fn tidy_store(store: &Path, stop: Option<&AtomicBool>) -> bool {
+    // not --prune=now: the board's thread may still be writing (see `leave_board`), and git warns
+    // that risks corruption with a writer about
+    is_store(store) && git_net(store, &["gc", "-q", "--prune=1.hour.ago"], &[], GC_LIMIT, stop).is_ok()
+}
+
+const SWEEP_AGE: Duration = Duration::from_secs(120);
+
+/// Clear what a killed git left in a store. One stale ref lock makes every fetch fail, which holds
+/// up everyone's folders, and our own if it comes before the first read. `/F` on Windows allows no
+/// cleanup at all, and SIGTERM doesn't clear temp packs. The age is there because the team lock
+/// means one qh, not one git: a git left over from before can be alive and holding these, and
+/// then (on Windows) removing them fails, which is fine: the next failed fetch tries again.
+fn sweep_store(store: &Path, age: Duration) {
+    if !is_store(store) {
+        return; // never a project's .git
+    }
+    let mut left = vec![store.join("packed-refs.lock")];
+    let mut dirs = vec![store.join("refs/qh/board")];
+    while let Some(d) = dirs.pop() {
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            if e.file_type().is_ok_and(|t| t.is_dir()) {
+                dirs.push(e.path());
+            } else if e.file_name().to_string_lossy().ends_with(".lock") {
+                left.push(e.path());
+            }
+        }
+    }
+    for e in std::fs::read_dir(store.join("objects/pack")).into_iter().flatten().flatten() {
+        if e.file_name().to_string_lossy().starts_with("tmp_pack_") {
+            left.push(e.path());
+        }
+    }
+    // a store made while git defaulted to reftable stays that way: it works, with its locks here
+    for e in std::fs::read_dir(store.join("reftable")).into_iter().flatten().flatten() {
+        if e.file_name().to_string_lossy().ends_with(".lock") {
+            left.push(e.path());
+        }
+    }
+    for f in left {
+        let old = std::fs::metadata(&f).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|e| e >= age);
+        if old { let _ = std::fs::remove_file(&f); }
+    }
+}
+
+/// The loose objects in what `git count-objects -v` says.
+fn loose_objects(count_objects: &str) -> Option<u64> {
+    count_objects.lines().find_map(|l| l.strip_prefix("count: "))?.trim().parse().ok()
+}
+
+/// Tidy a store with more than `most` loose objects. Says whether it did. For stores that never
+/// reach `BOARD_TIDY` writes in one run, which is most of them.
+fn tidy_if_big(store: &Path, most: u64, stop: Option<&AtomicBool>) -> bool {
+    is_store(store) && git(store, &["count-objects", "-v"]).as_deref().and_then(loose_objects).is_some_and(|n| n > most) && tidy_store(store, stop)
+}
+
+/// After this many writes, tidy a store with more loose objects than the answer. The first look
+/// comes after the first write: tidying can take a minute, and our address must be out by then.
+fn tidy_limit(writes: u32) -> Option<u64> {
+    if writes == 1 { Some(LOOSE_TIDY) } else { writes.is_multiple_of(BOARD_TIDY).then_some(0) }
 }
 
 /// Where the team's folders live on this machine: a bare repository of their own, so a team's
 /// writes never touch the project's .git (no objects piling up, no cleanup set off there). Only
 /// the folders travel, so it needs none of the project's history.
 fn board_store(repo: &str, root: &Path) -> PathBuf {
-    let dir = per_repo("team-board", repo);
-    if dir.join("HEAD").exists() {
-        return dir;
+    board_store_in(&per_repo("team-board", repo), root)
+}
+
+/// A store made while git defaulted to sha256 can never fetch from or push to GitHub ("mismatched
+/// algorithms"), so nothing in it ever went anywhere and nothing in it is the only copy: it holds
+/// folders we build from our state, and the identity commit, which comes out the same each time.
+/// We hold the team lock here, so no qh is using it. Moved aside first, since a rename either
+/// happens or doesn't: a delete cut short by a file in use on Windows would leave half a store.
+/// False if it's still there.
+fn replace_sha256_store(dir: &Path) -> bool {
+    if !dir.join("HEAD").exists() || git(dir, &["rev-parse", "--show-object-format"]).as_deref() != Some("sha256") {
+        return true;
     }
-    let made = std::fs::create_dir_all(&dir).is_ok() && git(&dir, &["init", "-q", "--bare"]).is_some()
-        && git(&dir, &["config", "gc.auto", "0"]).is_some() && git(&dir, &["config", "maintenance.auto", "false"]).is_some();
-    if made { dir } else { root.to_path_buf() }
+    let mut aside = dir.as_os_str().to_owned();
+    aside.push(".old-sha256");
+    let aside = PathBuf::from(aside);
+    let _ = std::fs::remove_dir_all(&aside);
+    if std::fs::rename(dir, &aside).is_err() {
+        return false;
+    }
+    let _ = std::fs::remove_dir_all(&aside);
+    std::fs::create_dir_all(dir).is_ok()
+}
+
+fn board_store_in(dir: &Path, root: &Path) -> PathBuf {
+    let _ = std::fs::create_dir_all(dir);
+    { let mut all = STORES.lock().unwrap(); if !all.iter().any(|d| d == dir) { all.push(dir.to_path_buf()) } }
+    // Files because `sweep_store` knows those, sha1 because GitHub is. These variables, not
+    // `-c init.default...`: they beat that
+    let formats = [("GIT_DEFAULT_REF_FORMAT", "files".to_string()), ("GIT_DEFAULT_HASH", "sha1".to_string())];
+    let made = replace_sha256_store(dir)
+        && (dir.join("HEAD").exists() || git_in(dir, &["init", "-q", "--bare"], None, &formats).is_some())
+        && git(dir, &["rev-parse", "--git-dir"]).is_some();
+    if made {
+        // worth having, not worth leaving the store for: a stale config.lock only stops the writing,
+        // and everything else works without it. The next start tries again
+        for (k, v) in [("gc.auto", "0"), ("maintenance.auto", "false")] {
+            if git(dir, &["config", k]).as_deref() != Some(v) {
+                let _ = git(dir, &["config", k, v]);
+            }
+        }
+        return dir.to_path_buf();
+    }
+    STORES.lock().unwrap().retain(|d| d != dir);
+    root.to_path_buf()
 }
 
 /// The repo's root and its GitHub owner/name, if `origin` is on GitHub.
@@ -543,10 +733,18 @@ fn blob(root: &Path, data: &str) -> Option<String> {
 
 /// Build my folder as a tree and push it to my ref, as a commit whose only parent is my identity
 /// commit (so that stays on the board). Names may have one folder level ("keys/bob").
-fn publish(root: &Path, repo: &str, me: &str, tok: &str, files: &[(String, String)], message: &Value, parent: &str) -> Result<String, String> {
-    let commit = folder_commit(root, files, message, parent)?;
-    git_net(root, &["push", "-q", "-f", &format!("https://github.com/{repo}.git"), &format!("{commit}:refs/qh/peers/{me}")], &auth_env(tok))
-        .then_some(commit).ok_or_else(|| "push to the board failed".into())
+fn publish(root: &Path, repo: &str, me: &str, tok: &str, folder: (&[(String, String)], &Value, &str), limit: Duration, stop: Option<&AtomicBool>) -> Result<String, String> {
+    publish_to(root, &format!("https://github.com/{repo}.git"), me, &auth_env(tok), folder, limit, stop)
+}
+
+/// `publish` to any remote. `folder` is the files, the commit message and the parent.
+fn publish_to(root: &Path, url: &str, me: &str, env: &[(&str, String)], (files, message, parent): (&[(String, String)], &Value, &str), limit: Duration, stop: Option<&AtomicBool>) -> Result<String, String> {
+    push_commit(root, url, me, env, folder_commit(root, files, message, parent)?, limit, stop)
+}
+
+fn push_commit(root: &Path, url: &str, me: &str, env: &[(&str, String)], commit: String, limit: Duration, stop: Option<&AtomicBool>) -> Result<String, String> {
+    git_net(root, &["push", "-q", "-f", url, &format!("{commit}:refs/qh/peers/{me}")], env, limit, stop)
+        .map(|_| commit).map_err(|why| format!("push to the board failed: {why}"))
 }
 
 fn folder_commit(root: &Path, files: &[(String, String)], message: &Value, parent: &str) -> Result<String, String> {
@@ -640,7 +838,9 @@ fn warn_once(repo: &str, hooks: Option<&Hooks>, tag: &str, text: String) {
 /// Whether to take this folder: it must be signed with the keys we know for that login. Keys
 /// seen for the first time are trusted as first seen, or confirmed if GitHub vouches for them;
 /// a change of keys is taken only if GitHub vouches for the new ones.
-fn vet(repo: &str, tok: &str, p: &Peer, hooks: &Hooks) -> bool {
+/// `stop` is looked at after each question to GitHub (15 s): by then quitting may have gone ahead,
+/// and what's on disk may be the next holder's.
+fn vet(repo: &str, tok: &str, p: &Peer, hooks: &Hooks, stop: &AtomicBool) -> bool {
     let login = &p.login;
     if !p.signed {
         warn_once(repo, Some(hooks), &format!("unsigned {login}"), format!(
@@ -654,13 +854,15 @@ fn vet(repo: &str, tok: &str, p: &Peer, hooks: &Hooks) -> bool {
     }
     let ok = match pin {
         Some((pk, sk, confirmed)) if pk == p.pub_key && sk == p.sign => {
-            if !confirmed && vouched(repo, tok, p) {
+            if !confirmed && vouched(repo, tok, p) && !stop.load(Relaxed) {
                 pin_keys(repo, p, true);
             }
             true
         }
         Some((old, _, _)) => {
-            if vouched(repo, tok, p) {
+            let vouches = vouched(repo, tok, p);
+            if stop.load(Relaxed) { return false }
+            if vouches {
                 pin_keys(repo, p, true);
                 if let Some(l) = link() { l.forget(&old) }
                 say(repo, hooks, format!("{login}'s member key changed (a new machine?): GitHub confirms it's them"));
@@ -673,6 +875,7 @@ fn vet(repo: &str, tok: &str, p: &Peer, hooks: &Hooks) -> bool {
         }
         None => {
             let confirmed = vouched(repo, tok, p);
+            if stop.load(Relaxed) { return false }
             pin_keys(repo, p, confirmed);
             if !confirmed {
                 log_to(repo, &format!("{login}'s member key isn't confirmed by GitHub yet: trusting it as first seen"));
@@ -739,11 +942,22 @@ fn folder_files(root: &Path, sha: &str) -> Folder {
 }
 
 /// Everyone's folders into refs/qh/board/*, listed as (login, commit).
-fn fetch_board(root: &Path, repo: &str, tok: &str) -> Result<Vec<(String, String)>, String> {
-    if !git_net(root, &["fetch", "-q", "--no-tags", "--prune", &format!("https://github.com/{repo}.git"), "+refs/qh/peers/*:refs/qh/board/*"], &auth_env(tok)) {
-        return Err("fetching the board failed".into());
+fn fetch_board(root: &Path, repo: &str, tok: &str, limit: Duration, stop: Option<&AtomicBool>) -> Result<Vec<(String, String)>, String> {
+    fetch_refs(root, &format!("https://github.com/{repo}.git"), &fetch_env(tok), limit, stop)
+}
+
+/// `fetch_board` from any remote.
+fn fetch_refs(root: &Path, url: &str, env: &[(&str, String)], limit: Duration, stop: Option<&AtomicBool>) -> Result<Vec<(String, String)>, String> {
+    if let Err(why) = git_net(root, &["fetch", "-q", "--no-tags", "--prune", url, "+refs/qh/peers/*:refs/qh/board/*"], env, limit, stop) {
+        sweep_store(root, SWEEP_AGE);
+        return Err(format!("fetching the board failed: {why}"));
     }
-    let list = git(root, &["for-each-ref", "--format=%(refname:strip=3) %(objectname)", "refs/qh/board/"]).unwrap_or_default();
+    list_board(root)
+}
+
+fn list_board(root: &Path) -> Result<Vec<(String, String)>, String> {
+    // no answer isn't an empty board: being first on an empty board makes the team key
+    let list = git(root, &["for-each-ref", "--format=%(refname:strip=3) %(objectname)", "refs/qh/board/"]).ok_or("git couldn't list the board")?;
     Ok(list.lines().filter_map(|l| l.split_once(' ').map(|(a, b)| (a.to_string(), b.to_string()))).collect())
 }
 
@@ -1154,8 +1368,14 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks, background: bool) -> Re
     let me = std::env::var("QH_TEAM_LOGIN").ok().filter(|l| !l.is_empty()).unwrap_or(me); // testing two people on one machine
     let (secret, my_pub) = tc::identity();
     let sign_pub = tc::sign_pub(&secret);
+    // first the connection: waiting for it can take 15 s, and what we load below must include what
+    // the qh we waited for saved on its way out. A qh that loses doesn't touch the store either.
+    hold_connection(&repo, background)?;
     let board = board_store(&repo, &root);
-    let idc = identity_commit(&board, &me, &my_pub, &sign_pub).ok_or("git couldn't create your identity commit")?;
+    let Some(idc) = identity_commit(&board, &me, &my_pub, &sign_pub) else {
+        release(&repo);
+        return Err("git couldn't create your identity commit".into());
+    };
     if board != root {
         git(&board, &["update-ref", "refs/qh/me", &idc]); // every folder's parent: tidying keeps it
     }
@@ -1165,7 +1385,6 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks, background: bool) -> Re
     let mine: Vec<&(u64, String, String)> = chat.iter().filter(|(_, f, _)| *f == me).collect();
     let my_chat: Vec<Value> = mine[mine.len().saturating_sub(30)..].iter().copied()
         .enumerate().map(|(i, (ts, _, t))| json!({"id": ts * 1000 + i as u64, "ts": ts, "text": t})).collect();
-    hold_connection(&repo, background)?;
     let saved = load_requests(&repo);
     // our ids keep rising across runs, past anything still in flight
     let next_id = saved.outbox.iter().filter_map(|m| m["id"].as_u64()).chain(saved.sent.iter().map(|o| o.id))
@@ -1200,18 +1419,22 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks, background: bool) -> Re
     LIVE.lock().unwrap().get_or_insert_with(HashMap::new).insert(repo.clone(), live_tx);
     let line = link();
     let hooks = std::sync::Arc::new(hooks);
+    if board == root {
+        warn_once(&repo, Some(&*hooks), "store", format!("git can't use the team's own store ({}): team data goes in this project's .git until that's sorted out", per_repo("team-board", &repo).display()));
+    }
     let latest: std::sync::Arc<Mutex<(Option<Snapshot>, bool)>> = Default::default(); // the folder to write next, and whether something asked for a write
+    let stop = std::sync::Arc::new(AtomicBool::new(false)); // the board's git calls end now, not at their limit
+    let fetched = std::sync::Arc::new(AtomicBool::new(false)); // we've read the board at least once
     // The board's thread: everything that waits on git or GitHub. It can stall for as long as the
     // network does, and the line must not stall with it.
     let reader = {
-        let (repo2, me2, root, board, tok, secret, sign_pub, my_pub, idc, hooks, running, latest, line_up) =
-            (repo.clone(), me.clone(), root.clone(), board.clone(), tok.clone(), secret.clone(), sign_pub.clone(), my_pub.clone(), idc.clone(), hooks.clone(), running.clone(), latest.clone(), line.is_some());
-        std::thread::Builder::new().name(format!("qh-board-{repo}")).spawn(move || -> bool {
+        let (repo2, me2, root, board, tok, secret, sign_pub, my_pub, idc, hooks, running, latest, line_up, stop, fetched) =
+            (repo.clone(), me.clone(), root.clone(), board.clone(), tok.clone(), secret.clone(), sign_pub.clone(), my_pub.clone(), idc.clone(), hooks.clone(), running.clone(), latest.clone(), line.is_some(), stop.clone(), fetched.clone());
+        std::thread::Builder::new().name(format!("qh-board-{repo}")).spawn(move || {
             let mut etag: Option<String> = None;
-            let (mut last_files, mut last_write, mut last_poll): (Vec<(String, String)>, _, _) = (vec![], Instant::now() - KEEPALIVE, Instant::now() - POLL);
+            let (mut last_files, mut last_write, mut last_poll): (Vec<(String, String)>, _, _) = (vec![], instant_ago(KEEPALIVE), instant_ago(POLL));
             let mut last_link_ms = 0u64; // the address stamp in the last folder we wrote
-            let mut fetched = false;
-            let mut handed = false; // plain qh gave the team to `qh team`: it takes it back after
+            let (mut retry, mut push) = (FetchRetry::new(FETCH_FIRST, Instant::now()), FetchRetry::new(PUSH_FIRST, Instant::now()));
             let mut folders: HashMap<String, (String, Folder)> = HashMap::new(); // login -> sha, its files: a commit never changes, so read each once
             let (mut snap, mut wanted, mut last_data): (Option<Snapshot>, bool, Option<Value>) = (None, false, None);
             let (mut failed, mut failed_at, mut writes) = (LINE_FAILED.load(Relaxed), None::<Instant>, 0u32);
@@ -1219,32 +1442,22 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks, background: bool) -> Re
                 // read the board: one conditional request, a git fetch only when something changed
                 if last_poll.elapsed() >= POLL {
                     last_poll = Instant::now();
-                    if wanted_elsewhere(&repo2) {
-                        handed = held_as(&repo2) == "solo";
-                        log_to(&repo2, if handed {
-                            "`qh team` took over the team connection; holds and claims here pause until it closes"
-                        } else { "the qh opened in this project took over the team connection" });
-                        running.store(false, Relaxed);
-                        break;
-                    }
-                    match api("GET", &format!("/repos/{repo2}/git/matching-refs/qh/peers/"), &tok, None, etag.as_deref()) {
-                        Ok((200, tag, v)) => {
-                            let changed = v.as_array().into_iter().flatten().any(|r| {
-                                let name = r["ref"].as_str().unwrap_or("").trim_start_matches("refs/qh/peers/");
-                                name != me2 && folders.get(name).map(|(s, _)| s.as_str()) != r["object"]["sha"].as_str()
-                            });
-                            etag = tag;
-                            if changed || !fetched {
-                                match fetch_board(&board, &repo2, &tok) {
-                                    Ok(list) => { fetched = true; absorb(&repo2, &board, &list, &mut folders, &secret, &tok, &hooks); bump(); (hooks.refresh)() }
-                                    Err(e) => set_error(&repo2, e),
-                                }
+                    let reply = api("GET", &format!("/repos/{repo2}/git/matching-refs/qh/peers/"), &tok, None, etag.as_deref());
+                    if stop.load(Relaxed) { break }
+                    if take_listing(&repo2, &me2, reply, &folders, &mut etag, &mut retry) && retry.due(Instant::now()) {
+                        match fetch_board(&board, &repo2, &tok, fetch_limit(retry.fails, fetched.load(Relaxed)), Some(&stop)) {
+                            Ok(_) | Err(_) if stop.load(Relaxed) => break,
+                            Ok(list) => {
+                                retry.worked(Instant::now());
+                                if push.fails == 0 { with(&repo2, |s| s.error.clear()); }
+                                take_in_board(&fetched, &stop, || absorb(&repo2, &board, &list, &mut folders, &secret, &tok, &hooks, &stop));
+                                bump();
+                                (hooks.refresh)();
                             }
+                            Err(e) => { retry.failed(Instant::now()); set_error(&repo2, e) }
                         }
-                        Ok((404, _, _)) => { fetched = true; settle_key(&repo2) } // an empty board
-                        Ok(_) => {}
-                        Err(e) => set_error(&repo2, e),
                     }
+                    if stop.load(Relaxed) { break } // quitting went ahead without us: everything below is someone else's now
                     stale_check(&repo2, &hooks);
                     wake_check(&repo2, &root, &hooks);
                 }
@@ -1258,6 +1471,7 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks, background: bool) -> Re
                     if let Some(n) = l.0.take() { snap = Some(n) }
                     wanted |= std::mem::take(&mut l.1);
                 }
+                if stop.load(Relaxed) { break }
                 if LINE_FAILED.load(Relaxed) != failed {
                     failed = LINE_FAILED.load(Relaxed);
                     failed_at = Some(Instant::now());
@@ -1272,30 +1486,32 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks, background: bool) -> Re
                     // new line addresses skip the throttle: until they're out, teammates can't reach us directly
                     let link_ms = link().map_or(0, |l| l.addrs_ms());
                     let moved = link_ms != last_link_ms && last_write.elapsed() >= MIN_LINK_WRITE;
-                    if fetched && (((changed || wanted) && (last_write.elapsed() >= gap || moved)) || last_write.elapsed() >= KEEPALIVE) {
+                    if fetched.load(Relaxed) && push.ready(Instant::now()) && (((changed || wanted) && (last_write.elapsed() >= gap || moved)) || last_write.elapsed() >= KEEPALIVE) {
                         let files = signed_files(&secret, &repo2, &me2, n.files.clone(), &n.msg);
-                        match publish(&board, &repo2, &me2, &tok, &files, &n.msg, &idc) {
+                        match publish(&board, &repo2, &me2, &tok, (&files, &n.msg, &idc), GIT_NET_LIMIT, Some(&stop)) {
                             Ok(sha) => {
                                 last_files = files;
                                 last_data = n.quick.clone();
                                 last_link_ms = link_ms;
                                 wanted = false;
-                                with(&repo2, |s| { s.error.clear(); s.my_sha = sha });
+                                push.worked(Instant::now());
+                                // a fetch still failing keeps its message: it would only come back
+                                with(&repo2, |s| { if retry.fails == 0 { s.error.clear() } s.my_sha = sha });
                                 vouch(&repo2, &tok, &idc, &sign_pub, &my_pub);
                                 writes += 1;
-                                if writes % BOARD_TIDY == 0 && board != root {
-                                    git(&board, &["gc", "-q", "--prune=now"]);
+                                if let Some(most) = tidy_limit(writes) {
+                                    tidy_if_big(&board, most, Some(&stop));
                                 }
                             }
-                            Err(e) => set_error(&repo2, e),
+                            Err(_) if stop.load(Relaxed) => break,
+                            Err(e) => { push.failed(Instant::now()); set_error(&repo2, e) }
                         }
                         last_write = Instant::now();
                     }
                 }
                 std::thread::sleep(Duration::from_millis(200));
             }
-            handed
-        }).map_err(|e| e.to_string())?
+        }).map_err(|e| { release(&repo); e.to_string() })?
     };
     std::thread::Builder::new().name(format!("qh-team-{repo}")).spawn(move || {
         let mut live = Live { last: None, at: Instant::now(), pulse: 0, told: vec![], bytes: 0, failed: 0, watchers: vec![], asked: None };
@@ -1370,7 +1586,18 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks, background: bool) -> Re
             files.push(("anchor".into(), idc.clone()));
             (files, msg, quick, shown)
         };
+        let mut handed = false; // plain qh gave the team to `qh team`: it takes it back after
         while running.load(Relaxed) {
+            // here and not on the board's thread: that one can sit in a fetch for as long as the
+            // network does, and whoever asked gives up after 15 s
+            if wanted_elsewhere(&repo2) {
+                handed = held_as(&repo2) == "solo";
+                log_to(&repo2, if handed {
+                    "`qh team` took over the team connection; holds and claims here pause until it closes"
+                } else { "the qh opened in this project took over the team connection" });
+                running.store(false, Relaxed);
+                break;
+            }
             // what asked for a write before this build is in it
             let want = with(&repo2, |s| std::mem::take(&mut s.dirty)).unwrap_or(false);
             let (files, msg, quick, shown) = build("online");
@@ -1397,7 +1624,7 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks, background: bool) -> Re
                         bump();
                         (hooks.refresh)();
                     }
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => if line.is_some() && pulse(&repo2) != live.pulse { break },
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => if !running.load(Relaxed) || (line.is_some() && pulse(&repo2) != live.pulse) { break },
                     Err(_) => std::thread::sleep(left),
                 }
             }
@@ -1405,10 +1632,12 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks, background: bool) -> Re
             for (session, text) in crate::review::take_decisions() { (hooks.answered)(&session, &text) }
         }
         if let Some(m) = LIVE.lock().unwrap().as_mut() { m.remove(&repo2); }
-        let handed = reader.join().unwrap_or(false);
-        let (files, msg, _, _) = build("offline");
-        let files = signed_files(&secret, &repo2, &me2, files, &msg);
-        let _ = publish(&board, &repo2, &me2, &tok, &files, &msg, &idc);
+        stop.store(true, Relaxed);
+        let since = quit_began().unwrap_or_else(Instant::now);
+        leave_board(reader, &fetched, || build("offline"), |(files, msg, _, _)| {
+            let files = signed_files(&secret, &repo2, &me2, files, &msg);
+            let _ = last_write(&board, &format!("https://github.com/{repo2}.git"), &me2, &auth_env(&tok), (&files, &msg, &idc), since);
+        });
         release(&repo2);
         finished.store(true, Relaxed);
         if handed {
@@ -1420,7 +1649,7 @@ pub fn start(cwd: &Path, summary: Summary, hooks: Hooks, background: bool) -> Re
             RETAKE.lock().unwrap().push(repo2.clone());
             (hooks.refresh)();
         }
-    }).map_err(|e| e.to_string())?;
+    }).map_err(|e| { release(&repo); e.to_string() })?;
     remember(&repo, true);
     Ok(format!("team mode on for {repo} as {me} (shared data is encrypted for the team)"))
 }
@@ -1436,6 +1665,53 @@ fn signed_files(secret: &x25519_dalek::StaticSecret, repo: &str, me: &str, mut f
     let sig = tc::sign_folder(secret, repo, me, &msg.to_string(), &files);
     files.push(("sig".into(), sig));
     files
+}
+
+/// When quitting began, if it has (see `stop_and_flush`).
+static QUIT_AT: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
+fn quit_began() -> Option<Instant> {
+    QUIT_AT.get().copied()
+}
+
+/// What the last write ("offline") has left, or None if that's too little to get anywhere. Quitting
+/// waits 5 s from `since`: stopping the push must have begun well before that (on Windows it takes
+/// starting taskkill), or we exit first and leave the push running with nobody to end it.
+fn last_write_limit(since: Instant) -> Option<Duration> {
+    let left = Duration::from_millis(4500).saturating_sub(since.elapsed());
+    (left >= Duration::from_millis(500)).then_some(left)
+}
+
+/// The last write: the commit first, since that takes time too, then a push for what's left.
+/// Doesn't look at `stop`: this is the write we stopped everything for.
+fn last_write(root: &Path, url: &str, me: &str, env: &[(&str, String)], (files, message, parent): (&[(String, String)], &Value, &str), since: Instant) -> Result<String, String> {
+    let commit = folder_commit(root, files, message, parent)?;
+    let limit = last_write_limit(since).ok_or("no time left to tell teammates we left")?;
+    push_commit(root, url, me, env, commit, limit, None)
+}
+
+/// Quitting, once the board's thread was told to stop: give it a moment, then build the last
+/// folder and write it, whether that thread has ended or not. It may be inside a GitHub call, up
+/// to 15 s, and nothing can stop those. Nothing goes out if we never read the board: the folder's
+/// wrapped keys come from what we read, so it would take them away from everyone.
+fn leave_board<T>(reader: std::thread::JoinHandle<()>, fetched: &AtomicBool, make: impl FnOnce() -> T, push: impl FnOnce(T)) {
+    let t0 = Instant::now();
+    while !reader.is_finished() && t0.elapsed() < Duration::from_secs(1) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let folder = make();
+    if fetched.load(Relaxed) {
+        push(folder);
+    }
+}
+
+/// Take in a fetch, and only then count the board as read: `absorb` returns early when stopped,
+/// knowing nobody yet, and a folder written from that has no keys/* for anyone.
+fn take_in_board(fetched: &AtomicBool, stop: &AtomicBool, absorb: impl FnOnce()) {
+    absorb();
+    if !stop.load(Relaxed) {
+        fetched.store(true, Relaxed);
+    }
 }
 
 /// What we sealed last, so an unchanged folder costs no crypto (it's built twice a second).
@@ -1465,10 +1741,90 @@ fn set_error(repo: &str, e: String) {
     bump();
 }
 
+const FETCH_FIRST: Duration = Duration::from_secs(6);
+const PUSH_FIRST: Duration = Duration::from_secs(10);
+
+/// Up to a quarter more on each wait, from the pid: two teammates stuck together don't retry together.
+fn jitter_of(pid: u32) -> u32 {
+    pid % 26
+}
+
+/// When to try a fetch or a push again. A retry means processes and, for a push, a commit each
+/// time, and the listing's etag no longer says when: once it has been seen, it answers 304.
+struct FetchRetry {
+    need: bool, // there's something to fetch; starts true, because we haven't read the board yet
+    fails: u32,
+    next: Instant,
+    first: Duration, // the first wait; each one after is twice as long, up to 2 minutes
+    jitter: u32,     // percent
+}
+
+impl FetchRetry {
+    fn new(first: Duration, now: Instant) -> Self {
+        FetchRetry { need: true, fails: 0, next: now, first, jitter: jitter_of(std::process::id()) }
+    }
+    fn ready(&self, now: Instant) -> bool {
+        now >= self.next
+    }
+    fn due(&self, now: Instant) -> bool {
+        self.need && self.ready(now)
+    }
+    fn failed(&mut self, now: Instant) {
+        self.fails += 1;
+        let wait = self.first.saturating_mul(1 << (self.fails - 1).min(16)).min(Duration::from_secs(120));
+        self.next = now + wait + wait * self.jitter / 100;
+    }
+    fn worked(&mut self, now: Instant) {
+        self.need = false;
+        self.fails = 0;
+        self.next = now;
+    }
+}
+
+/// How long a fetch may take. Before the first one works, longer each try: a first fetch has the
+/// whole board to bring, on what may be a slow line. After that the wait is short: this thread
+/// also writes our address, which can't wait on a fetch.
+fn fetch_limit(fails: u32, fetched: bool) -> Duration {
+    if fetched { return GIT_NET_LIMIT }
+    GIT_NET_LIMIT.saturating_mul(1 << fails.min(2))
+}
+
+/// Our login, and to give up on a connection that has gone slow without waiting out the limit.
+/// That likely doesn't cover connecting, so the limit stays too.
+fn fetch_env(tok: &str) -> Vec<(&'static str, String)> {
+    let mut env = auth_env(tok);
+    env.push(("GIT_HTTP_LOW_SPEED_LIMIT", "1024".into()));
+    env.push(("GIT_HTTP_LOW_SPEED_TIME", "20".into()));
+    env
+}
+
+/// What the listing of everyone's folders says. Whether it's worth a fetch, if one is due.
+fn take_listing(repo: &str, me: &str, reply: Result<(u16, Option<String>, Value), String>, folders: &HashMap<String, (String, Folder)>,
+                etag: &mut Option<String>, retry: &mut FetchRetry) -> bool {
+    match reply {
+        Ok((200, tag, v)) => {
+            let changed = v.as_array().into_iter().flatten().any(|r| {
+                let name = r["ref"].as_str().unwrap_or("").trim_start_matches("refs/qh/peers/");
+                name != me && folders.get(name).map(|(s, _)| s.as_str()) != r["object"]["sha"].as_str()
+            });
+            *etag = tag;
+            retry.need |= changed;
+            true
+        }
+        Ok((304, _, _)) => true,
+        // GitHub lists no folders as 200 and an empty list. This is a repo we can't see: no team
+        // key, or we'd keep a wrong one after the access problem is gone
+        Ok((404, _, _)) => { set_error(repo, format!("GitHub doesn't show you {repo}: check it exists and that this login has access")); false }
+        Ok(_) => false,
+        Err(e) => { set_error(repo, e); false }
+    }
+}
+
 /// Take in freshly fetched folders: our key if someone wrapped it for us (or left it under our
 /// invite code), presence, newcomers, chat, transcripts, and messages to our sessions.
+#[allow(clippy::too_many_arguments)]
 fn absorb(repo: &str, root: &Path, list: &[(String, String)], read: &mut HashMap<String, (String, Folder)>,
-          secret: &x25519_dalek::StaticSecret, tok: &str, hooks: &Hooks) {
+          secret: &x25519_dalek::StaticSecret, tok: &str, hooks: &Hooks, stop: &AtomicBool) {
     let Some((me, my_sha)) = with(repo, |s| (s.me.clone(), s.my_sha.clone())) else { return };
     // our own folder, rewritten by someone else: put ours back at once
     if let Some((_, sha)) = list.iter().find(|(l, _)| *l == me).filter(|(_, sha)| !my_sha.is_empty() && *sha != my_sha) {
@@ -1483,7 +1839,7 @@ fn absorb(repo: &str, root: &Path, list: &[(String, String)], read: &mut HashMap
         let f = match read.get(login) { Some((s, f)) if s == sha => f.clone(), _ => folder_files(root, sha) };
         read.insert(login.clone(), (sha.clone(), f.clone()));
         let p = read_folder(&f, repo, login, None);
-        if vet(repo, tok, &p, hooks) {
+        if vet(repo, tok, &p, hooks, stop) {
             if crate::update::newer(&p.qh, crate::update::VERSION) {
                 warn_once(repo, Some(hooks), &format!("newer qh {}", p.qh), format!(
                     "{login} runs qh {}, newer than yours ({}): run {} so you both work the same way",
@@ -1491,8 +1847,12 @@ fn absorb(repo: &str, root: &Path, list: &[(String, String)], read: &mut HashMap
             }
             folders.push((f, p));
         }
+        // each of those can ask GitHub (15 s). If quitting went ahead without us, the lock may
+        // already be someone else's: what's on disk is theirs to write now
+        if stop.load(Relaxed) { return }
     }
-    newer_key(repo, &folders, secret, tok, hooks);
+    newer_key(repo, &folders, secret, tok, hooks, stop);
+    if stop.load(Relaxed) { return }
     let Some(mut key) = with(repo, |s| s.key) else { return };
     if key.is_none() {
         let code = std::fs::read_to_string(per_repo("team-codes", repo)).ok()
@@ -1519,14 +1879,14 @@ fn absorb(repo: &str, root: &Path, list: &[(String, String)], read: &mut HashMap
     }
     if new_chat { save_chat(repo) }
     save_seen(repo);
-    settle_key(repo);
+    settle_key(repo, stop);
 }
 
 /// Someone removed a member and made a new team key: switch to it, if GitHub says they're a repo
 /// admin and vouched for their member key (a folder signed with keys we only trust on first
 /// sight isn't enough: anyone with push access could have written it). If we are the one
 /// removed, say so.
-fn newer_key(repo: &str, folders: &[(Folder, Peer)], secret: &x25519_dalek::StaticSecret, tok: &str, hooks: &Hooks) {
+fn newer_key(repo: &str, folders: &[(Folder, Peer)], secret: &x25519_dalek::StaticSecret, tok: &str, hooks: &Hooks, stop: &AtomicBool) {
     let Some((me, epoch, has_key)) = with(repo, |s| (s.me.clone(), s.epoch, s.key.is_some())) else { return };
     if !has_key {
         return; // newcomers take whatever key they're given, the usual way
@@ -1541,7 +1901,9 @@ fn newer_key(repo: &str, folders: &[(Folder, Peer)], secret: &x25519_dalek::Stat
                 "ignored a team key change from {login}: GitHub hasn't vouched for their member key"));
             continue;
         }
-        if !is_admin(repo, login, tok) {
+        let admin = is_admin(repo, login, tok);
+        if stop.load(Relaxed) { return } // that took a while: see `vet`
+        if !admin {
             log_to(repo, &format!("ignored a team key change from {login}: only repo admins can change it"));
             continue;
         }
@@ -2292,7 +2654,7 @@ the same thing again: it could only repeat itself. If this matters, tell the use
 
 /// Nobody on the board holds a team key yet: the first member creates it. If someone already
 /// did (their data is sealed, or they wrap keys), wait for them to wrap a copy for us.
-fn settle_key(repo: &str) {
+fn settle_key(repo: &str, stop: &AtomicBool) {
     with(repo, |s| {
         if s.key.is_some() {
             // Two people started on an empty board at the same moment and both made a key, so
@@ -2318,13 +2680,13 @@ fn settle_key(repo: &str) {
             s.dirty = true;
         }
     });
-    recover_key(repo);
+    recover_key(repo, stop);
 }
 
 /// Every folder we can't read was last written long ago: whoever held the team key lost it with
 /// their machine, so nobody is left to let anyone in. A repo admin starts the next key
 /// generation, as `/team remove` does, and the others switch to it when they come back.
-fn recover_key(repo: &str) {
+fn recover_key(repo: &str, stop: &AtomicBool) {
     let Some((me, epoch)) = with(repo, |s| {
         let t = now();
         let mut holders = s.peers.values().filter(|p| !p.wrapped.is_empty() || p.locked).peekable();
@@ -2332,7 +2694,8 @@ fn recover_key(repo: &str) {
             && holders.all(|p| !p.online && t.saturating_sub(p.ts) >= ORPHAN_AFTER);
         orphaned.then(|| (s.me.clone(), s.peers.values().map(|p| p.epoch).max().unwrap_or(0)))
     }).flatten() else { return };
-    if !is_admin(repo, &me, &token().unwrap_or_default()) {
+    let admin = is_admin(repo, &me, &token().unwrap_or_default());
+    if !admin || stop.load(Relaxed) { // that took a while: see `vet`. A new key now could undo what the next holder published
         return;
     }
     with(repo, |s| {
@@ -4222,11 +4585,11 @@ pub fn stop() {
 
 /// Disconnect every project and wait (up to 5 s) for the "offline" writes, at quit.
 pub fn stop_and_flush() {
+    let t0 = *QUIT_AT.get_or_init(Instant::now); // one wait, however many of us run it
     let flags: Vec<std::sync::Arc<AtomicBool>> = STATES.lock().unwrap().get_or_insert_with(HashMap::new).values()
         // every one not yet finished, not just those this call stopped: a closed window runs this
         // twice at once (the kill handler and the main loop), and the one that returns early exits
         .filter(|s| { s.running.store(false, Relaxed); !s.finished.load(Relaxed) }).map(|s| s.finished.clone()).collect();
-    let t0 = Instant::now();
     while flags.iter().any(|f| !f.load(Relaxed)) && t0.elapsed() < Duration::from_secs(5) {
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -4548,11 +4911,7 @@ fn watch_round(repo: &str, me: &str, l: &Link, shown: &Value, live: &mut Live) {
         let rows = rows_of(&shown[&w.session]);
         let hash = rows_hash(&rows);
         if let Some(have) = w.have.take() {
-            if have == hash {
-                w.sent = rows.clone();
-            } else if have != rows_hash(&w.sent) && have != w.before {
-                w.sent.clear(); // they lost something: send it whole
-            }
+            reconcile(w, have, hash, &rows);
         }
         if rows == w.sent || w.at.elapsed() < TR_EVERY {
             continue;
@@ -4566,6 +4925,17 @@ fn watch_round(repo: &str, me: &str, l: &Link, shown: &Value, live: &mut Live) {
     }
 }
 
+/// What a watcher says it holds, against what we think it holds. If it's what they held before
+/// our last send, that send may still be on its way, but after a while it's lost. Nothing else
+/// would mend that: with no new rows, nothing goes out again.
+fn reconcile(w: &mut Watcher, have: u64, hash: u64, rows: &[(String, String)]) {
+    if have == hash {
+        w.sent = rows.to_vec();
+    } else if have != rows_hash(&w.sent) && (have != w.before || w.at.elapsed() >= TR_LOST_AFTER) {
+        w.sent.clear(); // they lost something: send it whole
+    }
+}
+
 /// A teammate opened one of our sessions, or still has it open.
 fn take_watch(repo: &str, from: &str, v: &Value, live: &mut Live) {
     let login = v["login"].as_str().unwrap_or("").to_string();
@@ -4574,7 +4944,7 @@ fn take_watch(repo: &str, from: &str, v: &Value, live: &mut Live) {
     let session = body["session"].as_str().unwrap_or("").to_string();
     let now = Instant::now();
     let i = live.watchers.iter().position(|w| w.login == login).unwrap_or_else(|| {
-        live.watchers.push(Watcher { login: login.clone(), key: from.to_string(), session: session.clone(), until: now, sent: vec![], before: 0, have: None, at: now - TR_EVERY });
+        live.watchers.push(Watcher { login: login.clone(), key: from.to_string(), session: session.clone(), until: now, sent: vec![], before: 0, have: None, at: instant_ago(TR_EVERY) });
         live.watchers.len() - 1
     });
     let w = &mut live.watchers[i];
@@ -5191,13 +5561,13 @@ pub(crate) mod tests {
         st.peers.insert("dave".into(), Peer { login: "dave".into(), locked: true, ts: old, epoch: 2, ..Default::default() });
         STATES.lock().unwrap().get_or_insert_with(HashMap::new).insert(repo.into(), st);
         with(repo, |s| s.admins.insert("kesav".into(), false));
-        settle_key(repo);
+        settle_key(repo, &AtomicBool::new(false));
         assert!(with(repo, |s| s.key.is_none()).unwrap(), "only an admin may start over");
         with(repo, |s| { s.admins.insert("kesav".into(), true); s.peers.get_mut("dave").unwrap().ts = now() });
-        settle_key(repo);
+        settle_key(repo, &AtomicBool::new(false));
         assert!(with(repo, |s| s.key.is_none()).unwrap(), "dave wrote lately: wait for him to let us in");
         with(repo, |s| s.peers.get_mut("dave").unwrap().ts = old);
-        settle_key(repo);
+        settle_key(repo, &AtomicBool::new(false));
         let (key, epoch, approved) = with(repo, |s| (s.key.is_some(), s.epoch, s.approved.clone())).unwrap();
         assert!(key && epoch == 3 && approved.contains(&"dave".to_string()), "a new generation, and dave gets it when he's back");
     }
@@ -5731,21 +6101,831 @@ pub(crate) mod tests {
         let mut c = Command::new("sh");
         c.args(["-c", &format!("(sleep 2; touch {}) & wait", mark.display())]);
         let t0 = Instant::now();
-        assert!(!run_limited(c, Duration::from_millis(200)), "stopped counts as failed");
+        assert!(run_limited(c, Duration::from_millis(200), None).is_err(), "stopped counts as failed");
         assert!(t0.elapsed() < Duration::from_secs(1), "it took {:?}", t0.elapsed());
         std::thread::sleep(Duration::from_millis(2300));
         assert!(!mark.exists(), "the helper it started was stopped too");
         let mut ok = Command::new("sh");
         ok.args(["-c", "exit 0"]);
-        assert!(run_limited(ok, Duration::from_secs(5)));
+        assert!(run_limited(ok, Duration::from_secs(5), None).is_ok());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_stalled_git_call_is_stopped_with_its_helpers_on_windows() {
+        let base = std::env::temp_dir().join(format!("qh-limit-win-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let (mark, inner) = (base.join("mark"), base.join("inner.cmd"));
+        std::fs::write(&inner, format!("ping -n 4 127.0.0.1 >NUL\r\necho x> \"{}\"\r\n", mark.display())).unwrap();
+        let mut c = Command::new("cmd");
+        c.args(["/C", "cmd", "/C"]).arg(&inner);
+        let t0 = Instant::now();
+        assert!(run_limited(c, Duration::from_millis(200), None).is_err(), "stopped counts as failed");
+        assert!(t0.elapsed() < Duration::from_secs(5), "it took {:?}", t0.elapsed());
+        std::thread::sleep(Duration::from_secs(4));
+        assert!(!mark.exists(), "the inner cmd was stopped too");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stop_flag_ends_a_stalled_call_at_once() {
+        let flag = std::sync::Arc::new(AtomicBool::new(false));
+        let f2 = flag.clone();
+        std::thread::spawn(move || { std::thread::sleep(Duration::from_millis(200)); f2.store(true, Relaxed) });
+        let mut c = Command::new("sh");
+        c.args(["-c", "sleep 30"]);
+        let t0 = Instant::now();
+        assert!(run_limited(c, Duration::from_secs(60), Some(&flag)).is_err(), "stopped counts as failed");
+        assert!(t0.elapsed() < Duration::from_secs(1), "it took {:?}", t0.elapsed());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stop_flag_already_set_starts_nothing() {
+        let mark = std::env::temp_dir().join(format!("qh-preset-{}", std::process::id()));
+        let _ = std::fs::remove_file(&mark);
+        let mut c = Command::new("sh");
+        c.args(["-c", &format!("touch {}", mark.display())]);
+        assert!(run_limited(c, Duration::from_secs(5), Some(&AtomicBool::new(true))).is_err());
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!mark.exists(), "it never ran");
+        // with no flag to look at, the same call goes ahead
+        let mut c = Command::new("sh");
+        c.args(["-c", &format!("touch {}", mark.display())]);
+        assert!(run_limited(c, Duration::from_secs(5), None).is_ok());
+        assert!(mark.exists());
+        let _ = std::fs::remove_file(&mark);
+    }
+
+    /// git removes its lockfiles when told to stop politely (seen: SIGTERM clears a held ref lock,
+    /// SIGKILL leaves it), and whatever ignores that is stopped anyway.
+    #[cfg(unix)]
+    #[test]
+    fn a_stalled_call_is_asked_first_and_then_made_to_stop() {
+        let base = std::env::temp_dir().join(format!("qh-term-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let (cleaned, late) = (base.join("cleaned"), base.join("late"));
+        let mut c = Command::new("sh");
+        c.args(["-c", &format!("trap 'touch {}; exit 0' TERM; (trap '' TERM; sleep 2; touch {}) & wait", cleaned.display(), late.display())]);
+        let t0 = Instant::now();
+        assert!(run_limited(c, Duration::from_millis(200), None).is_err());
+        assert!(t0.elapsed() < Duration::from_secs(2), "it took {:?}", t0.elapsed());
+        assert!(cleaned.exists(), "it had the chance to clean up");
+        std::thread::sleep(Duration::from_millis(2300));
+        assert!(!late.exists(), "the helper that ignores being asked was stopped too");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A remote that never answers, and how to tell whether what it started is still alive.
+    #[cfg(unix)]
+    fn stalled_remote(base: &Path, name: &str) -> (String, PathBuf) {
+        let (script, pid) = (base.join(format!("{name}.sh")), base.join(format!("{name}.pid")));
+        std::fs::write(&script, format!("#!/bin/sh\necho $$ > {}\nexec sleep 300\n", pid.display())).unwrap();
+        (format!("ext::sh {}", script.display()), pid)
+    }
+
+    #[cfg(unix)]
+    fn gone(pid_file: &Path) {
+        let pid: i32 = std::fs::read_to_string(pid_file).unwrap().trim().parse().unwrap();
+        let t0 = Instant::now();
+        while unsafe { libc::kill(pid, 0) } == 0 && t0.elapsed() < Duration::from_secs(2) { std::thread::sleep(Duration::from_millis(20)) }
+        assert_ne!(unsafe { libc::kill(pid, 0) }, 0, "{} is still running", pid_file.display());
+    }
+
+    fn file_url(p: &Path) -> String {
+        let path = p.display().to_string().replace('\\', "/");
+        if path.starts_with('/') { format!("file://{path}") } else { format!("file:///{path}") }
+    }
+
+    /// A bare repository to fetch from and push to. Registered like a store, so it works whatever
+    /// the machine's git says about bare repositories.
+    fn scratch_remote(base: &Path) -> PathBuf {
+        let remote = base.join("remote.git");
+        assert_eq!(board_store_in(&remote, base), remote);
+        remote
+    }
+
+    fn scratch_store(name: &str) -> (PathBuf, PathBuf) {
+        let base = std::env::temp_dir().join(format!("qh-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("project")).unwrap();
+        let store = base.join("store");
+        assert_eq!(board_store_in(&store, &base.join("project")), store);
+        (base, store)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stalled_remote_cant_hold_up_quitting() {
+        let (base, store) = scratch_store("quit");
+        let idc = identity_commit(&store, "alice", "a", "b").unwrap();
+        let (stalled_fetch, fetch_pid) = stalled_remote(&base, "fetch");
+        let (stalled_push, push_pid) = stalled_remote(&base, "push");
+        let env = [("GIT_ALLOW_PROTOCOL", "ext".to_string())];
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let (stop2, store2, env2) = (stop.clone(), store.clone(), env.clone());
+        let reader = std::thread::spawn(move || {
+            let _ = fetch_refs(&store2, &stalled_fetch, &env2, Duration::from_secs(30), Some(&*stop2));
+        });
+        let t0 = Instant::now();
+        while !fetch_pid.exists() && t0.elapsed() < Duration::from_secs(5) { std::thread::sleep(Duration::from_millis(20)) }
+        assert!(fetch_pid.exists(), "the stalled fetch started");
+        let fetched = AtomicBool::new(true);
+        let msg = json!({"state": "offline"});
+        let t0 = Instant::now();
+        stop.store(true, Relaxed);
+        leave_board(reader, &fetched, || vec![("pub".to_string(), "a".to_string())], |files| {
+            let r = last_write(&store, &stalled_push, "alice", &env, (&files, &msg, &idc), t0);
+            assert!(r.is_err(), "nothing can have landed");
+        });
+        assert!(t0.elapsed() < Duration::from_secs(5), "quitting took {:?}", t0.elapsed());
+        gone(&fetch_pid);
+        gone(&push_pid);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn the_last_write_goes_out_though_the_board_thread_is_stuck() {
+        let (base, store) = scratch_store("last");
+        let remote = scratch_remote(&base);
+        let idc = identity_commit(&store, "alice", "a", "b").unwrap();
+        let url = file_url(&remote);
+        // like a thread inside a GitHub call, which nothing can stop
+        let reader = std::thread::spawn(|| std::thread::sleep(Duration::from_secs(4)));
+        let (fetched, stop, msg) = (AtomicBool::new(true), AtomicBool::new(true), json!({"state": "offline"}));
+        let t0 = Instant::now();
+        let mut pushed = None;
+        leave_board(reader, &fetched, || vec![("pub".to_string(), "a".to_string())], |files| {
+            assert!(stop.load(Relaxed), "the stop flag is set, and the last write doesn't look at it");
+            pushed = last_write(&store, &url, "alice", &[], (&files, &msg, &idc), t0).ok();
+        });
+        assert!(t0.elapsed() < Duration::from_millis(3000), "it took {:?}", t0.elapsed());
+        assert_eq!(git(&remote, &["rev-parse", "refs/qh/peers/alice"]), pushed);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn quitting_before_the_first_fetch_writes_no_folder() {
+        let reader = std::thread::spawn(|| {});
+        let (mut made, mut pushed) = (false, false);
+        leave_board(reader, &AtomicBool::new(false), || made = true, |_| pushed = true);
+        assert!(made, "the folder is still built: that also saves our state");
+        assert!(!pushed, "a folder from before the first fetch has no wrapped keys, and would take them from everyone");
+    }
+
+    #[test]
+    fn the_time_left_for_the_last_write() {
+        let long_ago = |ms| Instant::now() - Duration::from_millis(ms);
+        let left = |ms| last_write_limit(long_ago(ms)).unwrap();
+        assert!(left(0) <= Duration::from_millis(4500) && left(0) > Duration::from_millis(4400));
+        assert!(left(1000) <= Duration::from_millis(3500));
+        assert_eq!(last_write_limit(long_ago(4400)), None, "too short to get anywhere, so nothing is started to outlive us");
+        assert_eq!(last_write_limit(long_ago(9000)), None);
+    }
+
+    #[test]
+    fn tidying_leaves_what_a_writer_just_made() {
+        let (base, store) = scratch_store("tidy");
+        let sha = blob(&store, "being written right now, nothing points at it yet").unwrap();
+        assert!(tidy_store(&store, None));
+        assert_eq!(git(&store, &["cat-file", "-t", &sha]).as_deref(), Some("blob"), "another git may be about to use it");
+        assert!(!tidy_store(&base.join("project"), None), "only a store of ours is ever tidied");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A store that has read one teammate's folder from a local remote, and that teammate's next
+    /// folder waiting there: a fetch now has to update the ref.
+    fn store_behind_a_remote(name: &str) -> (PathBuf, PathBuf, String) {
+        let (base, store) = scratch_store(name);
+        let remote = scratch_remote(&base);
+        let url = file_url(&remote);
+        let idc = identity_commit(&store, "alice", "a", "b").unwrap();
+        let folder = |text: &str| -> String {
+            let files = [("pub".to_string(), text.to_string())];
+            publish_to(&store, &url, "alice", &[], (&files, &json!({"state": "online"}), &idc), GIT_NET_LIMIT, None).unwrap()
+        };
+        folder("one");
+        fetch_refs(&store, &url, &[], GIT_NET_LIMIT, None).unwrap();
+        folder("two");
+        (base, store, url)
+    }
+
+    /// Plant a file some killed git could have left, last written `age` ago.
+    fn plant(path: &Path, age: Duration) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let f = std::fs::File::create(path).unwrap();
+        f.set_modified(SystemTime::now() - age).unwrap();
+    }
+
+    const LONG_AGO: Duration = Duration::from_secs(600);
+
+    #[test]
+    fn a_stale_lock_costs_one_failed_fetch_and_no_more() {
+        let (base, store, url) = store_behind_a_remote("sweep-old");
+        plant(&store.join("refs/qh/board/alice.lock"), LONG_AGO);
+        assert!(fetch_refs(&store, &url, &[], GIT_NET_LIMIT, None).is_err(), "a stale lock fails the whole fetch");
+        let list = fetch_refs(&store, &url, &[], GIT_NET_LIMIT, None).expect("the failed fetch cleared it");
+        assert_eq!(list.len(), 1);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_fresh_lock_is_left_alone() {
+        let (base, store, url) = store_behind_a_remote("sweep-new");
+        let lock = store.join("refs/qh/board/alice.lock");
+        plant(&lock, Duration::from_secs(0));
+        for _ in 0..2 {
+            assert!(fetch_refs(&store, &url, &[], GIT_NET_LIMIT, None).is_err());
+            assert!(lock.exists(), "another git may be holding it: there's a holder lock for qh, not for an orphan git");
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn the_sweep_takes_only_old_leftovers_in_a_store() {
+        let (base, store) = scratch_store("sweep-what");
+        let old = [store.join("refs/qh/board/alice.lock"), store.join("refs/qh/board/deep/er.lock"), store.join("packed-refs.lock"), store.join("objects/pack/tmp_pack_abc")];
+        let kept = [store.join("refs/qh/board/bob.lock"), store.join("objects/pack/tmp_pack_new"), store.join("objects/pack/pack-1.pack")];
+        let elsewhere = store.join("refs/qh/me.lock");
+        for f in &old { plant(f, LONG_AGO) }
+        plant(&kept[0], Duration::from_secs(5));
+        plant(&kept[1], Duration::from_secs(5));
+        plant(&kept[2], LONG_AGO);
+        plant(&elsewhere, LONG_AGO);
+        sweep_store(&store, SWEEP_AGE);
+        for f in &old { assert!(!f.exists(), "{}", f.display()) }
+        for f in &kept { assert!(f.exists(), "{}", f.display()) }
+        assert!(elsewhere.exists(), "only the refs a fetch writes");
+        // a project's .git is never ours to clear, whatever it holds
+        let project = base.join("project");
+        let lock = project.join("packed-refs.lock");
+        plant(&lock, LONG_AGO);
+        sweep_store(&project, SWEEP_AGE);
+        assert!(lock.exists());
+        // and a store missing its folders is nothing to fail over
+        std::fs::remove_dir_all(store.join("objects/pack")).unwrap();
+        sweep_store(&store, SWEEP_AGE);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_failing_fetch_backs_off_and_a_new_listing_doesnt_undo_that() {
+        let t = Instant::now();
+        let mut r = FetchRetry::new(FETCH_FIRST, t);
+        r.jitter = 0;
+        assert!(r.due(t), "the first read of the board goes ahead");
+        let mut at = t;
+        for want in [6, 12, 24, 48, 96, 120, 120, 120] {
+            r.failed(at);
+            assert!(!r.due(at + Duration::from_secs(want) - Duration::from_millis(1)), "before {want} s");
+            r.need = true; // a new 200 changes nothing about that
+            assert!(!r.due(at + Duration::from_secs(want) - Duration::from_millis(1)), "before {want} s, with a new listing");
+            at += Duration::from_secs(want);
+            assert!(r.due(at), "at {want} s");
+        }
+        r.worked(at);
+        assert!(!r.due(at), "read: nothing more to fetch");
+        r.need = true;
+        assert!(r.due(at), "something new, and nothing to wait out");
+        assert_eq!(r.fails, 0);
+        r.failed(at);
+        assert!(r.due(at + FETCH_FIRST), "it starts over from the shortest wait");
+    }
+
+    #[test]
+    fn two_stuck_teammates_dont_retry_in_step() {
+        let t = Instant::now();
+        assert!(FetchRetry::new(FETCH_FIRST, t).jitter <= 25);
+        let waits = |pid: u32| { let mut r = FetchRetry::new(FETCH_FIRST, t); r.jitter = jitter_of(pid); r.failed(t); r.next.duration_since(t) };
+        assert!((0..500).all(|pid| waits(pid) >= FETCH_FIRST && waits(pid) <= FETCH_FIRST * 5 / 4));
+        assert!((0..500).any(|pid| waits(pid) != waits(0)));
+    }
+
+    #[test]
+    fn a_failing_push_backs_off_whatever_asks_for_it() {
+        let t = Instant::now();
+        let mut r = FetchRetry::new(PUSH_FIRST, t);
+        r.jitter = 0;
+        assert!(r.ready(t));
+        let mut at = t;
+        for want in [10, 20, 40, 80, 120, 120] {
+            r.failed(at);
+            assert!(!r.ready(at + Duration::from_secs(want) - Duration::from_millis(1)), "before {want} s");
+            at += Duration::from_secs(want);
+            assert!(r.ready(at), "at {want} s");
+        }
+        r.worked(at);
+        assert!(r.ready(at) && r.fails == 0);
+    }
+
+    #[test]
+    fn a_first_fetch_gets_longer_each_time_and_later_ones_dont() {
+        let secs = |fails, fetched| fetch_limit(fails, fetched).as_secs();
+        assert_eq!((secs(0, false), secs(1, false), secs(2, false), secs(9, false)), (30, 60, 120, 120));
+        assert_eq!((secs(0, true), secs(5, true)), (30, 30), "the board's thread also writes our address: it can't sit in a fetch");
+    }
+
+    #[test]
+    fn a_fetch_gives_up_on_a_connection_gone_slow() {
+        let env = fetch_env("tok");
+        let get = |k: &str| env.iter().find(|(n, _)| *n == k).map(|(_, v)| v.as_str());
+        assert_eq!((get("GIT_HTTP_LOW_SPEED_LIMIT"), get("GIT_HTTP_LOW_SPEED_TIME")), (Some("1024"), Some("20")));
+        assert!(get("GIT_CONFIG_VALUE_0").is_some_and(|v| v.starts_with("Authorization: Basic ")));
+    }
+
+    #[test]
+    fn a_fetch_fails_then_works_when_the_remote_comes_back() {
+        let (base, store) = scratch_store("retry");
+        let remote = base.join("remote.git");
+        let url = file_url(&remote);
+        let t = Instant::now();
+        let mut r = FetchRetry::new(FETCH_FIRST, t);
+        assert!(r.due(t));
+        assert!(fetch_refs(&store, &url, &[], GIT_NET_LIMIT, None).is_err());
+        r.failed(t);
+        assert!(!r.due(t + Duration::from_secs(5)) && r.need && r.fails == 1);
+        assert_eq!(scratch_remote(&base), remote);
+        let later = t + FETCH_FIRST * 2;
+        assert!(r.due(later));
+        assert_eq!(fetch_refs(&store, &url, &[], GIT_NET_LIMIT, None).unwrap().len(), 0, "an empty board is a good read");
+        r.worked(later);
+        assert!(!r.due(later) && r.fails == 0);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// N3: GitHub says 404 for a repo we can't see, and 200 with an empty list for one with no
+    /// folders yet. Only the second means we're first and should make the team key.
+    #[test]
+    fn no_access_makes_no_team_key_and_an_empty_board_does() {
+        let Ok(base) = std::env::var("QH_TEST_BASE") else {
+            let base = std::env::temp_dir().join(format!("qh-listing-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&base);
+            std::fs::create_dir_all(base.join("state")).unwrap();
+            rerun("no_access_makes_no_team_key_and_an_empty_board_does",
+                  &[("QH_TEST_BASE", &base.to_string_lossy()), ("QH_STATE_DIR", &base.join("state").to_string_lossy())]);
+            let _ = std::fs::remove_dir_all(&base);
+            return;
+        };
+        let base = Path::new(&base);
+        let repo = "o/first-one";
+        let mut s = state("alice");
+        s.repo = repo.into();
+        STATES.lock().unwrap().get_or_insert_with(HashMap::new).insert(repo.to_string(), s);
+        let t = Instant::now();
+        let (mut retry, mut folders, mut etag) = (FetchRetry::new(FETCH_FIRST, t), HashMap::new(), None);
+        // no access: an error to read, no key, and nothing to fetch
+        assert!(!take_listing(repo, "alice", Ok((404, None, Value::Null)), &folders, &mut etag, &mut retry));
+        assert!(with(repo, |s| !s.error.is_empty() && s.key.is_none()).unwrap(), "no key made, and the reason shows");
+        assert!(!per_repo("team-keys", repo).exists(), "no key saved to outlive the problem");
+        assert!(retry.need, "the board is still to be read");
+        // other failures say what they say
+        assert!(!take_listing(repo, "alice", Err("boom".into()), &folders, &mut etag, &mut retry));
+        assert_eq!(with(repo, |s| s.error.clone()).unwrap(), "boom");
+        // the listing comes back empty: fetch, and being first, make the key
+        assert!(take_listing(repo, "alice", Ok((200, Some("e1".into()), json!([]))), &folders, &mut etag, &mut retry));
+        assert_eq!(etag.as_deref(), Some("e1"));
+        assert!(take_listing(repo, "alice", Ok((304, None, Value::Null)), &folders, &mut etag, &mut retry), "304 can still retry a fetch");
+        assert!(retry.due(t));
+        let store = base.join("store");
+        assert_eq!(board_store_in(&store, base), store);
+        let remote = scratch_remote(base);
+        let list = fetch_refs(&store, &file_url(&remote), &[], GIT_NET_LIMIT, None).unwrap();
+        retry.worked(t);
+        let bytes: [u8; 32] = crate::oauth::random();
+        let secret = x25519_dalek::StaticSecret::from(bytes);
+        absorb(repo, &store, &list, &mut folders, &secret, "tok", &quiet(), &AtomicBool::new(false));
+        assert!(with(repo, |s| s.key.is_some()).unwrap(), "the first on an empty board makes the key");
+        // a listing that names a folder we haven't read: fetch again
+        let found = json!([{"ref": "refs/qh/peers/bob", "object": {"sha": "abc"}}, {"ref": "refs/qh/peers/alice", "object": {"sha": "mine"}}]);
+        assert!(!retry.need);
+        assert!(take_listing(repo, "alice", Ok((200, Some("e2".into()), found.clone())), &folders, &mut etag, &mut retry));
+        assert!(retry.need);
+        retry.worked(t);
+        let mine = json!([{"ref": "refs/qh/peers/alice", "object": {"sha": "mine2"}}]);
+        assert!(take_listing(repo, "alice", Ok((200, None, mine)), &folders, &mut etag, &mut retry));
+        assert!(!retry.need, "our own folder moving is no reason to fetch");
+    }
+
+    fn watcher(sent: &[&str], before: &[&str], since_send: Duration) -> Watcher {
+        Watcher { login: "bob".into(), key: "k".into(), session: "main".into(), until: Instant::now() + WATCH_LIFE, sent: rows(sent),
+                  before: rows_hash(&rows(before)), have: None, at: Instant::now() - since_send }
+    }
+
+    #[test]
+    fn a_lost_transcript_update_mends_itself() {
+        let now = rows(&["a", "b", "c"]);
+        let (hash, recent, long) = (rows_hash(&now), Duration::from_secs(1), Duration::from_secs(16));
+        let held_before = rows_hash(&rows(&["a", "b"]));
+        // they still say what they held before our last send: it may be on its way
+        let mut w = watcher(&["a", "b", "c"], &["a", "b"], recent);
+        reconcile(&mut w, held_before, hash, &now);
+        assert_eq!(w.sent, now, "not yet: no reason to send it all again");
+        // ...but not for ever: it was lost, and nothing else would ever send it
+        let mut w = watcher(&["a", "b", "c"], &["a", "b"], long);
+        reconcile(&mut w, held_before, hash, &now);
+        assert!(w.sent.is_empty(), "sent whole");
+        // they hold what's current, whatever we thought
+        let mut w = watcher(&["x"], &[], long);
+        reconcile(&mut w, hash, hash, &now);
+        assert_eq!(w.sent, now);
+        // they hold what we last sent, and something newer is yet to go: only that goes
+        let mut w = watcher(&["a", "b"], &["a"], long);
+        reconcile(&mut w, rows_hash(&rows(&["a", "b"])), hash, &now);
+        assert_eq!(w.sent, rows(&["a", "b"]));
+        // they hold something else altogether
+        let mut w = watcher(&["a", "b"], &["a"], recent);
+        reconcile(&mut w, 12345, hash, &now);
+        assert!(w.sent.is_empty());
+    }
+
+    #[test]
+    fn loose_objects_are_read_from_count_objects() {
+        assert_eq!(loose_objects("count: 2345\nsize: 10\nin-pack: 7\npacks: 1\nsize-pack: 9\nprune-packable: 0\ngarbage: 0\nsize-garbage: 0"), Some(2345));
+        assert_eq!(loose_objects("in-pack: 7"), None);
+        assert_eq!(loose_objects("count: lots"), None);
+    }
+
+    #[test]
+    fn a_store_with_too_many_loose_objects_is_tidied_and_keeps_our_commit() {
+        let (base, store) = scratch_store("gc");
+        let idc = identity_commit(&store, "alice", "a", "b").unwrap();
+        assert!(git(&store, &["update-ref", "refs/qh/me", &idc]).is_some());
+        let loose = || loose_objects(&git(&store, &["count-objects", "-v"]).unwrap()).unwrap();
+        let before = loose();
+        assert!(before >= 4, "commit, tree, two blobs");
+        // temp packs from fetches killed long ago go, and any from a fetch running now stay
+        let (old, new) = (store.join("objects/pack/tmp_pack_old"), store.join("objects/pack/tmp_pack_new"));
+        plant(&old, Duration::from_secs(2 * 3600));
+        plant(&new, Duration::from_secs(5));
+        assert!(!tidy_if_big(&store, before, None), "at the limit: left alone");
+        assert_eq!(loose(), before);
+        assert!(old.exists());
+        assert!(tidy_if_big(&store, before - 1, None), "over it");
+        assert!(loose() < before, "the commit we keep went into a pack");
+        assert_eq!(git(&store, &["rev-parse", "refs/qh/me"]).as_deref(), Some(idc.as_str()));
+        assert_eq!(git(&store, &["cat-file", "-t", &idc]).as_deref(), Some("commit"));
+        assert!(!old.exists() && new.exists(), "old temp pack cleared, a fresh one kept");
+        assert!(!tidy_if_big(&base.join("project"), 0, None), "only a store of ours");
+        // told to stop: it doesn't start
+        assert!(!tidy_if_big(&store, 0, Some(&AtomicBool::new(true))));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_call_says_why_without_saying_what_it_ran() {
+        let run = |script: &str, limit, stop: Option<&AtomicBool>| {
+            let mut c = Command::new("sh");
+            c.args(["-c", script]);
+            run_limited(c, limit, stop)
+        };
+        let long = Duration::from_secs(5);
+        assert_eq!(run("exit 0", long, None), Ok(()));
+        assert_eq!(run("exit 128", long, None), Err("exit code 128".to_string()));
+        assert_eq!(run("sleep 30 # secret", Duration::from_millis(100), None), Err("timed out after 0 s".to_string()));
+        assert_eq!(run("exit 0", long, Some(&AtomicBool::new(true))), Err("stopped".to_string()));
+        assert_eq!(run("kill -9 $$", long, None), Err("ended by a signal".to_string()));
+        let mut none = Command::new("/no/such/program");
+        none.arg("secret");
+        assert!(run_limited(none, long, None).is_err_and(|e| !e.contains("secret")));
+    }
+
+    #[test]
+    fn a_failed_fetch_or_push_says_why() {
+        let (base, store) = scratch_store("why");
+        let url = file_url(&base.join("no-such-remote"));
+        let e = fetch_refs(&store, &url, &[], GIT_NET_LIMIT, None).unwrap_err();
+        assert!(e.starts_with("fetching the board failed") && e.contains("exit code"), "{e}");
+        let idc = identity_commit(&store, "alice", "a", "b").unwrap();
+        let e = publish_to(&store, &url, "alice", &[], (&[], &json!({}), &idc), GIT_NET_LIMIT, Some(&AtomicBool::new(true))).unwrap_err();
+        assert!(e.starts_with("push to the board failed") && e.contains("stopped"), "{e}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // item 1
+    #[test]
+    fn quitting_during_the_first_take_in_doesnt_count_as_having_read_the_board() {
+        // quit comes while we're taking in the folders
+        let (fetched, stop) = (AtomicBool::new(false), AtomicBool::new(false));
+        take_in_board(&fetched, &stop, || {
+            assert!(!fetched.load(Relaxed), "nothing is taken in yet");
+            stop.store(true, Relaxed);
+        });
+        assert!(!fetched.load(Relaxed));
+        let reader = std::thread::spawn(|| {});
+        let mut pushed = false;
+        leave_board(reader, &fetched, || (), |_| pushed = true);
+        assert!(!pushed, "we know nobody yet: a folder now would have no keys/* for anyone");
+        // the real thing, stopped: it returns before knowing anyone or making a key
+        let repo = format!("o/stopped-{}", std::process::id());
+        let mut st = state("alice");
+        st.repo = repo.clone();
+        STATES.lock().unwrap().get_or_insert_with(HashMap::new).insert(repo.clone(), st);
+        let bytes: [u8; 32] = crate::oauth::random();
+        let secret = x25519_dalek::StaticSecret::from(bytes);
+        let fetched = AtomicBool::new(false);
+        take_in_board(&fetched, &stop, || absorb(&repo, Path::new("."), &[], &mut HashMap::new(), &secret, "", &quiet(), &stop));
+        assert!(!fetched.load(Relaxed));
+        assert!(with(&repo, |s| s.key.is_none()).unwrap());
+        // not stopped: a finished take-in is a read, and that's when writing may begin
+        let (fetched, stop) = (AtomicBool::new(false), AtomicBool::new(false));
+        take_in_board(&fetched, &stop, || assert!(!fetched.load(Relaxed)));
+        assert!(fetched.load(Relaxed));
+        STATES.lock().unwrap().get_or_insert_with(HashMap::new).remove(&repo);
+    }
+
+    // item 2
+    #[test]
+    fn a_stale_config_lock_keeps_the_store() {
+        let (base, store) = scratch_store("cfglock");
+        let project = base.join("project");
+        let config = store.join("config");
+        plant(&store.join("config.lock"), LONG_AGO);
+        assert_eq!(board_store_in(&store, &project), store, "values already right: nothing to write");
+        assert!(is_store(&store));
+        // a value that needs writing can't be, this time: still the store, and it works
+        let text = std::fs::read_to_string(&config).unwrap().replace("auto = 0", "auto = 5");
+        std::fs::write(&config, text).unwrap();
+        assert_eq!(board_store_in(&store, &project), store, "settings are worth having, not worth leaving the store for");
+        assert!(is_store(&store));
+        assert!(identity_commit(&store, "alice", "a", "b").is_some());
+        let remote = scratch_remote(&base);
+        assert!(fetch_refs(&store, &file_url(&remote), &[], GIT_NET_LIMIT, None).is_ok(), "a fetch doesn't need that lock");
+        assert!(tidy_store(&store, None), "nor does tidying");
+        // the lock gone, the value is put right
+        std::fs::remove_file(store.join("config.lock")).unwrap();
+        assert_eq!(board_store_in(&store, &project), store);
+        assert_eq!(git(&store, &["config", "gc.auto"]).as_deref(), Some("0"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_store_with_the_right_settings_isnt_written_to() {
+        let (base, store) = scratch_store("cfgsame");
+        let f = std::fs::File::options().write(true).open(store.join("config")).unwrap();
+        let old = SystemTime::now() - LONG_AGO;
+        f.set_modified(old).unwrap();
+        drop(f);
+        assert_eq!(board_store_in(&store, &base.join("project")), store);
+        assert_eq!(std::fs::metadata(store.join("config")).unwrap().modified().unwrap(), old);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_store_git_cant_read_falls_back_and_is_no_store() {
+        let (base, store) = scratch_store("broken");
+        std::fs::write(store.join("HEAD"), "not a ref\n").unwrap();
+        let project = base.join("project");
+        assert_eq!(board_store_in(&store, &project), project);
+        assert!(!is_store(&store));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // item 3
+    #[cfg(unix)]
+    #[test]
+    fn a_slow_commit_doesnt_push_the_end_of_the_last_write_past_the_quit_wait() {
+        let (base, store) = scratch_store("slowcommit");
+        let idc = identity_commit(&store, "alice", "a", "b").unwrap();
+        let (stalled, pid) = stalled_remote(&base, "push");
+        let env = [("GIT_ALLOW_PROTOCOL", "ext".to_string())];
+        // each file is a git process: enough of them make a commit that takes most of a second
+        let files: Vec<(String, String)> = (0..1000).map(|i| (format!("f{i}"), format!("{i}"))).collect();
+        let t = Instant::now();
+        folder_commit(&store, &files, &json!({"try": 0}), &idc).unwrap();
+        let commit_takes = t.elapsed();
+        assert!(commit_takes >= Duration::from_millis(500), "too quick to show anything: {commit_takes:?}");
+        // the commit ends with just enough left for a push: a limit worked out before it would run 'commit_takes' over
+        let since = Instant::now() - Duration::from_millis(3900).saturating_sub(commit_takes);
+        assert!(last_write(&store, &stalled, "alice", &env, (&files, &json!({"try": 1}), &idc), since).is_err());
+        assert!(since.elapsed() < Duration::from_secs(5), "ended {:?} after quitting began; the commit takes {commit_takes:?}", since.elapsed());
+        gone(&pid);
+        // out of time before the push: none is started, so none can outlive us
+        let since = Instant::now() - Duration::from_millis(4200);
+        let t0 = Instant::now();
+        assert!(last_write(&store, &stalled, "alice", &env, (&files[..1], &json!({"try": 2}), &idc), since).is_err());
+        assert!(t0.elapsed() < Duration::from_millis(1000), "it took {:?}", t0.elapsed());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // item 4
+    #[test]
+    fn a_stop_that_comes_during_a_github_call_saves_no_key() {
+        let Ok(_) = std::env::var("QH_TEST_BASE") else {
+            let base = std::env::temp_dir().join(format!("qh-latekey-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&base);
+            std::fs::create_dir_all(&base).unwrap();
+            rerun("a_stop_that_comes_during_a_github_call_saves_no_key",
+                  &[("QH_TEST_BASE", &base.to_string_lossy()), ("QH_STATE_DIR", &base.to_string_lossy()), ("QH_TEAM_ADMINS", "alice"), ("GH_TOKEN", "x")]);
+            let _ = std::fs::remove_dir_all(&base);
+            return;
+        };
+        let repo = "o/late-key";
+        let mut st = state("alice");
+        st.repo = repo.into();
+        let mut gone = peer("bob", &[], false);
+        gone.locked = true;
+        gone.ts = 1;
+        st.peers.insert("bob".into(), gone);
+        STATES.lock().unwrap().get_or_insert_with(HashMap::new).insert(repo.to_string(), st);
+        let stopped = AtomicBool::new(true);
+        recover_key(repo, &stopped);
+        assert!(with(repo, |s| s.key.is_none() && s.epoch == 0).unwrap(), "the lock may be someone else's by now");
+        assert!(!per_repo("team-keys", repo).exists());
+        // and the same with nothing stopping it does make one: the test above means something
+        recover_key(repo, &AtomicBool::new(false));
+        assert!(with(repo, |s| s.key.is_some() && s.epoch == 1).unwrap());
+    }
+
+    #[test]
+    fn a_stop_that_comes_during_a_github_call_pins_no_keys() {
+        let Ok(_) = std::env::var("QH_TEST_BASE") else {
+            let base = std::env::temp_dir().join(format!("qh-latepin-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&base);
+            std::fs::create_dir_all(&base).unwrap();
+            rerun("a_stop_that_comes_during_a_github_call_pins_no_keys", &[("QH_TEST_BASE", &base.to_string_lossy()), ("QH_STATE_DIR", &base.to_string_lossy())]);
+            let _ = std::fs::remove_dir_all(&base);
+            return;
+        };
+        let repo = "o/late-pin";
+        let mut st = state("alice");
+        st.repo = repo.into();
+        STATES.lock().unwrap().get_or_insert_with(HashMap::new).insert(repo.to_string(), st);
+        // no anchor, so `vouched` answers without asking anyone
+        let p = Peer { login: "bob".into(), pub_key: "k".into(), sign: "s".into(), signed: true, seq: 5, ..Default::default() };
+        let stopped = AtomicBool::new(true);
+        assert!(!vet(repo, "", &p, &quiet(), &stopped), "not taken in");
+        assert!(with(repo, |s| s.pins.is_empty()).unwrap());
+        assert!(!per_repo("team-pins", repo).exists());
+        assert!(vet(repo, "", &p, &quiet(), &AtomicBool::new(false)));
+        assert!(with(repo, |s| s.pins.contains_key("bob")).unwrap());
+    }
+
+    // item 5
+    #[test]
+    fn the_big_look_at_a_store_waits_for_the_first_push() {
+        assert_eq!(tidy_limit(1), Some(LOOSE_TIDY), "after the first write: our address is out by then");
+        assert_eq!(tidy_limit(2), None);
+        assert_eq!(tidy_limit(199), None);
+        assert_eq!(tidy_limit(BOARD_TIDY), Some(0), "and every so often, whatever the count");
+        assert_eq!(tidy_limit(2 * BOARD_TIDY), Some(0));
+    }
+
+    // item 6
+    #[test]
+    fn a_list_git_couldnt_read_is_no_empty_board() {
+        let (base, store) = scratch_store("list");
+        assert_eq!(list_board(&store).unwrap().len(), 0, "really empty");
+        let not_a_repo = base.join("project");
+        assert!(list_board(&not_a_repo).is_err(), "couldn't say: a key made on this would be a wrong one");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // item 7
+    #[test]
+    fn a_new_store_uses_ref_files_whatever_git_defaults_to() {
+        let Ok(base) = std::env::var("QH_TEST_BASE") else {
+            let base = std::env::temp_dir().join(format!("qh-reffmt-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&base);
+            std::fs::create_dir_all(base.join("project")).unwrap();
+            let config = base.join("gitconfig");
+            std::fs::write(&config, "[init]\n\tdefaultRefFormat = reftable\n").unwrap();
+            rerun("a_new_store_uses_ref_files_whatever_git_defaults_to", &[("QH_TEST_BASE", &base.to_string_lossy()), ("GIT_CONFIG_GLOBAL", &config.to_string_lossy()), ("GIT_DEFAULT_REF_FORMAT", "reftable")]);
+            let _ = std::fs::remove_dir_all(&base);
+            return;
+        };
+        let (store, root) = (Path::new(&base).join("store"), Path::new(&base).join("project"));
+        assert_eq!(board_store_in(&store, &root), store);
+        assert!(!store.join("reftable").exists(), "the sweep and everyone's tools know these");
+        assert!(identity_commit(&store, "alice", "a", "b").is_some());
+    }
+
+    #[test]
+    fn a_reftable_store_made_earlier_keeps_working_and_is_swept() {
+        let base = std::env::temp_dir().join(format!("qh-reftable-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("project")).unwrap();
+        let store = base.join("store");
+        std::fs::create_dir_all(&store).unwrap();
+        assert!(git_in(&store, &["init", "-q", "--bare"], None, &[("GIT_DEFAULT_REF_FORMAT", "reftable".to_string()), ("GIT_DEFAULT_HASH", "sha1".to_string())]).is_some());
+        if !store.join("reftable").exists() {
+            let _ = std::fs::remove_dir_all(&base);
+            return; // a git too old to make one has none to keep working
+        }
+        assert_eq!(board_store_in(&store, &base.join("project")), store);
+        assert!(store.join("reftable").exists(), "left as it is");
+        let url = file_url(&scratch_remote(&base));
+        let idc = identity_commit(&store, "alice", "a", "b").unwrap();
+        publish_to(&store, &url, "alice", &[], (&[("pub".to_string(), "x".to_string())], &json!({}), &idc), GIT_NET_LIMIT, None).unwrap();
+        let lock = store.join("reftable/tables.list.lock");
+        plant(&lock, Duration::from_secs(0));
+        assert!(fetch_refs(&store, &url, &[], GIT_NET_LIMIT, None).is_err());
+        assert!(lock.exists(), "a fresh one may be in use");
+        plant(&lock, LONG_AGO);
+        assert!(fetch_refs(&store, &url, &[], GIT_NET_LIMIT, None).is_err());
+        assert_eq!(fetch_refs(&store, &url, &[], GIT_NET_LIMIT, None).expect("the failed fetch cleared it").len(), 1);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // item 9
+    #[test]
+    #[should_panic(expected = "ran no test")]
+    fn rerun_notices_a_test_that_isnt_there() {
+        rerun("no_test_has_this_name", &[]);
+    }
+
+    #[test]
+    fn a_new_store_is_sha1_whatever_git_defaults_to() {
+        let Ok(base) = std::env::var("QH_TEST_BASE") else {
+            let base = std::env::temp_dir().join(format!("qh-hash-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&base);
+            std::fs::create_dir_all(base.join("project")).unwrap();
+            let config = base.join("gitconfig");
+            std::fs::write(&config, "[init]\n\tdefaultObjectFormat = sha256\n").unwrap();
+            rerun("a_new_store_is_sha1_whatever_git_defaults_to", &[("QH_TEST_BASE", &base.to_string_lossy()), ("GIT_CONFIG_GLOBAL", &config.to_string_lossy()), ("GIT_DEFAULT_HASH", "sha256")]);
+            let _ = std::fs::remove_dir_all(&base);
+            return;
+        };
+        let (store, root) = (Path::new(&base).join("store"), Path::new(&base).join("project"));
+        assert_eq!(board_store_in(&store, &root), store);
+        assert_eq!(identity_commit(&store, "alice", "a", "b").unwrap().len(), 40, "GitHub is sha1, and the identity commit goes there");
+    }
+
+    /// A sha256 store made earlier: a store is sha256 or it talks to GitHub, so it holds nothing
+    /// that ever went anywhere, and everything in it is built again from our state.
+    #[test]
+    fn a_sha256_store_made_earlier_is_replaced() {
+        let base = std::env::temp_dir().join(format!("qh-sha256-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("project")).unwrap();
+        let store = base.join("store");
+        std::fs::create_dir_all(&store).unwrap();
+        assert!(git_in(&store, &["init", "-q", "--bare"], None, &[("GIT_DEFAULT_HASH", "sha256".to_string())]).is_some());
+        if !git_raw(&store, &["--git-dir=.", "rev-parse", "--show-object-format"], None, &[]).is_some_and(|o| o.starts_with(b"sha256")) {
+            let _ = std::fs::remove_dir_all(&base);
+            return; // a git too old to make one has none to replace
+        }
+        let url = file_url(&scratch_remote(&base));
+        // why replacing it loses nothing: it can't push, even to an empty remote, or fetch a folder
+        STORES.lock().unwrap().push(store.clone());
+        let old = identity_commit(&store, "alice", "a", "b").unwrap();
+        assert_eq!(old.len(), 64);
+        let one = |root: &Path, idc: &str| publish_to(root, &url, "alice", &[], (&[("pub".to_string(), "x".to_string())], &json!({}), idc), GIT_NET_LIMIT, None);
+        assert!(one(&store, &old).is_err(), "nothing it holds ever went anywhere");
+        let side = base.join("side");
+        assert_eq!(board_store_in(&side, &base.join("project")), side);
+        let idc = identity_commit(&side, "alice", "a", "b").unwrap();
+        one(&side, &idc).unwrap();
+        assert!(fetch_refs(&store, &url, &[], GIT_NET_LIMIT, None).is_err(), "and it can't read the board");
+        // made fresh, it does both
+        assert_eq!(board_store_in(&store, &base.join("project")), store);
+        let idc = identity_commit(&store, "alice", "a", "b").unwrap();
+        assert_eq!(idc.len(), 40);
+        one(&store, &idc).unwrap();
+        assert_eq!(fetch_refs(&store, &url, &[], GIT_NET_LIMIT, None).unwrap().len(), 1);
+        let names: Vec<_> = std::fs::read_dir(&base).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect();
+        assert!(!names.iter().any(|n| n.contains("sha256")), "nothing left over: {names:?}");
+        // it stays what it now is: the next start finds nothing to do
+        assert_eq!(board_store_in(&store, &base.join("project")), store);
+        assert_eq!(git(&store, &["cat-file", "-t", &idc]).as_deref(), Some("commit"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_sha256_store_that_cant_be_replaced_is_no_store() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::env::temp_dir().join(format!("qh-sha256-stuck-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (parent, project) = (base.join("parent"), base.join("project"));
+        let store = parent.join("store");
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        assert!(git_in(&store, &["init", "-q", "--bare"], None, &[("GIT_DEFAULT_HASH", "sha256".to_string())]).is_some());
+        if !git_raw(&store, &["--git-dir=.", "rev-parse", "--show-object-format"], None, &[]).is_some_and(|o| o.starts_with(b"sha256")) {
+            let _ = std::fs::remove_dir_all(&base);
+            return;
+        }
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let got = board_store_in(&store, &project);
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(got, project, "the same way out as any store git can't use, which says so");
+        assert!(!is_store(&store));
+        assert!(store.join("HEAD").exists(), "left as it was");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
     fn the_board_stays_out_of_the_project() {
         let base = std::env::temp_dir().join(format!("qh-store-{}", std::process::id()));
         let (project, remote, store) = (base.join("project"), base.join("remote.git"), base.join("store"));
-        for d in [&project, &remote, &store] { std::fs::create_dir_all(d).unwrap(); }
-        assert!(git(&project, &["init", "-q"]).is_some() && git(&remote, &["init", "-q", "--bare"]).is_some() && git(&store, &["init", "-q", "--bare"]).is_some());
+        std::fs::create_dir_all(&project).unwrap();
+        assert!(git(&project, &["init", "-q"]).is_some());
+        assert_eq!(scratch_remote(&base), remote);
+        assert_eq!(board_store_in(&store, &project), store);
         let count = |d: &Path| git(d, &["count-objects"]).unwrap_or_default();
         let before = count(&project);
         // a folder written the way the board's thread writes one: a commit on the identity commit
@@ -5753,12 +6933,113 @@ pub(crate) mod tests {
         let msg = json!({"state": "online"});
         let commit = folder_commit(&store, &[("pub".to_string(), "a".to_string())], &msg, &idc).unwrap();
         let url = remote.to_string_lossy().to_string();
-        assert!(git_net(&store, &["push", "-q", "-f", &url, &format!("{commit}:refs/qh/peers/alice")], &[]), "no project history is needed to push");
+        assert!(git_net(&store, &["push", "-q", "-f", &url, &format!("{commit}:refs/qh/peers/alice")], &[], GIT_NET_LIMIT, None).is_ok(), "no project history is needed to push");
         assert_eq!(count(&project), before, "nothing landed in the project's .git");
         git(&store, &["update-ref", "refs/qh/me", &idc]);
-        assert!(git(&store, &["gc", "-q", "--prune=now"]).is_some());
+        assert!(tidy_store(&store, None));
         assert!(folder_commit(&store, &[("pub".to_string(), "c".to_string())], &msg, &idc).is_ok(), "tidying keeps what the next folder needs");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Run one test again in a process of its own, with `env` set (tests run in parallel, so no set_var).
+    fn rerun(test: &str, env: &[(&str, &str)]) {
+        let mut c = Command::new(std::env::current_exe().unwrap());
+        c.args(["--exact", &format!("team::tests::{test}"), "--nocapture"]).envs(env.iter().copied());
+        let o = c.output().unwrap();
+        let out = String::from_utf8_lossy(&o.stdout);
+        assert!(o.status.success(), "{out}\n{}", String::from_utf8_lossy(&o.stderr));
+        assert!(out.contains(" 1 passed;"), "ran no test called {test}:\n{out}");
+    }
+
+    /// A folder for one test, with a git config that refuses bare repositories found by looking
+    /// (what Git 3.0 does by default).
+    fn explicit_only(name: &str) -> (PathBuf, String) {
+        let base = std::env::temp_dir().join(format!("qh-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("project")).unwrap();
+        let config = base.join("gitconfig");
+        std::fs::write(&config, "[safe]\n\tbareRepository = explicit\n").unwrap();
+        (base, config.to_string_lossy().to_string())
+    }
+
+    #[test]
+    fn the_store_works_when_git_only_takes_explicit_bare_repositories() {
+        let Ok(base) = std::env::var("QH_TEST_BASE") else {
+            let (base, config) = explicit_only("explicit");
+            rerun("the_store_works_when_git_only_takes_explicit_bare_repositories",
+                  &[("QH_TEST_BASE", &base.to_string_lossy()), ("GIT_CONFIG_GLOBAL", &config)]);
+            let _ = std::fs::remove_dir_all(&base);
+            return;
+        };
+        let (store, root) = (Path::new(&base).join("store"), Path::new(&base).join("project"));
+        for round in 0..2 {
+            assert_eq!(board_store_in(&store, &root), store, "round {round}: the store, not the project");
+            let idc = identity_commit(&store, "alice", "a", "b");
+            assert!(idc.is_some(), "round {round}: the identity commit is written");
+            assert!(git(&store, &["update-ref", "refs/qh/me", &idc.unwrap()]).is_some(), "round {round}: the ref is written");
+        }
+        // a store made before this setting, or by an older qh, gets its settings back every start
+        std::fs::write(store.join("config"), "[core]\n\tbare = true\n\trepositoryformatversion = 0\n").unwrap();
+        assert_eq!(board_store_in(&store, &root), store);
+        assert_eq!(git(&store, &["config", "gc.auto"]).as_deref(), Some("0"));
+        assert_eq!(git(&store, &["config", "maintenance.auto"]).as_deref(), Some("false"));
+    }
+
+    #[test]
+    fn only_a_registered_store_skips_the_bare_repository_protection() {
+        let Ok(base) = std::env::var("QH_TEST_BASE") else {
+            let (base, config) = explicit_only("embedded");
+            rerun("only_a_registered_store_skips_the_bare_repository_protection",
+                  &[("QH_TEST_BASE", &base.to_string_lossy()), ("GIT_CONFIG_GLOBAL", &config)]);
+            let _ = std::fs::remove_dir_all(&base);
+            return;
+        };
+        // a bare repository that came with a clone: git must go on refusing it
+        let embedded = Path::new(&base).join("embedded");
+        std::fs::create_dir_all(&embedded).unwrap();
+        assert!(git(&embedded, &["init", "-q", "--bare"]).is_some());
+        assert!(git(&embedded, &["rev-parse", "--git-dir"]).is_none(), "found by looking, so refused");
+        // and when a store can't be set up, we fall back to the project and stop treating it as one
+        let (file, root) = (Path::new(&base).join("a-file"), Path::new(&base).join("project"));
+        std::fs::write(&file, "x").unwrap();
+        assert_eq!(board_store_in(&file.join("store"), &root), root);
+        assert!(git(&file.join("store"), &["rev-parse", "--git-dir"]).is_none());
+    }
+
+    #[test]
+    fn the_store_ignores_git_variables_meant_for_another_repository() {
+        let Ok(base) = std::env::var("QH_TEST_BASE") else {
+            let base = std::env::temp_dir().join(format!("qh-localenv-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&base);
+            let elsewhere = base.join("elsewhere");
+            std::fs::create_dir_all(&elsewhere).unwrap();
+            let e = elsewhere.to_string_lossy().to_string();
+            rerun("the_store_ignores_git_variables_meant_for_another_repository", &[
+                ("QH_TEST_BASE", &base.to_string_lossy()), ("GIT_DIR", &e), ("GIT_OBJECT_DIRECTORY", &e), ("GIT_ALTERNATE_OBJECT_DIRECTORIES", &e),
+                ("GIT_CONFIG_COUNT", "1"), ("GIT_CONFIG_KEY_0", "qh.test"), ("GIT_CONFIG_VALUE_0", "leaked"), ("GIT_INDEX_FILE", &e),
+            ]);
+            assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0, "nothing landed where the variables pointed");
+            let _ = std::fs::remove_dir_all(&base);
+            return;
+        };
+        let (store, root) = (Path::new(&base).join("store"), Path::new(&base).join("project"));
+        std::fs::create_dir_all(&root).unwrap();
+        assert_eq!(board_store_in(&store, &root), store);
+        let sha = identity_commit(&store, "alice", "a", "b").unwrap();
+        assert_eq!(git(&store, &["cat-file", "-t", &sha]).as_deref(), Some("commit"));
+        assert!(store.join("objects").join(&sha[..2]).join(&sha[2..]).exists(), "the object is in the store");
+        assert!(git(&store, &["config", "qh.test"]).is_none(), "the caller's GIT_CONFIG_COUNT is dropped");
+        // what we pass ourselves (the login, on a push or fetch) still arrives
+        let ours = [("GIT_CONFIG_COUNT", "1".to_string()), ("GIT_CONFIG_KEY_0", "qh.test".to_string()), ("GIT_CONFIG_VALUE_0", "ours".to_string())];
+        assert_eq!(git_in(&store, &["config", "qh.test"], None, &ours).as_deref(), Some("ours"));
+    }
+
+    #[test]
+    fn the_list_of_local_git_variables_is_complete() {
+        let all = Command::new("git").args(["rev-parse", "--local-env-vars"]).output().unwrap();
+        for v in String::from_utf8_lossy(&all.stdout).lines() {
+            assert!(GIT_LOCAL_ENV.contains(&v), "{v} is missing from GIT_LOCAL_ENV");
+        }
     }
 
     fn rows(list: &[&str]) -> Vec<(String, String)> {
@@ -5853,10 +7134,10 @@ pub(crate) mod tests {
         let t = now_ms();
 
         let (_, p) = folder(&root, repo, "alice", &alice, &[("data", "x")], t);
-        assert!(p.signed && vet(repo, "", &p, &quiet()), "alice's own folder is taken (and her keys pinned)");
+        assert!(p.signed && vet(repo, "", &p, &quiet(), &AtomicBool::new(false)), "alice's own folder is taken (and her keys pinned)");
         let (_, p) = folder(&root, repo, "alice", &mallory, &[("data", "x")], t + 1);
         assert!(p.signed, "mallory's signature is valid for mallory's keys...");
-        assert!(!vet(repo, "", &p, &quiet()), "...but they aren't alice's, and GitHub doesn't vouch for them");
+        assert!(!vet(repo, "", &p, &quiet(), &AtomicBool::new(false)), "...but they aren't alice's, and GitHub doesn't vouch for them");
 
         // mallory keeps alice's keys and signature but swaps the sealed data
         let (f, _) = folder(&root, repo, "alice", &alice, &[("data", "x")], t + 2);
@@ -5864,12 +7145,12 @@ pub(crate) mod tests {
         for (n, c) in files.iter_mut() { if n == "data" { *c = tc::seal(&team, "data:alice", b"{}") } }
         let sha = folder_commit(&root, &files, &serde_json::from_str(&f.msg).unwrap(), &identity_commit(&root, "alice", "a", "b").unwrap()).unwrap();
         let p = read_folder(&folder_files(&root, &sha), repo, "alice", None);
-        assert!(!p.signed && !vet(repo, "", &p, &quiet()), "a changed file breaks alice's signature");
+        assert!(!p.signed && !vet(repo, "", &p, &quiet(), &AtomicBool::new(false)), "a changed file breaks alice's signature");
 
         let (_, p) = folder(&root, repo, "alice", &alice, &[("data", "x")], t + 5);
-        assert!(vet(repo, "", &p, &quiet()), "alice's next folder");
+        assert!(vet(repo, "", &p, &quiet(), &AtomicBool::new(false)), "alice's next folder");
         let (_, p) = folder(&root, repo, "alice", &alice, &[("data", "x")], t + 3);
-        assert!(!vet(repo, "", &p, &quiet()), "an older folder of alice's, pushed back by someone: a replay");
+        assert!(!vet(repo, "", &p, &quiet(), &AtomicBool::new(false)), "an older folder of alice's, pushed back by someone: a replay");
 
         // a team key change from a member whose keys GitHub hasn't vouched for is ignored
         let bob = x25519_dalek::StaticSecret::from(crate::oauth::random());
@@ -5877,8 +7158,8 @@ pub(crate) mod tests {
         let new = tc::new_team_key();
         let wrap = tc::wrap(&new, &alice, &bob_pub, repo).unwrap();
         let (f, p) = folder(&root, repo, "alice", &alice, &[("epoch", "1"), ("keys/bob", &wrap)], t + 6);
-        assert!(vet(repo, "", &p, &quiet()));
-        newer_key(repo, &[(f, p)], &bob, "", &quiet());
+        assert!(vet(repo, "", &p, &quiet(), &AtomicBool::new(false)));
+        newer_key(repo, &[(f, p)], &bob, "", &quiet(), &AtomicBool::new(false));
         assert_eq!(with(repo, |s| (s.key, s.epoch)).unwrap(), (Some(team), 0), "the key stays");
         let _ = std::fs::remove_dir_all(&root);
     }

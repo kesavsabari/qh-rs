@@ -162,6 +162,8 @@ notify = "auto"
 lsp = "auto"
 lsp_wait_ms = 3000  # how long an edit waits for diagnostics
 
+# Team data lives in a store of its own, so a project's .git/config (http.proxy, say) doesn't
+# apply to it: its git calls read your global git config, and its GitHub API calls use no proxy.
 # team mode: each teammate has their own clone. Teammates' agents may read your working copy
 # live over the encrypted line (read_team_file / list_team_files), uncommitted edits included,
 # never secrets or git-ignored files, and each read shows in your team Activity; or "off"

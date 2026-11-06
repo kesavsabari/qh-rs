@@ -90,6 +90,9 @@ pub fn branch(dir: &Path) -> String {
         } else { continue };
         let head = std::fs::read_to_string(gitdir.join("HEAD")).unwrap_or_default();
         let head = head.trim();
+        if head == crate::worktree::REFTABLE_HEAD {
+            return crate::worktree::branch_from_git(d).unwrap_or_default();
+        }
         return head.strip_prefix("ref: refs/heads/").map(String::from).unwrap_or_else(|| head.chars().take(7).collect());
     }
     String::new()

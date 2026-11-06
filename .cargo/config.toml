@@ -1,0 +1,3 @@
+# The released exe must start on a clean Windows: no VC++ runtime to install first.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

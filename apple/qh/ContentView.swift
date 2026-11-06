@@ -511,6 +511,8 @@ struct TeamNav: View {
         .onReceive(tick) { d in
             let push = ws.projects.first { $0.path == ws.teamProject }?.teamPush == true
             if !push || Int(d.timeIntervalSince1970) % 30 < 3 { refresh() }
+            // an open transcript changes all the time and nothing pushes it: ask the local qh (no GitHub calls)
+            else if case .peer(let l, let s) = ws.teamPage { project.loadTranscript(l, s) }
         }
     }
 

@@ -66,6 +66,27 @@ pub fn checkout(cwd: &Path) -> Option<PathBuf> {
     cwd.ancestors().find(|d| d.join(".git").exists()).map(Path::to_path_buf)
 }
 
+/// What a reftable repository's HEAD file always says: the real one is in its tables. No branch
+/// can have this name, because git doesn't allow one to start with a dot.
+pub const REFTABLE_HEAD: &str = "ref: refs/heads/.invalid";
+
+/// The branch checked out at `dir`, asking git; None on a detached HEAD. Branch names are read for
+/// every frame, and a process each time would be up to hundreds a second, so a few seconds out of
+/// date will do.
+pub fn branch_from_git(dir: &Path) -> Option<String> {
+    use std::{collections::HashMap, sync::Mutex, time::{Duration, Instant}};
+    type Seen = HashMap<PathBuf, (Instant, Option<String>)>;
+    static SEEN: Mutex<Option<Seen>> = Mutex::new(None);
+    let mut g = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    let m = g.get_or_insert_with(HashMap::new);
+    if let Some((at, b)) = m.get(dir) {
+        if at.elapsed() < Duration::from_secs(5) { return b.clone() }
+    }
+    let b = git(dir, &["symbolic-ref", "--short", "HEAD"]).ok();
+    m.insert(dir.to_path_buf(), (Instant::now(), b.clone()));
+    b
+}
+
 /// The current branch of the checkout containing cwd, read from HEAD (for the pane title).
 pub fn branch(cwd: &Path) -> Option<String> {
     let root = checkout(cwd)?;
@@ -78,6 +99,9 @@ pub fn branch(cwd: &Path) -> Option<String> {
         if p.is_absolute() { p } else { root.join(p) }
     };
     let head = std::fs::read_to_string(gitdir.join("HEAD")).ok()?;
+    if head.trim() == REFTABLE_HEAD {
+        return branch_from_git(&root);
+    }
     match head.trim().strip_prefix("ref: refs/heads/") {
         Some(b) => Some(b.to_string()),
         None => Some(head.trim().chars().take(7).collect()),
@@ -219,6 +243,55 @@ mod tests {
         git(&d, &["add", "."]).unwrap();
         git(&d, &["commit", "-q", "-m", "init"]).unwrap();
         d
+    }
+
+    /// A reftable repository, whatever the machine's git defaults to; None if this git can't make one.
+    fn reftable_repo() -> Option<PathBuf> {
+        let d = std::env::temp_dir().join(format!("qh-wt-rt-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(&d).unwrap();
+        if git(&d, &["init", "-q", "-b", "main", "--ref-format=reftable"]).is_err() {
+            let _ = std::fs::remove_dir_all(&d);
+            return None;
+        }
+        for a in [&["config", "user.email", "t@t"][..], &["config", "user.name", "t"], &["config", "commit.gpgsign", "false"], &["commit", "-q", "--allow-empty", "-m", "init"]] {
+            git(&d, a).unwrap();
+        }
+        assert!(d.join(".git/reftable").exists());
+        Some(d)
+    }
+
+    #[test]
+    fn the_branch_is_right_in_a_reftable_repository() {
+        let Some(d) = reftable_repo() else { return };
+        assert_eq!(std::fs::read_to_string(d.join(".git/HEAD")).unwrap().trim(), "ref: refs/heads/.invalid", "what the file says there");
+        assert_eq!(branch(&d).as_deref(), Some("main"));
+        assert_eq!(crate::teamview::branch(&d), "main");
+        // a linked checkout: its HEAD says the same, in its own git dir
+        let other = d.with_extension("linked");
+        git(&d, &["worktree", "add", "-q", "-b", "side", &other.to_string_lossy()]).unwrap();
+        assert_eq!(branch(&other).as_deref(), Some("side"));
+        assert_eq!(crate::teamview::branch(&other), "side");
+        let _ = std::fs::remove_dir_all(&other);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn no_branch_in_a_reftable_repository_is_no_name_at_all() {
+        let Some(d) = reftable_repo() else { return };
+        git(&d, &["checkout", "-q", "--detach"]).unwrap();
+        assert_eq!(branch(&d), None, "never \".invalid\"");
+        assert_eq!(crate::teamview::branch(&d), "");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn asking_git_for_the_branch_is_not_done_on_every_frame() {
+        let Some(d) = reftable_repo() else { return };
+        assert_eq!(branch(&d).as_deref(), Some("main"));
+        git(&d, &["checkout", "-q", "-b", "later"]).unwrap();
+        assert_eq!(branch(&d).as_deref(), Some("main"), "a few seconds out of date is fine for showing it");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

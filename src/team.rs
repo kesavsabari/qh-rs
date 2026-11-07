@@ -6253,7 +6253,8 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
         let (mark, inner) = (base.join("mark"), base.join("inner.cmd"));
-        std::fs::write(&inner, format!("ping -n 4 127.0.0.1 >NUL\r\necho x> \"{}\"\r\n", mark.display())).unwrap();
+        // by full path: PATH may hold a ping without -n (BusyBox), which ends at once
+        std::fs::write(&inner, format!("\"%SystemRoot%\\System32\\ping.exe\" -n 4 127.0.0.1 >NUL\r\necho x> \"{}\"\r\n", mark.display())).unwrap();
         let mut c = Command::new("cmd");
         c.args(["/C", "cmd", "/C"]).arg(&inner);
         let t0 = Instant::now();

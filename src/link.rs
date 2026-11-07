@@ -2194,9 +2194,13 @@ mod tests {
 
     /// A relay server on localhost taking UDP and TCP (on the same port number) for `secs`.
     fn relay_server_tcp(secret: Option<[u8; 32]>, secs: u64) -> u16 {
-        let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = tcp.local_addr().unwrap().port();
-        let sock = UdpSocket::bind(("127.0.0.1", port)).unwrap();
+        // the port free for TCP can be taken or reserved for UDP (Windows answers 10013): try another
+        let (tcp, port, sock) = (0..50).find_map(|_| {
+            let tcp = std::net::TcpListener::bind("127.0.0.1:0").ok()?;
+            let port = tcp.local_addr().ok()?.port();
+            let sock = UdpSocket::bind(("127.0.0.1", port)).ok()?;
+            Some((tcp, port, sock))
+        }).expect("a port free for both TCP and UDP");
         sock.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
         std::thread::spawn(move || crate::relay::serve_with(&sock, Some(tcp), secret, Some(Instant::now() + Duration::from_secs(secs))));
         port

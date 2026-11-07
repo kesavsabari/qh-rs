@@ -2073,10 +2073,63 @@ mod tests {
         b.stop();
     }
 
+    /// A middlebox between two links: all of `a`'s packets reach `b`, and `b`'s hellos reach `a`,
+    /// but `b`'s data (its acks) is held back until `open` is set. Both sides are told the
+    /// middlebox is the other one, so that is the only path.
+    fn hold_acks(a: &Link, b: &Link) -> (SocketAddr, Arc<AtomicBool>, Arc<AtomicBool>) {
+        let mbox = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        mbox.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
+        let at = mbox.local_addr().unwrap();
+        let (a_at, b_at) = (
+            SocketAddr::from((Ipv4Addr::LOCALHOST, a.port())),
+            SocketAddr::from((Ipv4Addr::LOCALHOST, b.port())),
+        );
+        let open = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (o, s) = (open.clone(), stop.clone());
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 2048];
+            while !s.load(Ordering::Relaxed) {
+                let Ok((n, from)) = mbox.recv_from(&mut buf) else { continue };
+                let to = if from == a_at {
+                    b_at
+                } else if from == b_at {
+                    if buf[0] == DATA && !o.load(Ordering::Relaxed) {
+                        continue; // held back: acks arrive as data
+                    }
+                    a_at
+                } else {
+                    continue;
+                };
+                let _ = mbox.send_to(&buf[..n], to);
+            }
+        });
+        (at, open, stop)
+    }
+
+    /// A link publishes its addresses once, from its discover thread (and again only after a move
+    /// or a minute). Take them away first, so a middlebox is the only way to reach it.
+    fn hide_addrs(l: &Link) {
+        let end = Instant::now() + Duration::from_secs(2);
+        while lock(&l.inner).mine.is_empty() && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        lock(&l.inner).mine.clear();
+    }
+
     #[test]
     fn a_big_message_streams_and_a_small_one_isnt_stuck_behind_it() {
         let ((a, ra), (b, rb)) = (node(), node());
-        meet(&a, &b);
+        hide_addrs(&a);
+        hide_addrs(&b);
+        // Meet at a middlebox that holds b's acks back: the big message can then only ever have its
+        // window in flight, so it cannot finish while we watch. Without that, a loopback fast enough
+        // to deliver all 3 MB before the small one's first retry (a UDP packet can be dropped, and
+        // its next try is 300 ms off) decides the test, not the code.
+        let (at, acks, stop) = hold_acks(&a, &b);
+        let card = format!("lan={at}");
+        a.peer(&b.me(), &[card.clone()], 0);
+        b.peer(&a.me(), &[card], 0);
         wait(&ra, 5, |e| matches!(e, Event::Up { .. })).expect("line comes up");
         let big: Vec<u8> = (0..3_000_000u32).map(|i| (i % 253) as u8).collect();
         let id = a.send(&b.me(), &big).unwrap();
@@ -2084,6 +2137,10 @@ mod tests {
         // the small one arrives first: it has its own window
         let first = wait(&rb, 10, |e| matches!(e, Event::Msg { .. })).expect("a message arrives");
         assert_eq!(first, Event::Msg { from: a.me(), data: b"meanwhile".to_vec() });
+        // and it went out while nearly all of the big one was still queued, not after it
+        let queued = lock(&a.inner).peers[0].out.iter().filter(|o| o.id == id && !o.sent).count();
+        assert!(queued > big.len() / PART / 2, "the big one was already sent: {queued} parts still queued");
+        acks.store(true, Ordering::Relaxed); // acks flow: the rest of the big one streams now
         let got = wait(&rb, 60, |e| matches!(e, Event::Msg { .. })).expect("the big one arrives");
         assert_eq!(got, Event::Msg { from: a.me(), data: big });
         let mut done = vec![];
@@ -2096,6 +2153,7 @@ mod tests {
         done.sort();
         assert_eq!(done, vec![id.min(small), id.max(small)]);
         assert!(a.send(&b.me(), &vec![0u8; MAX_MSG + 1]).is_none(), "past the cap: the caller uses git");
+        stop.store(true, Ordering::Relaxed);
         a.stop();
         b.stop();
     }

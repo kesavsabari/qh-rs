@@ -110,7 +110,10 @@ fn verify(hub: &Arc<Hub>, m: &Arc<Member>) {
     let Some(cmd) = verify_cmd(&hub.cfg.verify, &cwd) else { return };
     let start = std::time::Instant::now();
     let script = format!("{cmd} 2>&1");
-    let (ok, out) = match crate::sandbox::run(&hub.sandbox_ctx(m), &hub.cfg, &script, false, 120, &cwd) {
+    // the project's check is not a tab command: it runs to completion even after Esc or a close
+    let mut ctx = hub.sandbox_ctx(m);
+    ctx.stop = None;
+    let (ok, out) = match crate::sandbox::run(&ctx, &hub.cfg, &script, false, 120, &cwd) {
         Ok((o, killed, _)) => {
             let mut s = String::from_utf8_lossy(&o.stdout).to_string();
             s.push_str(&String::from_utf8_lossy(&o.stderr));
@@ -463,7 +466,7 @@ fn fetch(hub: &Arc<Hub>, m: &Arc<Member>, goal: &str) -> String {
             } else if let Some(why) = crate::sandbox::guard(&name, &args, &cwd, &m.root, &hub.cfg) {
                 format!("error: not here: it {why}")
             } else {
-                tools::call(&name, &args, &hub.cfg, &mut cwd, &hub.limits(m), &crate::sandbox::Ctx { root: m.root.clone(), proxy: None, tab: m.name.clone() })
+                tools::call(&name, &args, &hub.cfg, &mut cwd, &hub.limits(m), &crate::sandbox::Ctx { root: m.root.clone(), proxy: None, tab: m.name.clone(), stop: None })
             };
             // no notices here: the UI pins this result to the fetch line, and a note in between would unpin it
             if !out.starts_with("error") {
@@ -541,7 +544,7 @@ Saying what the code does today is 'PROMISE: no'.")}));
             let out = if let Some(why) = guarded {
                 format!("error: not here: it {why}")
             } else if schemas.iter().any(|s| s["function"]["name"] == name.as_str()) && read_only(hub, &name, &args) {
-                tools::call(&name, &args, &hub.cfg, &mut cwd, &hub.limits(m), &crate::sandbox::Ctx { root: m.root.clone(), proxy: None, tab: m.name.clone() })
+                tools::call(&name, &args, &hub.cfg, &mut cwd, &hub.limits(m), &crate::sandbox::Ctx { root: m.root.clone(), proxy: None, tab: m.name.clone(), stop: None })
             } else {
                 format!("error: {name} isn't available here: read_file, grep and find_references only")
             };
@@ -1108,7 +1111,7 @@ relevant files first, then call ask_model again with the code, error or plan pas
         (users.len().saturating_sub(1), users.last().and_then(|x| x["content"].as_str()).unwrap_or("").to_string())
     };
     lock(&m.turn).ckpt.snapshot(name, &args, &cwd, turn, &prompt);
-    let sb = if name == "bash" { hub.sandbox_ctx(m) } else { crate::sandbox::Ctx { root: m.root.clone(), proxy: None, tab: m.name.clone() } };
+    let sb = if name == "bash" { hub.sandbox_ctx(m) } else { crate::sandbox::Ctx { root: m.root.clone(), proxy: None, tab: m.name.clone(), stop: None } };
     // `/allow localhost:3000`: addresses the user let this session's browser open
     let browse: Vec<String> = if crate::browser::TOOLS.contains(&name) {
         lock(&m.set).allow.iter().filter_map(|r| r.strip_prefix("browse:")).map(String::from).collect()

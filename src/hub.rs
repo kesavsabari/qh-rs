@@ -124,7 +124,7 @@ pub struct Member {
     pub turn: Mutex<Turn>,
     pub status: Mutex<&'static str>,
     pub ctl: Mutex<Ctl>,
-    pub cancel: AtomicBool,
+    pub cancel: Arc<AtomicBool>,
     pub thinking: AtomicBool, // the model is streaming its reasoning right now
     chars: AtomicUsize, // size of msgs, refreshed on every change so the UI never re-measures
 }
@@ -158,7 +158,8 @@ impl Member {
 
     /// The sandbox context as it stands, without starting the proxy (for /sandbox).
     pub fn sandbox_now(&self) -> crate::sandbox::Ctx {
-        crate::sandbox::Ctx { root: self.root.clone(), proxy: self.proxy.get().cloned().flatten(), tab: self.name.clone() }
+        crate::sandbox::Ctx { root: self.root.clone(), proxy: self.proxy.get().cloned().flatten(), tab: self.name.clone(),
+                              stop: Some(self.cancel.clone()) }
     }
 
     pub fn status(&self) -> &'static str {
@@ -414,7 +415,7 @@ session tests). Messages from other sessions start with [from <name>]. qh saves 
             turn: Mutex::new(new_turn(&path)),
             status: Mutex::new("idle"),
             ctl: Mutex::new(Ctl::default()),
-            cancel: AtomicBool::new(false),
+            cancel: Arc::new(AtomicBool::new(false)),
             thinking: AtomicBool::new(false),
             chars: AtomicUsize::new(0),
             named: AtomicBool::new(false),
@@ -786,7 +787,7 @@ session tests). Messages from other sessions start with [from <name>]. qh saves 
                 Err(_) => None, // no proxy: commands get no network
             }
         });
-        crate::sandbox::Ctx { root: m.root.clone(), proxy: proxy.clone(), tab: m.name.clone() }
+        crate::sandbox::Ctx { root: m.root.clone(), proxy: proxy.clone(), tab: m.name.clone(), stop: Some(m.cancel.clone()) }
     }
 
     /// (window, compact-at) for a session. A local model gets the configured window (what fits
@@ -1024,10 +1025,12 @@ Use tell_team (to=\"{login}\") to hand them work, or ask_team to ask them someth
                         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break Err("stopped without answering".to_string()),
                         Err(_) if me.cancel.load(Relaxed) => break Err("ask cancelled".to_string()),
                         Err(_) => {
-                            let busy = self.get(&to).is_some_and(|t| {
+                            // the target closed: its answer can never come, so stop waiting now
+                            let Some(t) = self.get(&to) else { break Err("stopped without answering".to_string()) };
+                            let busy = {
                                 let c = lock(&t.ctl);
                                 c.running || !c.inbox.is_empty()
-                            });
+                            };
                             idle = if busy { 0 } else { idle + 1 };
                             if idle >= ASK_TIMEOUT {
                                 break Err(format!("sat idle {ASK_TIMEOUT}s without answering"));
@@ -1321,6 +1324,166 @@ pub(crate) mod tests {
         assert!(is_work("build a rust web app with axum and tests"));
         assert!(!is_work("who are the current attendees in this call"));
         assert!(!is_work("hi there"));
+    }
+
+    /// A tab's foreground command must end with the tab: its whole process group is killed, so a
+    /// child cannot go on writing files after the close.
+    #[cfg(unix)]
+    #[test]
+    fn a_closed_tab_stops_its_foreground_command_and_its_children() {
+        let _env = lock(&ENV);
+        let root = std::env::temp_dir().join(format!("qh-stop-fg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::env::set_var("QH_STATE_DIR", root.join("state"));
+        let mut cfg = crate::config::load();
+        cfg.sandbox = false; // run_timeout's stop path, without the OS sandbox in the way
+        let hub = Hub::new(cfg, Some("stop-fg".into()), Box::new(|_, _| {}), false);
+        let beta = hub.add("beta", None, "", "", None, false, Some(root.clone())).unwrap();
+        let sb = hub.sandbox_ctx(&beta);
+        let cfg = hub.cfg.clone();
+        let marker = root.join("child-survived");
+        let dir = root.clone();
+        let (tx, rx) = channel();
+        let run = std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let mut cwd = dir;
+            let out = crate::tools::call("bash", &json!({"cmd": "(sleep 2; : > child-survived) & sleep 8"}),
+                                         &cfg, &mut cwd, &crate::tier::Limits::for_ctx(32768), &sb);
+            let _ = tx.send((out, started.elapsed()));
+        });
+        std::thread::sleep(Duration::from_millis(400));
+        hub.close("beta");
+        match rx.recv_timeout(Duration::from_secs(2)) {
+            Ok((out, took)) => {
+                assert!(took < Duration::from_secs(2), "the command ended, but not promptly: {took:?}\n{out}");
+                std::thread::sleep(Duration::from_millis(2200));
+                assert!(!marker.exists(), "a child of the closed tab's command survived and wrote the marker\n{out}");
+            }
+            Err(_) => {
+                run.join().expect("the command thread panicked");
+                let (out, took) = rx.recv_timeout(Duration::from_secs(30)).expect("the command never returned");
+                std::thread::sleep(Duration::from_millis(2200));
+                panic!("the command kept running after its tab closed: it returned after {took:?}; \
+marker exists: {}; output: {out}", marker.exists());
+            }
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Escape stops the model call and, with the same flag, a running foreground command.
+    #[cfg(unix)]
+    #[test]
+    fn esc_stops_a_running_foreground_command() {
+        let _env = lock(&ENV);
+        let root = std::env::temp_dir().join(format!("qh-stop-esc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::env::set_var("QH_STATE_DIR", root.join("state"));
+        let mut cfg = crate::config::load();
+        cfg.sandbox = false;
+        let hub = Hub::new(cfg, Some("stop-esc".into()), Box::new(|_, _| {}), false);
+        let beta = hub.add("beta", None, "", "", None, false, Some(root.clone())).unwrap();
+        let sb = hub.sandbox_ctx(&beta);
+        let cfg = hub.cfg.clone();
+        let marker = root.join("esc-child");
+        let dir = root.clone();
+        let (tx, rx) = channel();
+        let run = std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let mut cwd = dir;
+            let out = crate::tools::call("bash", &json!({"cmd": "(sleep 2; : > esc-child) & sleep 8"}),
+                                         &cfg, &mut cwd, &crate::tier::Limits::for_ctx(32768), &sb);
+            let _ = tx.send((out, started.elapsed()));
+        });
+        std::thread::sleep(Duration::from_millis(400));
+        assert!(!beta.cancel.load(Relaxed), "the flag should be clear before Esc");
+        hub.interrupt("beta");
+        assert!(beta.cancel.load(Relaxed), "Esc sets the stop flag");
+        match rx.recv_timeout(Duration::from_secs(2)) {
+            Ok((out, took)) => {
+                assert!(took < Duration::from_secs(2), "Esc did not stop the command promptly: {took:?}\n{out}");
+                std::thread::sleep(Duration::from_millis(2200));
+                assert!(!marker.exists(), "a child of the interrupted command survived and wrote the marker\n{out}");
+            }
+            Err(_) => {
+                run.join().expect("the command thread panicked");
+                let (out, took) = rx.recv_timeout(Duration::from_secs(30)).expect("the command never returned");
+                std::thread::sleep(Duration::from_millis(2200));
+                panic!("Esc did not stop the foreground command: it returned after {took:?}; \
+marker exists: {}; output: {out}", marker.exists());
+            }
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Closing the tab an ask is waiting on must fail that ask right away, not when the target's
+    /// running command happens to end (or the 180 s idle timeout).
+    #[test]
+    fn an_ask_to_a_closed_tab_returns_an_error_within_two_seconds() {
+        let _env = lock(&ENV);
+        let root = std::env::temp_dir().join(format!("qh-stop-ask-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::env::set_var("QH_STATE_DIR", root.join("state"));
+        let hub = Hub::new(crate::config::load(), Some("stop-ask".into()), Box::new(|_, _| {}), false);
+        let main = hub.add("main", None, "", "", None, false, Some(root.clone())).unwrap();
+        let beta = hub.add("beta", None, "", "", None, false, Some(root.clone())).unwrap();
+        // beta is busy: the ask queues and no model turn starts (this test has no model)
+        lock(&beta.ctl).running = true;
+        let (tx, rx) = channel();
+        let (h, me) = (hub.clone(), main.clone());
+        let waiting = std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let out = h.tool(&me, "ask", &json!({"to": "beta", "question": "what is 2+2?"}));
+            let _ = tx.send((out, started.elapsed()));
+        });
+        let end = std::time::Instant::now() + Duration::from_secs(2);
+        while lock(&beta.ctl).inbox.is_empty() && std::time::Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!lock(&beta.ctl).inbox.is_empty(), "the ask never reached beta");
+        let closed = std::time::Instant::now();
+        hub.close("beta");
+        match rx.recv_timeout(Duration::from_secs(2)) {
+            Ok((out, took)) => {
+                assert!(closed.elapsed() < Duration::from_secs(2), "the ask returned late: {:?} after the close", closed.elapsed());
+                assert!(out.starts_with("error: beta stopped without answering"), "expected a clear error, got: {out}");
+                assert!(took < Duration::from_secs(2), "the ask took {took:?}");
+            }
+            Err(_) => {
+                hub.interrupt("main"); // let the old loop go, so the test can report its real result
+                waiting.join().expect("the ask thread panicked");
+                let (out, took) = rx.recv_timeout(Duration::from_secs(10)).expect("the ask never returned");
+                panic!("the ask kept waiting after beta closed (only returned after {took:?}): {out}");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// hub.rs `next()` clears the stop flag before a turn starts, so a stale Esc/close cannot kill
+    /// the next command.
+    #[test]
+    fn the_next_turn_clears_a_stale_stop_flag() {
+        let _env = lock(&ENV);
+        let root = std::env::temp_dir().join(format!("qh-stop-stale-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::env::set_var("QH_STATE_DIR", root.join("state"));
+        let mut cfg = crate::config::load();
+        (cfg.host, cfg.model) = ("http://127.0.0.1:9".into(), "nothing-here".into()); // nobody listens
+        let hub = Hub::new(cfg, Some("stop-stale".into()), Box::new(|_, _| {}), false);
+        let a = hub.add("a", None, "", "", None, false, Some(root.clone())).unwrap();
+        a.cancel.store(true, Relaxed);
+        lock(&a.ctl).inbox.push_back(Msg { sender: "user".into(), text: "hi".into(), hops: 0, reply: None, report: false });
+        hub.next(&a);
+        assert!(!a.cancel.load(Relaxed), "a stale stop flag must be cleared before the next turn's command runs");
+        let end = std::time::Instant::now() + Duration::from_secs(10);
+        while a.status() != "idle" && std::time::Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(a.status(), "idle", "the test turn did not finish");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

@@ -477,7 +477,9 @@ fn bash(cwd: &mut PathBuf, a: &Value, cfg: &Config, sb: &crate::sandbox::Ctx) ->
     }
     let script = crate::platform::with_cwd_report(cmd, CWD_MARK);
     let (o, killed, ran) = crate::sandbox::run(sb, cfg, &script, outside, 120, cwd).map_err(|e| e.to_string())?;
-    let killed = if killed { "\n(killed after 120 s; run long or never-ending commands in the background)" } else { "" };
+    let stopped = killed && sb.stop.as_ref().is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed));
+    let killed = if stopped { "\n(stopped: the tab was closed or the turn interrupted)" }
+        else if killed { "\n(killed after 120 s; run long or never-ending commands in the background)" } else { "" };
     let mut out = String::from_utf8_lossy(&o.stdout).to_string();
     let mut moved = String::new();
     if let Some(i) = out.rfind(CWD_MARK) {

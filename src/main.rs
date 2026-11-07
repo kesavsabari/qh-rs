@@ -505,7 +505,7 @@ fn tool_once(args: &[String]) -> i32 {
             proxy = Some(p);
         }
         let px = proxy.clone().flatten();
-        let sb = sandbox::Ctx { root: cwd.clone(), proxy: px, tab: tab.clone() };
+        let sb = sandbox::Ctx { root: cwd.clone(), proxy: px, tab: tab.clone(), stop: None };
         println!("{}", tools::call(name, a, &cfg, &mut cwd, &tier::Limits::for_ctx(32768), &sb));
     }
     bg::kill_all();

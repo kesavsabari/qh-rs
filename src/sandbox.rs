@@ -7,7 +7,8 @@ use crate::config::Config;
 use regex::Regex;
 use serde_json::Value;
 use std::path::{Component, Path, PathBuf};
-use std::sync::LazyLock;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, LazyLock};
 
 /// What a sandboxed command may touch. All paths are absolute and canonical (symlinks resolved).
 #[derive(Clone, Debug, Default)]
@@ -417,6 +418,8 @@ pub struct Ctx {
     pub proxy: Option<(u16, Option<PathBuf>)>,
     /// the tab the command runs for: background tasks belong to it
     pub tab: String,
+    /// the tab's stop flag (Esc, or its tab closed): a running command is killed when it is set
+    pub stop: Option<Arc<AtomicBool>>,
 }
 
 /// How a command was run.
@@ -498,13 +501,14 @@ pub fn run(ctx: &Ctx, cfg: &Config, script: &str, outside: bool, secs: u64, cwd:
            -> std::io::Result<(std::process::Output, bool, Ran)> {
     let (prog, args) = crate::platform::shell_argv(script);
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let stop = ctx.stop.as_deref();
     let plain = |ran: Ran| -> std::io::Result<(std::process::Output, bool, Ran)> {
         let mut c = std::process::Command::new(&prog);
         c.args(&args);
         for k in scrubbed(cfg) {
             c.env_remove(k);
         }
-        let (o, k) = crate::platform::run_timeout(c, None, secs, cwd)?;
+        let (o, k) = crate::platform::run_timeout(c, None, secs, cwd, stop)?;
         Ok((o, k, ran))
     };
     if !enabled(cfg) || outside {
@@ -519,7 +523,7 @@ pub fn run(ctx: &Ctx, cfg: &Config, script: &str, outside: bool, secs: u64, cwd:
         env = proxy_env(port);
     }
     let snap = Snapshot::take(&ctx.root);
-    let r = command_os(&p, ctx, cfg, &prog, &args, &env).and_then(|c| crate::platform::run_timeout(c, None, secs, cwd));
+    let r = command_os(&p, ctx, cfg, &prog, &args, &env).and_then(|c| crate::platform::run_timeout(c, None, secs, cwd, stop));
     let fixed = snap.restore();
     let (mut o, killed) = r?;
     if !fixed.is_empty() {
@@ -867,6 +871,45 @@ mod tests {
         let fixed = s.restore();
         match was { Some(v) => std::env::set_var("QH_STATE_DIR", v), None => std::env::remove_var("QH_STATE_DIR") }
         assert!(!root.join(".envrc").exists() && !root.join(".git/hooks/pre-commit").exists(), "put back: {fixed:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A stopped command (Esc, or its tab closed) must still get protected files put back: `run`
+    /// restores the snapshot before it hands the result back, so the stop path can't skip it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_stopped_sandboxed_command_still_restores_protected_files() {
+        if let Some(why) = unavailable() {
+            eprintln!("NOT RUN: the OS sandbox is unavailable here: {why}");
+            return;
+        }
+        let root = canon(&std::env::temp_dir()).join(format!("qh-stop-snap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".git/hooks")).unwrap();
+        std::fs::write(root.join(".git/config"), "[core]\n\tbare = false\n").unwrap();
+        // the command reaches the protected file through a hard link that sits in the writable project
+        std::fs::hard_link(root.join(".git/config"), root.join("conf-link")).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let ctx = Ctx { root: root.clone(), proxy: None, tab: "snap-stop".into(), stop: Some(stop.clone()) };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let dir = root.clone();
+        let c = cfg();
+        std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let r = run(&ctx, &c, "printf '[core]\\n\\thooksPath = /tmp/h\\n' > conf-link; sleep 8", false, 120, &dir);
+            let _ = tx.send((r, started.elapsed()));
+        });
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let (r, took) = rx.recv_timeout(std::time::Duration::from_secs(3)).expect("the stopped command did not return");
+        let (o, killed, ran) = r.expect("a stopped command is not an error");
+        let err = String::from_utf8_lossy(&o.stderr).to_string();
+        assert_eq!(ran, Ran::Sandboxed, "{err}");
+        assert!(killed, "the stop flag did not kill the command: {err}");
+        assert!(took < std::time::Duration::from_secs(2), "the stopped command took {took:?}");
+        assert_eq!(std::fs::read_to_string(root.join(".git/config")).unwrap(), "[core]\n\tbare = false\n",
+                   "the protected file was left changed; stderr: {err}");
+        assert!(err.contains("put back"), "the snapshot restore did not run; stderr: {err}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

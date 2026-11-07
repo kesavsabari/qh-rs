@@ -13,7 +13,7 @@ pub enum Outcome {
 }
 
 fn run(cmd: &str, input: &Value, cwd: &Path) -> Outcome {
-    let o = crate::platform::run_timeout(crate::platform::shell_cmd(cmd), Some(input.to_string().as_bytes()), 60, cwd);
+    let o = crate::platform::run_timeout(crate::platform::shell_cmd(cmd), Some(input.to_string().as_bytes()), 60, cwd, None);
     let o = match o {
         Ok((_, true)) => return Outcome::Pass(format!("[hook timed out after 60 s: {cmd}]")),
         Ok((o, false)) => o,

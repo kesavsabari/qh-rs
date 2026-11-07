@@ -3,6 +3,7 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::time::{Duration, Instant};
 
 pub fn home() -> PathBuf {
@@ -148,8 +149,8 @@ pub fn with_cwd_report_for(sh: Shell, script: &str, mark: &str) -> String {
     }
 }
 
-/// Run to completion or kill after `secs`; stdout/stderr are drained on threads so a chatty
-/// command can't deadlock on a full pipe.
+/// Run to completion, or kill after `secs` or as soon as `stop` is set; stdout/stderr are drained
+/// on threads so a chatty command can't deadlock on a full pipe.
 /// A command qh runs must never talk to the user's terminal: a prompt there (git asking for a
 /// username, ssh for a passphrase) would draw over qh and hang. A new session has no controlling
 /// terminal, so /dev/tty can't be opened and such tools fail with an error instead; it's also its
@@ -164,7 +165,8 @@ pub fn no_tty(cmd: &mut Command) {
     cmd.env("GIT_TERMINAL_PROMPT", "0").env("GCM_INTERACTIVE", "never").env("SSH_ASKPASS_REQUIRE", "never");
 }
 
-pub fn run_timeout(mut cmd: Command, stdin: Option<&[u8]>, secs: u64, cwd: &Path) -> std::io::Result<(Output, bool)> {
+pub fn run_timeout(mut cmd: Command, stdin: Option<&[u8]>, secs: u64, cwd: &Path, stop: Option<&AtomicBool>)
+                   -> std::io::Result<(Output, bool)> {
     no_tty(&mut cmd);
     let mut child = cmd.current_dir(cwd).stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
@@ -196,7 +198,7 @@ pub fn run_timeout(mut cmd: Command, stdin: Option<&[u8]>, secs: u64, cwd: &Path
         if let Some(s) = child.try_wait()? {
             break s;
         }
-        if t0.elapsed() > Duration::from_secs(secs) {
+        if stop.is_some_and(|f| f.load(Relaxed)) || t0.elapsed() > Duration::from_secs(secs) {
             #[cfg(unix)]
             let _ = Command::new("kill").args(["-9", &format!("-{}", child.id())]).status();
             #[cfg(windows)]
@@ -430,7 +432,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn commands_cant_reach_the_terminal_so_prompts_fail_instead_of_hanging() {
-        let (o, killed) = run_timeout(shell_cmd("read x < /dev/tty; echo rc=$?; echo $GIT_TERMINAL_PROMPT"), None, 5, &std::env::temp_dir()).unwrap();
+        let (o, killed) = run_timeout(shell_cmd("read x < /dev/tty; echo rc=$?; echo $GIT_TERMINAL_PROMPT"), None, 5, &std::env::temp_dir(), None).unwrap();
         let out = String::from_utf8_lossy(&o.stdout);
         assert!(!killed, "hung on the terminal");
         assert!(out.contains("rc=1") && out.contains('0'), "{out}");
@@ -470,7 +472,7 @@ mod tests {
     fn powershell_reports_its_folder() {
         let d = std::env::temp_dir();
         let script = with_cwd_report_for(Shell::PowerShell, "Set-Location ..; Write-Output hi", "MARK:");
-        let (o, _) = run_timeout(shell_cmd_for(Shell::PowerShell, &script), None, 60, &d).unwrap();
+        let (o, _) = run_timeout(shell_cmd_for(Shell::PowerShell, &script), None, 60, &d, None).unwrap();
         let out = String::from_utf8_lossy(&o.stdout);
         let dir = out.rsplit("MARK:").next().unwrap().trim();
         assert!(out.contains("hi") && o.status.success(), "{out}");
@@ -479,7 +481,7 @@ mod tests {
 
     #[test]
     fn timeout_kills_and_output_survives() {
-        let (o, killed) = run_timeout(shell_cmd("echo hi; sleep 5"), None, 1, &std::env::temp_dir()).unwrap();
+        let (o, killed) = run_timeout(shell_cmd("echo hi; sleep 5"), None, 1, &std::env::temp_dir(), None).unwrap();
         assert!(killed && String::from_utf8_lossy(&o.stdout).contains("hi"));
     }
 }

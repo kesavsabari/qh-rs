@@ -1120,6 +1120,18 @@ fn load_roles(repo: &str) -> HashMap<String, String> {
     serde_json::from_str(&std::fs::read_to_string(per_repo("team-roles", repo)).unwrap_or_default()).unwrap_or_default()
 }
 
+/// Drop a teammate's topics where they're kept: this process's copy when the team is open here,
+/// and the file an earlier run left, so a later trust can't bring them back.
+fn forget_topics(repo: &str, login: &str) {
+    with(repo, |s| { if s.flow.topics.remove(login).is_some() { s.dirty = true } });
+    let Ok(body) = std::fs::read_to_string(per_repo("team-requests", repo)) else { return };
+    let Ok(mut v) = serde_json::from_str::<Value>(&body) else { return };
+    let Some(topics) = v.get_mut("topics").and_then(Value::as_object_mut) else { return };
+    if topics.remove(login).is_none() { return }
+    if let Some(g) = SAVED.lock().unwrap().as_mut() { g.remove(repo); } // what it last wrote is older than this
+    save_json("team-requests", repo, &v);
+}
+
 /// Give `login` a role in `repo`; works whether or not team mode is on.
 pub fn set_role(repo: &str, login: &str, role: &str) -> Result<String, String> {
     if !ROLES.contains(&role) {
@@ -1133,9 +1145,9 @@ pub fn set_role(repo: &str, login: &str, role: &str) -> Result<String, String> {
     with(repo, |s| {
         s.roles = roles;
         s.dirty = true;
-        // topics narrow a trust: with the trust gone they mean nothing, and must not come back with the next one
-        if role != "trusted" { s.flow.topics.remove(login); }
     });
+    // topics narrow a trust: with the trust gone they mean nothing, and must not come back with the next one
+    if role != "trusted" { forget_topics(repo, login) }
     Ok(format!("{login} is now a {role} in your sessions: {}", role_help(role)))
 }
 
@@ -2054,6 +2066,7 @@ pub fn remove(repo: &str, login: &str) -> Result<String, String> {
         s.dirty = true;
         save_json("team-invites", &s.repo, &json!(s.invites));
     });
+    forget_topics(repo, login); // their trust ended with their access
     persist_membership(repo);
     forget_lines(repo, &[login.to_string()]);
     // and their access to the repo itself, or they could still read the code and write noise
@@ -3304,13 +3317,31 @@ pub fn topics(login: &str) -> Vec<String> {
 pub fn set_topic(login: &str, topic: &str, remove: bool) -> Result<String, String> {
     let t = topic.trim().to_lowercase();
     if t.is_empty() { return Err("no topic given".into()) }
-    cur(|s| {
-        let v = s.flow.topics.entry(login.to_string()).or_default();
-        v.retain(|x| *x != t);
-        if !remove { v.push(t.clone()) }
+    let did = cur(|s| {
+        if remove {
+            let (had, empty) = match s.flow.topics.get_mut(login) {
+                Some(v) => {
+                    let had = v.contains(&t);
+                    v.retain(|x| *x != t);
+                    (had, v.is_empty())
+                }
+                None => (false, false),
+            };
+            if !had { return false }
+            if empty { s.flow.topics.remove(login); } // an empty list is no list
+        } else {
+            let v = s.flow.topics.entry(login.to_string()).or_default();
+            v.retain(|x| *x != t);
+            v.push(t.clone());
+        }
         s.dirty = true;
-    }).ok_or("team mode is off")?;
-    Ok(if remove { format!("{login}: dropped topic {t}") } else { format!("{login}: your agent may promise them things about {t}") })
+        true
+    });
+    match did {
+        None => Err("team mode is off".into()),
+        Some(false) => Err(format!("{login} has no topic {t}")),
+        Some(true) => Ok(if remove { format!("{login}: dropped topic {t}") } else { format!("{login}: your agent may promise them things about {t}") }),
+    }
 }
 
 /// Our role for a teammate: viewer, member or trusted.
@@ -7195,6 +7226,75 @@ pub(crate) mod tests {
         assert!(tidy_store(&store, None));
         assert!(folder_commit(&store, &[("pub".to_string(), "c".to_string())], &msg, &idc).is_ok(), "tidying keeps what the next folder needs");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // second review, defect 2
+    #[test]
+    fn a_role_change_clears_topics_even_with_no_team_here() {
+        let repo = format!("req/cleartopics-{}", std::process::id());
+        // a copy from an earlier run: sam may promise refunds; this process has no team open for it
+        save_json("team-requests", &repo, &json!({"topics": {"sam": ["refunds"], "ravi": ["payouts"]}, "ts": 1}));
+        assert!(with(&repo, |_| ()).is_none(), "no state here");
+        set_role(&repo, "sam", "member").unwrap();
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(per_repo("team-requests", &repo)).unwrap()).unwrap();
+        assert!(v["topics"].get("sam").is_none(), "the copy on disk must not bring the trust's topics back: {v}");
+        assert!(v["topics"].get("ravi").is_some(), "someone else's topics stay: {v}");
+        // with the team open, both copies go
+        let mut st = state("alice");
+        st.repo = repo.clone();
+        st.flow.topics.insert("sam".into(), vec!["refunds".into()]);
+        STATES.lock().unwrap().get_or_insert_with(HashMap::new).insert(repo.clone(), st);
+        save_json("team-requests", &repo, &json!({"topics": {"sam": ["refunds"]}, "ts": 2}));
+        set_role(&repo, "sam", "viewer").unwrap();
+        assert!(with(&repo, |s| !s.flow.topics.contains_key("sam")).unwrap(), "in memory too");
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(per_repo("team-requests", &repo)).unwrap()).unwrap();
+        assert!(v["topics"].get("sam").is_none(), "and on disk: {v}");
+        STATES.lock().unwrap().as_mut().unwrap().remove(&repo);
+    }
+
+    // second review, defect 2
+    #[test]
+    fn removing_a_member_clears_their_topics() {
+        let Ok(_) = std::env::var("QH_TEST_BASE") else {
+            let base = std::env::temp_dir().join(format!("qh-remove-topics-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&base);
+            std::fs::create_dir_all(&base).unwrap();
+            rerun("removing_a_member_clears_their_topics", &[("QH_TEST_BASE", &base.to_string_lossy()), ("QH_STATE_DIR", &base.to_string_lossy()),
+                                                             ("QH_TEAM_ADMINS", "alice"), ("GH_TOKEN", "x")]);
+            let _ = std::fs::remove_dir_all(&base);
+            return;
+        };
+        let repo = "req/remove-topics";
+        let mut st = state("alice");
+        st.repo = repo.into();
+        st.approved = vec!["sam".into()];
+        st.flow.topics.insert("sam".into(), vec!["refunds".into()]);
+        STATES.lock().unwrap().get_or_insert_with(HashMap::new).insert(repo.to_string(), st);
+        save_json("team-requests", repo, &json!({"topics": {"sam": ["refunds"]}, "ts": 1}));
+        remove(repo, "sam").unwrap();
+        assert!(with(repo, |s| !s.flow.topics.contains_key("sam")).unwrap(), "topics go with their trust");
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(per_repo("team-requests", repo)).unwrap()).unwrap();
+        assert!(v["topics"].get("sam").is_none(), "and off the copy on disk: {v}");
+        STATES.lock().unwrap().as_mut().unwrap().remove(repo);
+    }
+
+    // second review, defect 3
+    #[test]
+    fn dropping_a_topic_that_isnt_there_says_so_and_leaves_no_entry() {
+        let repo = format!("req/topicdrop-{}", std::process::id());
+        let mut st = state("alice");
+        st.repo = repo.clone();
+        st.running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)); // else `cur` says team mode is off
+        STATES.lock().unwrap().get_or_insert_with(HashMap::new).insert(repo.clone(), st);
+        set_current(&repo);
+        let e = set_topic("sam", "refunds", true).unwrap_err();
+        assert!(e.contains("no topic"), "{e}");
+        assert!(with(&repo, |s| !s.flow.topics.contains_key("sam")).unwrap(), "no empty entry");
+        set_topic("sam", "refunds", false).unwrap();
+        set_topic("sam", "refunds", true).unwrap();
+        assert!(with(&repo, |s| !s.flow.topics.contains_key("sam")).unwrap(), "an empty list is no list");
+        STATES.lock().unwrap().as_mut().unwrap().remove(&repo);
+        set_current("");
     }
 
     /// Run one test again in a process of its own, with `env` set (tests run in parallel, so no set_var).

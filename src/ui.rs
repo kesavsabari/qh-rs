@@ -854,6 +854,11 @@ impl App {
             Ui::Term(TermEvent::Key(k)) if k.kind != KeyEventKind::Release => self.key(k),
             Ui::Term(TermEvent::Mouse(ev)) => self.mouse(ev),
             Ui::Term(TermEvent::Paste(s)) => {
+                // keys go to the room while it's open, and so does a paste: its open box, or nowhere
+                if let Some(tv) = self.team_view.as_mut() {
+                    tv.paste(&s);
+                    return;
+                }
                 let cwd = self.hub.get(&self.active).map(|m| m.cwd()).unwrap_or_default();
                 if self.secret.is_none() {
                     if let Some(p) = crate::image::path_in(&s, &cwd) {
@@ -3520,6 +3525,42 @@ mod tick_tests {
         ] {
             assert_eq!(tick_due(gen, seen, running, since), want, "{gen} {seen} {running} {since:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod paste_tests {
+    use super::*;
+
+    fn hub() -> Arc<Hub> {
+        Hub::new(crate::config::load_defaults(), Some(format!("paste-{}", std::process::id())), Box::new(|_, _| {}), true)
+    }
+
+    /// The room draws no prompt: a paste must not vanish into the buffer it no longer shows.
+    #[test]
+    fn a_paste_goes_to_the_room_not_the_hidden_prompt() {
+        let _env = crate::hub::tests::ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let mut app = App::blank(hub());
+        app.team_view = Some(crate::teamview::TeamView::default());
+        app.input = "keep".chars().collect();
+        app.cur = 4;
+        app.handle(Ui::Term(TermEvent::Paste("hello".into())));
+        assert_eq!(app.input.iter().collect::<String>(), "keep", "the prompt is hidden under the room, so a paste must not land in it");
+        assert_eq!(app.cur, 4);
+    }
+
+    /// The attachment picker asks about the prompt's next message, so it can't open over the room.
+    #[test]
+    fn a_pasted_image_path_opens_no_picker_under_the_room() {
+        let _env = crate::hub::tests::ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let shot = std::env::temp_dir().join(format!("qh-room-paste-{}.png", std::process::id()));
+        std::fs::write(&shot, b"\x89PNG").unwrap();
+        let mut app = App::blank(hub());
+        app.team_view = Some(crate::teamview::TeamView::default());
+        app.handle(Ui::Term(TermEvent::Paste(shot.to_string_lossy().to_string())));
+        assert!(app.picker.is_none(), "the picker belongs to the prompt that isn't drawn");
+        assert!(app.input.is_empty());
+        let _ = std::fs::remove_file(&shot);
     }
 }
 

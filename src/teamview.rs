@@ -430,6 +430,14 @@ impl TeamView {
         Self { tab, ..Self::default() }
     }
 
+    /// Text pasted while the room is open: into the box that's up, if there is one, else nowhere
+    /// (the prompt behind the room isn't drawn). True when it went somewhere.
+    pub(crate) fn paste(&mut self, text: &str) -> bool {
+        let Some((_, box_)) = self.typing.as_mut() else { return false };
+        box_.extend(text.chars().map(|c| if c == '\n' || c == '\r' { ' ' } else { c }));
+        true
+    }
+
     fn root(cwd: &Path) -> std::path::PathBuf {
         crate::team::github_repo_cached(cwd).map(|(r, _)| r).unwrap_or_else(|| cwd.to_path_buf())
     }
@@ -1710,6 +1718,15 @@ mod flow_screen_tests {
             assert_eq!(w.tab, ACTIVITY);
         }
         crate::team::tests::drop_demo(&repo);
+    }
+
+    #[test]
+    fn a_paste_lands_in_the_box_that_is_up() {
+        let mut v = TeamView { typing: Some((To::Topic("sam".into()), String::new())), ..TeamView::default() };
+        assert!(v.paste("refunds\nnow"));
+        assert_eq!(v.typing.as_ref().unwrap().1, "refunds now", "one line, like the prompt");
+        let mut v = TeamView::default();
+        assert!(!v.paste("nowhere to go"), "no box: dropped");
     }
 
     #[test]

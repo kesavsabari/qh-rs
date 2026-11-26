@@ -24,6 +24,12 @@ curl -fsSL kesavsabari.github.io/qh/sh | sh
 
 Open a **new** terminal afterwards so `qh` is on your PATH.
 
+The installers check the download against the release's signed manifest (`qh-release.json`):
+size and SHA-256 always, and the Ed25519 signature when OpenSSL 3 is available (most Linux
+distros; on macOS `brew install openssl@3`; on Windows the one Git for Windows ships). Without it
+they say the signature wasn't checked; set `QH_REQUIRE_SIGNATURE=1` to refuse instead. Anything
+that doesn't match: nothing is installed.
+
 **Updating.** qh looks for a new version once a day. When there is one, the bottom line says
 `Update available! Run: qh update`. `qh update` (or `/update` inside qh) installs it. It only
 installs releases signed with the qh release key, and never an older version. `qh --version`

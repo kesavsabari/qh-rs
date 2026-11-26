@@ -4,6 +4,10 @@ on:
     paths: ["linux/**", "linux-parts/**", ".github/workflows/linux-app.yml"]
   workflow_dispatch:
 
+# read-only token for every job; nothing here writes to the repo
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -13,7 +17,9 @@ jobs:
       - name: deps
         run: |
           pacman -Syu --noconfirm --needed base-devel git rust gtk4 libadwaita weston mesa ttf-dejavu inter-font
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: build qh-app
         run: cd linux && cargo build --release --locked
       - name: build qh
@@ -33,7 +39,7 @@ jobs:
             timeout 25 linux/target/release/qh-app /tmp/demo || true
           test -s /tmp/app.png
           cp /tmp/app.png app.png
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with: { name: linux-app-snapshot, path: app.png, retention-days: 7 }
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with: { name: qh-app-linux-x86_64.tar.gz, path: qh-app-linux-x86_64.tar.gz, retention-days: 7 }

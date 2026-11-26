@@ -7,6 +7,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+# read-only token for every job; nothing here writes to the repo
+permissions:
+  contents: read
+
 jobs:
   test:
     strategy:
@@ -23,9 +27,13 @@ jobs:
       QH_REQUIRE_SANDBOX: "1"
       QH_REALWORK: "1"
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable branch, 2026-11-23
+        with:
+          toolchain: stable
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with: { node-version: 22 }
       - name: pytest
         shell: bash

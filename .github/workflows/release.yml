@@ -4,8 +4,12 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
+# Nothing gets a write token by default. The build jobs run cargo (every dependency's build.rs and
+# the whole test suite), so they only ever hold a read token; the jobs that write (attest, publish)
+# check out nothing and run no repo code: they only take the binaries the build jobs uploaded.
+# Third-party actions are pinned by commit SHA (the comment says which release that is).
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -18,15 +22,20 @@ jobs:
           - { os: macos-latest,   target: x86_64-apple-darwin,      asset: qh-macos-x86_64 }
           - { os: windows-latest, target: x86_64-pc-windows-msvc,   asset: qh-windows-x86_64.exe }
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: tag matches Cargo.toml
         if: startsWith(github.ref, 'refs/tags/')
         shell: bash
         run: |
           grep -q "^version = \"${GITHUB_REF_NAME#v}\"" Cargo.toml || { echo "tag $GITHUB_REF_NAME but Cargo.toml says $(grep '^version' Cargo.toml)"; exit 1; }
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable branch, 2026-11-23
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
       - run: cargo test --release --target ${{ matrix.target }}
         if: matrix.target != 'x86_64-apple-darwin'  # cross-built on an arm runner; the arm job tests the same code
@@ -37,37 +46,34 @@ jobs:
           src=target/${{ matrix.target }}/release/qh
           [ -f "$src.exe" ] && src="$src.exe"
           cp "$src" "${{ matrix.asset }}"
-      # an untagged run (workflow_dispatch) is a test build: keep the binary as a run artifact
-      - uses: actions/upload-artifact@v4
-        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+          # in the log, to compare with the release and qh-release.json
+          if command -v sha256sum >/dev/null; then sha256sum "${{ matrix.asset }}"; else shasum -a 256 "${{ matrix.asset }}"; fi
+      # every run keeps the binary as a run artifact; a tagged run's publish job releases it
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ matrix.asset }}
           path: ${{ matrix.asset }}
           retention-days: 7
-      - uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
-        with:
-          files: ${{ matrix.asset }}
+          if-no-files-found: error
 
   # the Windows app beside the binaries (install-app.ps1 fetches it)
   windows-app:
     # off until the apps ship: set the repo variable RELEASE_APPS=true
     if: vars.RELEASE_APPS == 'true'
     runs-on: windows-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
         with: { dotnet-version: "8.0.x" }
       - run: dotnet publish windows/qh.csproj -c Release -p:Platform=x64 -r win-x64 --self-contained -o publish
       - shell: pwsh
         run: Compress-Archive -Path publish/* -DestinationPath qh-app-windows-x64.zip
-      - uses: actions/upload-artifact@v4
-        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
-        with: { name: qh-app-windows-x64.zip, path: qh-app-windows-x64.zip, retention-days: 7 }
-      - uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
-        with:
-          files: qh-app-windows-x64.zip
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with: { name: qh-app-windows-x64.zip, path: qh-app-windows-x64.zip, retention-days: 7, if-no-files-found: error }
 
   # the Linux app beside the binaries (install.sh --app fetches it)
   linux-app:
@@ -75,15 +81,57 @@ jobs:
     if: vars.RELEASE_APPS == 'true'
     runs-on: ubuntu-latest
     container: archlinux:latest
+    permissions:
+      contents: read
     steps:
       - run: pacman -Syu --noconfirm --needed base-devel git rust gtk4 libadwaita
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - run: cd linux && cargo build --release --locked
       - run: linux/packaging/make-tarball.sh linux/target/release/qh-app .
-      - uses: actions/upload-artifact@v4
-        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
-        with: { name: qh-app-linux-x86_64.tar.gz, path: qh-app-linux-x86_64.tar.gz, retention-days: 7 }
-      - uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with: { name: qh-app-linux-x86_64.tar.gz, path: qh-app-linux-x86_64.tar.gz, retention-days: 7, if-no-files-found: error }
+
+  # Build provenance (Sigstore, via GitHub attestations) for every file the release will carry:
+  # scripts/sign-release.sh checks it before signing. No checkout, no repo code.
+  attest:
+    needs: [build, windows-app, linux-app]
+    # the app jobs are skipped while RELEASE_APPS is off; that must not skip the release
+    if: >-
+      !cancelled() && startsWith(github.ref, 'refs/tags/') && needs.build.result == 'success'
+      && needs.windows-app.result != 'failure' && needs.linux-app.result != 'failure'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          files: qh-app-linux-x86_64.tar.gz
+          path: dist
+          merge-multiple: true
+      - run: ls -l dist && sha256sum dist/*
+      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: dist/*
+
+  # The only job with a write token: puts the built files on the tag's GitHub release.
+  publish:
+    needs: [attest]
+    if: ${{ !cancelled() && needs.attest.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          files: dist/*
+          fail_on_unmatched_files: true
+          # a draft until scripts/sign-release.sh has signed it and publishes it, so `releases/latest`
+          # (what the installers fetch) never points at an unsigned release
+          draft: true

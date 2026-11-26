@@ -5,14 +5,22 @@ on:
   workflow_dispatch:
 env:
   MODEL: qwen2.5:0.5b
+# read-only token for every job; nothing here writes to the repo
+permissions:
+  contents: read
+
 jobs:
   linux:
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable branch, 2026-11-23
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: curl -fsSL https://ollama.com/install.sh | sh
       - run: |
           (ollama serve > ollama.log 2>&1 &)
@@ -26,10 +34,14 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
         with: { dotnet-version: "8.0.x" }
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable branch, 2026-11-23
+        with:
+          toolchain: stable
       - shell: pwsh
         run: |
           # the installer starts the tray app and never returns: the plain zip instead
@@ -96,16 +108,20 @@ jobs:
           Get-ChildItem -Recurse C:\qhstate -ErrorAction SilentlyContinue | Select-Object -First 30 FullName
           Stop-Process $p -ErrorAction SilentlyContinue
       - if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with: { name: e2e-screenshots, path: shots/ }
   # the TUI itself in a real Windows console (ConPTY): keys, palette, modes, a sandboxed model turn
   windows-tui:
     runs-on: windows-latest
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable branch, 2026-11-23
+        with:
+          toolchain: stable
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with: { python-version: "3.12" }
       - shell: pwsh
         run: |
@@ -119,5 +135,5 @@ jobs:
       - run: pip install pyte pywinpty
       - run: python scripts/e2e_tui.py target/release/qh.exe ${{ env.MODEL }} tui-shots
       - if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with: { name: windows-tui-screens, path: tui-shots/ }

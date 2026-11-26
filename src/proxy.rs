@@ -281,7 +281,8 @@ fn mirror(c: &mut dyn Stream, m: MirrorReq, decide: &(dyn Fn(&str, u16) -> bool 
 
 /// The crates.io index config with `dl` pointed at the mirror on `local` (host:port).
 fn config_json(body: &str, local: &str) -> String {
-    let mut v: serde_json::Value = serde_json::from_str(body).unwrap_or_else(|_| serde_json::json!({}));
+    let mut v: serde_json::Value = serde_json::from_str(body).ok().filter(|v: &serde_json::Value| v.is_object())
+        .unwrap_or_else(|| serde_json::json!({}));
     v["dl"] = format!("http://{local}/qh-mirror/crates-dl").into();
     v.to_string()
 }

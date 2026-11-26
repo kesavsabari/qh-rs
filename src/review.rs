@@ -52,21 +52,29 @@ pub fn pattern_matches(pat: &str, path: &str) -> bool {
     false
 }
 
-/// `*` (not `/`), `?`, and `**` (anything, `/` included).
+/// `*` (not `/`), `?`, and `**` (anything, `/` included). Each (pattern, text) position is worked
+/// out once: a CODEOWNERS line comes from the repo, and `*a*a*a…` would otherwise take forever.
 fn glob(p: &str, s: &str) -> bool {
-    fn go(p: &[u8], s: &[u8]) -> bool {
-        match p.first() {
-            None => s.is_empty(),
-            Some(b'*') if p.get(1) == Some(&b'*') => {
-                let rest = p[2..].strip_prefix(b"/").unwrap_or(&p[2..]);
-                (0..=s.len()).any(|i| go(rest, &s[i..])) || (0..=s.len()).any(|i| go(&p[2..], &s[i..]))
-            }
-            Some(b'*') => (0..=s.len()).take_while(|&i| i == 0 || s[i - 1] != b'/').any(|i| go(&p[1..], &s[i..])),
-            Some(b'?') => !s.is_empty() && s[0] != b'/' && go(&p[1..], &s[1..]),
-            Some(c) => s.first() == Some(c) && go(&p[1..], &s[1..]),
+    fn go(p: &[u8], s: &[u8], i: usize, j: usize, memo: &mut [Option<bool>]) -> bool {
+        let w = s.len() + 1;
+        if let Some(v) = memo[i * w + j] {
+            return v;
         }
+        let v = match p.get(i) {
+            None => j == s.len(),
+            Some(b'*') if p.get(i + 1) == Some(&b'*') => {
+                let rest = if p.get(i + 2) == Some(&b'/') { i + 3 } else { i + 2 };
+                (j..=s.len()).any(|k| go(p, s, rest, k, memo)) || (j..=s.len()).any(|k| go(p, s, i + 2, k, memo))
+            }
+            Some(b'*') => (j..=s.len()).take_while(|&k| k == j || s[k - 1] != b'/').any(|k| go(p, s, i + 1, k, memo)),
+            Some(b'?') => j < s.len() && s[j] != b'/' && go(p, s, i + 1, j + 1, memo),
+            Some(c) => s.get(j) == Some(c) && go(p, s, i + 1, j + 1, memo),
+        };
+        memo[i * w + j] = Some(v);
+        v
     }
-    go(p.as_bytes(), s.as_bytes())
+    let (p, s) = (p.as_bytes(), s.as_bytes());
+    go(p, s, 0, 0, &mut vec![None; (p.len() + 1) * (s.len() + 1)])
 }
 
 /// The owners CODEOWNERS gives `path`: the last matching rule's. None when no rule matches.
@@ -343,7 +351,7 @@ const REVIEW_CAP: Duration = Duration::from_secs(300);
 // ---- the whole request ----
 
 fn git(root: &Path, args: &[&str]) -> Option<String> {
-    let o = std::process::Command::new("git").arg("-C").arg(root).args(args).output().ok()?;
+    let o = crate::sandbox::git().arg("-C").arg(root).args(args).output().ok()?;
     o.status.success().then(|| String::from_utf8_lossy(&o.stdout).to_string())
 }
 
@@ -395,11 +403,11 @@ pub fn request(session: &str, cwd: &Path) -> Result<(Vec<u64>, String), String> 
     let members: Vec<String> = crate::team::people().into_iter().map(|p| p.0).collect();
     if members.is_empty() { return Err("nobody else is in the team yet".into()) }
     let base = base(&root).ok_or("couldn't tell what this push is measured against (no upstream or origin/HEAD)")?;
-    let diff = git(&root, &["diff", "--no-color", "--no-ext-diff", "-U3", &base, "HEAD"]).unwrap_or_default();
+    let diff = git(&root, &["diff", "--no-color", "--no-ext-diff", "--no-textconv", "-U3", &base, "HEAD"]).unwrap_or_default();
     let hunks = parse_diff(&diff);
     if hunks.is_empty() { return Err("nothing to review: no committed changes since the base".into()) }
     let rules = load_codeowners(&root);
-    let blame = |f: &str| git(&root, &["blame", "--line-porcelain", &base, "--", f]).map(|t| parse_blame(&t)).unwrap_or_default();
+    let blame = |f: &str| git(&root, &["blame", "--no-textconv", "--line-porcelain", &base, "--", f]).map(|t| parse_blame(&t)).unwrap_or_default();
     let who = |name: &str, email: &str, sha: &str| member_of(name, email, &members)
         .or_else(|| github_author(&repo, sha, email).and_then(|l| members.iter().find(|m| m.eq_ignore_ascii_case(&l)).cloned()));
     let by = owners(&hunks, &rules, &blame, &who, &members, &me);
@@ -486,7 +494,7 @@ pub fn before_push(session: &str, cwd: &Path, cfg: &crate::config::Config, notic
     };
     let (root, repo) = crate::team::github_repo(cwd).unwrap_or_default();
     let diff = (!repo.is_empty()).then(|| base(&root)).flatten().and_then(|b| {
-        let mut a = vec!["diff", "--no-color", "--no-ext-diff", "-U1", b.as_str(), "HEAD", "--"];
+        let mut a = vec!["diff", "--no-color", "--no-ext-diff", "--no-textconv", "-U1", b.as_str(), "HEAD", "--"];
         a.extend(files.iter().map(|f| f.as_str()));
         git(&root, &a)
     }).map(|d| clip_diff(&d)).unwrap_or_default();
@@ -693,6 +701,15 @@ mod tests {
         let e = t0.elapsed();
         assert!(e >= Duration::from_millis(400) && e < Duration::from_secs(2), "{e:?}: held while they work, then went ahead");
         assert_eq!(collect(&[900_101]), vec![("bob/main".to_string(), None)]);
+    }
+
+    #[test]
+    fn a_hostile_codeowners_pattern_is_quick() {
+        let t = std::time::Instant::now();
+        assert!(!pattern_matches("*a*a*a*a*a*a*a*a*a*a*a*b", &"a".repeat(40)));
+        assert!(!pattern_matches("**a**a**a**a**a**a**b", &"a".repeat(40)));
+        assert!(!pattern_matches("**/a/**/a/**/a/**/a/**/a/**/b", &"a/".repeat(25)));
+        assert!(t.elapsed() < std::time::Duration::from_secs(2), "{:?}", t.elapsed());
     }
 
     #[test]

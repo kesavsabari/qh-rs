@@ -47,14 +47,19 @@ pub fn ask_msgs(question: &str, context: &str) -> Vec<Value> {
 /// out, and fails before the first commit), the agent's latest answer, and what its last turn read
 /// and ran. The reviewer has no tools: without these it can only say it can't tell (seen live).
 pub fn subject(cwd: &Path, msgs: &[Value]) -> String {
-    let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(cwd).args(args).output().ok()
+    let git = |args: &[&str]| crate::sandbox::git().env("GIT_CONFIG_NOSYSTEM", "1").arg("-C").arg(cwd).args(args)
+        .stdin(std::process::Stdio::null()).output().ok()
         .filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).to_string());
     let mut parts = vec![];
-    let diff = git(&["diff", "HEAD"]).or_else(|| git(&["diff"])).unwrap_or_default();
+    let plain = ["--no-ext-diff", "--no-textconv", "--ignore-submodules=dirty"];
+    let diff = crate::prompt::filters_safe(cwd).then(|| git(&[&["diff"], &plain[..], &["HEAD"]].concat()).or_else(|| git(&[&["diff"], &plain[..]].concat())))
+        .flatten().unwrap_or_default();
     if !diff.trim().is_empty() {
         parts.push(format!("The current diff:\n{}", clip(&diff, 16_000)));
     }
     let new: Vec<String> = git(&["ls-files", "--others", "--exclude-standard"]).unwrap_or_default().lines().take(8)
+        // not a link (to a key outside, say) or a secret: this goes to another model
+        .filter(|f| { let p = cwd.join(f); !p.is_symlink() && !crate::sandbox::secret(&crate::sandbox::canon(&p)) })
         .filter_map(|f| std::fs::read_to_string(cwd.join(f)).ok().map(|t| format!("New file {f}:\n{}", clip(&t, 4_000)))).collect();
     if !new.is_empty() {
         parts.push(new.join("\n\n"));
@@ -144,6 +149,42 @@ mod tests {
         let s = subject(&d, &msgs);
         assert!(s.contains("New file calc.py") && s.contains("return a - b"), "{s}");
         assert!(s.contains("No: it subtracts.") && s.contains("[read_file]"), "{s}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A command in the sandbox can write .git/config; /ask-other's diff runs outside it, so no
+    /// diff program the repo names may run (external diff, a diff driver, textconv).
+    #[cfg(unix)]
+    #[test]
+    fn ask_other_diff_runs_no_program_the_repo_names() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = std::env::temp_dir().join(format!("qh-subject-ext-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let run = |a: &[&str]| assert!(std::process::Command::new("git").arg("-C").arg(&d).args(a).output().unwrap().status.success(), "{a:?}");
+        run(&["init", "-q"]);
+        std::fs::write(d.join("a.txt"), "one\n").unwrap();
+        run(&["add", "."]);
+        run(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "x"]);
+        let mark = d.join("RAN");
+        let script = d.join("x.sh");
+        std::fs::write(&script, format!("#!/bin/sh\ntouch {}\n", mark.display())).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(d.join(".git/info/attributes"), "* diff=x\n").unwrap();
+        let cfg = d.join(".git/config");
+        let plain = std::fs::read_to_string(&cfg).unwrap();
+        std::fs::write(d.join("a.txt"), "two\n").unwrap();
+        for bad in [format!("[diff]\n\texternal = {}\n", script.display()), format!("[diff \"x\"]\n\tcommand = {}\n", script.display()),
+                    format!("[diff \"x\"]\n\ttextconv = {}\n", script.display()), format!("[core]\n\tpager = {}\n", script.display())] {
+            std::fs::write(&cfg, format!("{plain}{bad}")).unwrap();
+            let s = subject(&d, &[]);
+            assert!(!mark.exists(), "ran it: {bad}");
+            assert!(s.contains("-one") && s.contains("+two"), "{bad}: {s}");
+        }
+        std::fs::write(&cfg, plain).unwrap();
+        // a new file that is a link out of the project isn't read
+        std::os::unix::fs::symlink(&script, d.join("leak")).unwrap();
+        assert!(!subject(&d, &[]).contains("New file leak"));
         let _ = std::fs::remove_dir_all(&d);
     }
 

@@ -73,22 +73,17 @@ pub(crate) fn b64url_decode(s: &str) -> Vec<u8> {
     out
 }
 
-/// 32 unpredictable bytes without a rand crate: the OS's randomness where there is a file for
-/// it, else hashed clocks, addresses and the process id.
+/// 32 bytes from the operating system's CSPRNG (getrandom on Linux, BCryptGenRandom on Windows,
+/// via ring). Keys, nonces and secrets come from here, so if the OS can't give randomness the
+/// process stops rather than carry on with guessable bytes.
 pub(crate) fn random() -> [u8; 32] {
-    let mut seed = Vec::new();
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        let mut b = [0u8; 32];
-        if std::io::Read::read_exact(&mut f, &mut b).is_ok() { return b }
+    use ring::rand::SecureRandom;
+    let mut b = [0u8; 32];
+    if ring::rand::SystemRandom::new().fill(&mut b).is_err() {
+        eprintln!("qh: the operating system gave no randomness; stopping rather than use weak keys");
+        std::process::abort();
     }
-    for _ in 0..64 {
-        seed.extend_from_slice(&std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos().to_le_bytes());
-        seed.extend_from_slice(&(Instant::now().elapsed().as_nanos() as u64).to_le_bytes());
-        let probe = Box::new(0u8);
-        seed.extend_from_slice(&(&*probe as *const u8 as usize).to_le_bytes());
-    }
-    seed.extend_from_slice(&std::process::id().to_le_bytes());
-    sha256(&seed)
+    b
 }
 
 /// Run the login; returns an OpenRouter API key.
@@ -139,5 +134,17 @@ mod tests {
         assert_eq!(hex, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
         // RFC 7636 appendix B
         assert_eq!(b64url(&sha256(b"dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk")), "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM");
+    }
+
+    #[test]
+    fn random_is_fresh_every_call() {
+        let v: Vec<[u8; 32]> = (0..64).map(|_| random()).collect();
+        for (i, a) in v.iter().enumerate() {
+            assert_ne!(*a, [0u8; 32]);
+            assert!(v[i + 1..].iter().all(|b| b != a), "a repeat");
+        }
+        // roughly half the bits set over 64 * 256 bits: nothing stuck
+        let ones: u32 = v.iter().flatten().map(|b| b.count_ones()).sum();
+        assert!((7600..8800).contains(&ones), "{ones} of 16384 bits set");
     }
 }

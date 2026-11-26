@@ -36,12 +36,38 @@ impl Wt {
 }
 
 fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let o = Command::new("git").arg("-C").arg(dir).args(args).output().map_err(|e| format!("git: {e}"))?;
+    let o = crate::sandbox::git().arg("-C").arg(dir).args(args).stdin(std::process::Stdio::null()).output().map_err(|e| format!("git: {e}"))?;
     if o.status.success() {
         Ok(String::from_utf8_lossy(&o.stdout).trim_end().to_string())
     } else {
         let e = String::from_utf8_lossy(&o.stderr).trim().to_string();
         Err(if e.is_empty() { format!("git {} failed", args.join(" ")) } else { e })
+    }
+}
+
+/// None if the repo's own config (local or worktree scope, which a command in the sandbox can write)
+/// names a program that status, add, diff or merge would run outside the sandbox: a merge driver,
+/// a diff command or textconv, an external diff, or a filter other than git-lfs / git-crypt.
+/// Otherwise why not, fit to show. Your global config is yours and isn't judged.
+fn repo_programs(dir: &Path) -> Option<String> {
+    let Ok(out) = git(dir, &["config", "--show-scope", "--get-regexp",
+        r"^(merge\..*\.driver|diff\..*\.(command|textconv)|diff\.external|filter\..*\.(clean|smudge|process))$"]) else { return None };
+    let bad: Vec<String> = out.lines().filter_map(|l| {
+        let mut f = l.splitn(3, ['\t', ' ']);
+        let (scope, key, value) = (f.next().unwrap_or(""), f.next().unwrap_or(""), f.next().unwrap_or(""));
+        let v = value.trim_start().trim_start_matches('"');
+        let tool = key.starts_with("filter.") && (v.starts_with("git-lfs") || v.starts_with("git-crypt"));
+        (matches!(scope, "local" | "worktree") && !tool).then(|| key.to_string())
+    }).collect();
+    (!bad.is_empty()).then(|| format!("this repo's own git config names programs git would run outside the sandbox ({}); \
+check .git/config, remove them if you didn't add them, and try again", bad.join(", ")))
+}
+
+/// `repo_programs` for every checkout this touches.
+fn programs_ok(dirs: &[&Path]) -> Result<(), String> {
+    match dirs.iter().find_map(|d| repo_programs(d)) {
+        Some(why) => Err(why),
+        None => Ok(()),
     }
 }
 
@@ -121,7 +147,7 @@ fn branch_cached(dir: &Path, ask: fn(&Path) -> BranchAnswer) -> Option<String> {
 }
 
 fn ask_git_for_branch(dir: &Path) -> BranchAnswer {
-    let mut c = Command::new("git");
+    let mut c = crate::platform::git();
     c.arg("-C").arg(dir).args(["symbolic-ref", "--short", "HEAD"]);
     ask_bounded(c, std::time::Duration::from_secs(3))
 }
@@ -224,9 +250,10 @@ pub fn base(w: &Wt) -> String {
 /// What `/merge` would bring in: commits ahead, files changed (committed or not), untracked files.
 pub fn summary(w: &Wt) -> Result<String, String> {
     let base = base(w);
+    programs_ok(&[&w.path])?;
     let log = git(&w.path, &["log", "--oneline", &format!("{base}..HEAD")])?;
     // intent-to-add is not used: untracked files are listed separately so the index stays untouched
-    let stat = git(&w.path, &["diff", "--stat", &base])?;
+    let stat = git(&w.path, &["diff", "--no-ext-diff", "--no-textconv", "--stat", &base])?;
     let status = git(&w.path, &["status", "--porcelain"])?;
     let untracked: Vec<&str> = status.lines().filter_map(|l| l.strip_prefix("?? ")).collect();
     if log.is_empty() && stat.is_empty() && untracked.is_empty() {
@@ -252,12 +279,13 @@ pub fn merge(w: &Wt, msg: &str) -> Result<String, String> {
     if on != base {
         return Err(format!("the main checkout is on '{on}', not {base}; check out {base} there first"));
     }
+    programs_ok(&[&w.main, &w.path])?;
     let dirty = git(&w.main, &["status", "--porcelain"])?;
     if !dirty.is_empty() {
         return Err(format!("the main checkout has uncommitted changes; commit or stash them first:\n{dirty}"));
     }
     git(&w.path, &["add", "-A"])?;
-    if !git(&w.path, &["diff", "--cached", "--name-only"])?.is_empty() {
+    if !git(&w.path, &["diff", "--no-ext-diff", "--no-textconv", "--cached", "--name-only"])?.is_empty() {
         git(&w.path, &["commit", "-q", "-m", msg])?;
     }
     if git(&w.main, &["rev-list", "--count", &format!("{base}..{}", w.branch())])? == "0" {
@@ -278,8 +306,9 @@ pub fn merge(w: &Wt, msg: &str) -> Result<String, String> {
 
 /// Remove the worktree and its branch. Leftover edits are committed first so no --force is needed.
 pub fn discard(w: &Wt) -> Result<String, String> {
+    programs_ok(&[&w.path])?;
     git(&w.path, &["add", "-A"])?;
-    if !git(&w.path, &["diff", "--cached", "--name-only"])?.is_empty() {
+    if !git(&w.path, &["diff", "--no-ext-diff", "--no-textconv", "--cached", "--name-only"])?.is_empty() {
         git(&w.path, &["commit", "-q", "-m", &format!("qh: {} (discarded)", w.name)])?;
     }
     let sha = git(&w.path, &["rev-parse", "--short", "HEAD"])?;
@@ -441,6 +470,42 @@ mod tests {
         merge(&w, "qh: t1").unwrap();
         assert_eq!(std::fs::read_to_string(d.join("a.txt")).unwrap(), "two\n");
         assert!(d.join("b.txt").exists());
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// A command in the tab's sandbox can write the repo's config; /merge runs git outside it, so a
+    /// merge driver (or a diff program, or a filter) the repo names must never run.
+    #[cfg(unix)]
+    #[test]
+    fn merge_runs_no_driver_the_repo_names() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = repo();
+        let w = create(&d, "t4").unwrap();
+        let mark = d.join("RAN");
+        let script = d.join("x.sh");
+        std::fs::write(&script, format!("#!/bin/sh\ntouch {}\nexit 0\n", mark.display())).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(d.join(".git/info/attributes"), "* merge=x diff=x filter=x\n").unwrap();
+        // both sides change a.txt: a plain merge would hand it to the driver
+        std::fs::write(w.path.join("a.txt"), "theirs\n").unwrap();
+        std::fs::write(d.join("a.txt"), "ours\n").unwrap();
+        git(&d, &["commit", "-qam", "ours"]).unwrap();
+        let head = git(&d, &["rev-parse", "HEAD"]).unwrap();
+        let x = script.display();
+        for bad in [format!("merge.x.driver={x} %O %A %B"), format!("diff.x.command={x}"), format!("diff.x.textconv={x}"),
+                    format!("diff.external={x}"), format!("filter.x.clean={x}")] {
+            let (k, v) = bad.split_once('=').unwrap();
+            git(&d, &["config", k, v]).unwrap();
+            for e in [merge(&w, "x").unwrap_err(), summary(&w).unwrap_err(), discard(&w).unwrap_err()] {
+                assert!(e.contains("programs git would run"), "{bad}: {e}");
+            }
+            assert!(!mark.exists(), "ran it: {bad}");
+            assert_eq!(git(&d, &["rev-parse", "HEAD"]).unwrap(), head);
+            git(&d, &["config", "--unset", k]).unwrap();
+        }
+        // git-lfs is a filter real repos use: still fine
+        git(&d, &["config", "filter.lfs.clean", "git-lfs clean -- %f"]).unwrap();
+        assert!(summary(&w).is_ok());
         std::fs::remove_dir_all(&d).ok();
     }
 

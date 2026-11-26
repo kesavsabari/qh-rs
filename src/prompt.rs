@@ -125,15 +125,34 @@ pub fn instructions(cwd: &Path) -> Option<(String, String)> {
 }
 
 fn git(cwd: &Path, args: &[&str]) -> Option<String> {
-    std::process::Command::new("git").current_dir(cwd).args(args)
+    crate::platform::git().current_dir(cwd).args(args)
         .stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output().ok()
         .filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim_end().to_string())
+}
+
+/// No filter in this repo's own config would run a program of the repo's choosing when qh compares
+/// files. A command in the sandbox can write that config; git-lfs and git-crypt are what real
+/// repos use, and they come from the user's PATH.
+pub fn filters_safe(cwd: &Path) -> bool {
+    let Some(out) = git(cwd, &["config", "--show-scope", "--get-regexp", r"^filter\..*\.(clean|smudge|process)$"]) else { return true };
+    out.lines().all(|l| {
+        let mut f = l.splitn(3, |c: char| c == '\t' || c == ' ');
+        let (scope, _key, value) = (f.next().unwrap_or(""), f.next().unwrap_or(""), f.next().unwrap_or(""));
+        !matches!(scope, "local" | "worktree") || {
+            let v = value.trim_start().trim_start_matches('"');
+            v.starts_with("git-lfs") || v.starts_with("git-crypt")
+        }
+    })
 }
 
 /// "Git: branch work; 2 uncommitted: a.rs, b.rs." read now; None outside a repo.
 pub fn git_line(cwd: &Path) -> Option<String> {
     let branch = git(cwd, &["branch", "--show-current"])?;
-    let changed: Vec<String> = git(cwd, &["status", "--porcelain"]).unwrap_or_default().lines()
+    // `status` runs a repo's clean filters: a nested repo or a new one hasn't been checked
+    if !filters_safe(cwd) {
+        return Some(format!("Git: branch {}.", if branch.is_empty() { "(detached)" } else { &branch }));
+    }
+    let changed: Vec<String> = git(cwd, &["status", "--porcelain", "--ignore-submodules=dirty"]).unwrap_or_default().lines()
         .filter_map(|l| l.get(3..)).map(|p| p.trim_matches('"').to_string()).collect();
     let shown: Vec<&str> = changed.iter().take(8).map(String::as_str).collect();
     let changes = match changed.len() {
@@ -304,6 +323,30 @@ mod tests {
         let fresh = refresh_git(&sys, &d).unwrap();
         assert!(fresh.contains("Git: branch work; nothing uncommitted.\n") && fresh.ends_with("\ny"), "{fresh}");
         assert!(git_status(&d).unwrap().ends_with("No upstream."));
+        // a repo's own settings never run a program from qh's own git, which is outside the sandbox
+        let mark = d.join("RAN");
+        let script = d.join("x.sh");
+        std::fs::write(&script, format!("#!/bin/sh\ntouch {}\ncat\n", mark.display())).unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let cfg = d.join(".git/config");
+        let plain = std::fs::read_to_string(&cfg).unwrap();
+        std::fs::write(d.join(".gitattributes"), "* filter=x\n").unwrap();
+        let hooks = d.join("hk");
+        std::fs::create_dir_all(&hooks).unwrap();
+        std::fs::copy(&script, hooks.join("post-index-change")).unwrap();
+        for bad in [format!("[core] fsmonitor = {}\n", script.display()), "[core] hooksPath = hk\n".to_string(), format!("[filter \"x\"] clean = {}\n", script.display())] {
+            std::fs::write(&cfg, format!("{plain}{bad}")).unwrap();
+            std::fs::write(d.join("tracked-change"), "x").unwrap();
+            assert!(git_line(&d).is_some(), "{bad}");
+            let _ = crate::route::subject(&d, &[]);
+            assert!(!mark.exists(), "qh's own git ran it: {bad}");
+        }
+        std::fs::write(&cfg, format!("{plain}[filter \"x\"] clean = {}\n", script.display())).unwrap();
+        assert!(!filters_safe(&d));
+        std::fs::write(&cfg, format!("{plain}[filter \"lfs\"]\n\tclean = git-lfs clean -- %f\n")).unwrap();
+        assert!(filters_safe(&d));
+        std::fs::write(&cfg, plain).unwrap();
         let _ = std::fs::remove_dir_all(&d);
         assert_eq!(facts(&std::env::temp_dir().join("qh-no-such-dir")), "");
         // a bare folder of Python files with unittest tests

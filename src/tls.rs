@@ -6,21 +6,25 @@
 use std::io::Read;
 use std::net::TcpStream;
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::{ring::default_provider, CryptoProvider};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
 use rustls::{Connection, DigitallySignedStruct, SignatureScheme};
 
+/// How long a client gives the relay's TLS handshake, start to finish.
+const CONNECT_WITHIN: Duration = Duration::from_secs(15);
+
 /// One TCP connection carrying framed packets, plain or inside TLS. `send` may be called from any
-/// thread while one reader thread calls `recv`.
+/// thread while one reader thread calls `recv`. Both share one socket (one file descriptor).
 pub struct Wire {
-    w: Mutex<(TcpStream, Option<Connection>)>,
+    w: Mutex<(Arc<TcpStream>, Option<Connection>)>,
 }
 
 pub struct Reader {
     wire: Arc<Wire>,
-    r: TcpStream,
+    r: Arc<TcpStream>,
     plain: Vec<u8>,
 }
 
@@ -33,67 +37,115 @@ fn err(e: rustls::Error) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidData, e)
 }
 
-fn handshake(s: &mut TcpStream, mut c: Connection) -> std::io::Result<(Arc<Wire>, Reader)> {
-    while c.is_handshaking() {
-        c.complete_io(s)?;
-    }
-    split(s, Some(c))
+/// What is left until `deadline`, or a timeout error once it has passed.
+fn left(deadline: Instant) -> std::io::Result<Duration> {
+    deadline.checked_duration_since(Instant::now()).filter(|d| *d >= Duration::from_millis(1))
+        .ok_or_else(|| std::io::ErrorKind::TimedOut.into())
 }
 
-fn split(s: &TcpStream, c: Option<Connection>) -> std::io::Result<(Arc<Wire>, Reader)> {
-    let wire = Arc::new(Wire { w: Mutex::new((s.try_clone()?, c)) });
-    Ok((wire.clone(), Reader { wire, r: s.try_clone()?, plain: vec![] }))
+/// The handshake must finish by `deadline` as a whole, not just per read, so a peer that trickles
+/// a byte at a time can't hold the connection open. The socket's own timeouts are put back after.
+fn handshake(s: TcpStream, mut c: Connection, deadline: Instant) -> std::io::Result<(Arc<Wire>, Reader)> {
+    let (rt, wt) = (s.read_timeout()?, s.write_timeout()?);
+    let s = Arc::new(s);
+    let mut io = &*s;
+    while c.is_handshaking() || c.wants_write() {
+        let l = left(deadline)?;
+        s.set_read_timeout(Some(rt.map_or(l, |t| t.min(l))))?;
+        s.set_write_timeout(Some(wt.map_or(l, |t| t.min(l))))?;
+        if c.wants_write() {
+            c.write_tls(&mut io)?;
+            continue;
+        }
+        if c.read_tls(&mut io)? == 0 {
+            return Err(std::io::ErrorKind::UnexpectedEof.into());
+        }
+        if let Err(e) = c.process_new_packets() {
+            let _ = c.write_tls(&mut io); // the alert, if it goes
+            return Err(err(e));
+        }
+    }
+    s.set_read_timeout(rt)?;
+    s.set_write_timeout(wt)?;
+    // packets that came in with the last handshake read are already decrypted: keep them
+    let mut plain = vec![];
+    let mut buf = [0u8; 4096];
+    while let Ok(n @ 1..) = c.reader().read(&mut buf) {
+        plain.extend_from_slice(&buf[..n]);
+    }
+    Ok(split(s, Some(c), plain))
+}
+
+fn split(s: Arc<TcpStream>, c: Option<Connection>, plain: Vec<u8>) -> (Arc<Wire>, Reader) {
+    let wire = Arc::new(Wire { w: Mutex::new((s.clone(), c)) });
+    (wire.clone(), Reader { wire, r: s, plain })
 }
 
 /// The client end: TLS to the relay, any certificate taken.
-pub fn connect(mut s: TcpStream) -> std::io::Result<(Arc<Wire>, Reader)> {
+pub fn connect(s: TcpStream) -> std::io::Result<(Arc<Wire>, Reader)> {
     static CFG: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
-    let cfg = CFG.get_or_init(|| {
-        let mut c = rustls::ClientConfig::builder_with_provider(provider())
-            .with_safe_default_protocol_versions().expect("tls versions")
-            .dangerous().with_custom_certificate_verifier(Arc::new(AnyCert))
-            .with_no_client_auth();
-        c.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-        Arc::new(c)
-    });
+    let cfg = match CFG.get() {
+        Some(c) => c.clone(),
+        None => {
+            let mut c = rustls::ClientConfig::builder_with_provider(provider())
+                .with_safe_default_protocol_versions().map_err(err)?
+                .dangerous().with_custom_certificate_verifier(Arc::new(AnyCert))
+                .with_no_client_auth();
+            c.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+            CFG.get_or_init(|| Arc::new(c)).clone()
+        }
+    };
     let ip = s.peer_addr()?.ip();
-    let c = rustls::ClientConnection::new(cfg.clone(), ServerName::IpAddress(ip.into())).map_err(err)?;
-    handshake(&mut s, c.into())
+    let c = rustls::ClientConnection::new(cfg, ServerName::IpAddress(ip.into())).map_err(err)?;
+    handshake(s, c.into(), Instant::now() + CONNECT_WITHIN)
 }
 
-/// The relay end: TLS when the client opens with a TLS record, plain framing otherwise.
-pub fn accept(mut s: TcpStream) -> std::io::Result<(Arc<Wire>, Reader)> {
+/// The relay's TLS settings, made once (with a fresh certificate); an error rather than a panic if
+/// that can't be done, so one bad moment costs a connection, not the relay.
+fn server_config() -> std::io::Result<Arc<rustls::ServerConfig>> {
+    static CFG: OnceLock<Arc<rustls::ServerConfig>> = OnceLock::new();
+    if let Some(c) = CFG.get() {
+        return Ok(c.clone());
+    }
+    let (cert, key) = self_signed().ok_or_else(|| std::io::Error::other("can't make the relay certificate"))?;
+    let mut c = rustls::ServerConfig::builder_with_provider(provider())
+        .with_safe_default_protocol_versions().map_err(err)?
+        .with_no_client_auth()
+        .with_single_cert(vec![cert], PrivateKeyDer::Pkcs8(key)).map_err(err)?;
+    c.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    Ok(CFG.get_or_init(|| Arc::new(c)).clone())
+}
+
+/// The relay end: TLS when the client opens with a TLS record, plain framing otherwise. All of it
+/// (the first byte too) must be done by `deadline`.
+pub fn accept(s: TcpStream, deadline: Instant) -> std::io::Result<(Arc<Wire>, Reader)> {
+    let rt = s.read_timeout()?;
+    let l = left(deadline)?;
+    s.set_read_timeout(Some(rt.map_or(l, |t| t.min(l))))?;
     let mut b = [0u8; 1];
-    if s.peek(&mut b)? == 0 {
+    let n = s.peek(&mut b)?;
+    s.set_read_timeout(rt)?;
+    if n == 0 {
         return Err(std::io::ErrorKind::UnexpectedEof.into());
     }
     if b[0] != 0x16 {
-        return split(&s, None);
+        return Ok(split(Arc::new(s), None, vec![]));
     }
-    static CFG: OnceLock<Arc<rustls::ServerConfig>> = OnceLock::new();
-    let cfg = CFG.get_or_init(|| {
-        let (cert, key) = self_signed();
-        let mut c = rustls::ServerConfig::builder_with_provider(provider())
-            .with_safe_default_protocol_versions().expect("tls versions")
-            .with_no_client_auth()
-            .with_single_cert(vec![cert], PrivateKeyDer::Pkcs8(key)).expect("relay certificate");
-        c.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-        Arc::new(c)
-    });
-    let c = rustls::ServerConnection::new(cfg.clone()).map_err(err)?;
-    handshake(&mut s, c.into())
+    let c = rustls::ServerConnection::new(server_config()?).map_err(err)?;
+    handshake(s, c.into(), deadline)
 }
 
 impl Wire {
     pub fn send(&self, pkt: &[u8]) -> std::io::Result<()> {
         let mut w = self.w.lock().unwrap_or_else(|e| e.into_inner());
         let (s, c) = &mut *w;
+        let mut io = &**s;
         match c {
-            None => crate::link::write_frame(s, pkt),
+            None => crate::link::write_frame(&mut io, pkt),
             Some(c) => {
                 crate::link::write_frame(&mut c.writer(), pkt)?;
                 while c.wants_write() {
-                    c.write_tls(s)?;
+                    c.write_tls(&mut io)?;
                 }
                 Ok(())
             }
@@ -122,12 +174,13 @@ impl Reader {
                 }
             }
             let mut buf = [0u8; 4096];
-            let n = self.r.read(&mut buf)?;
+            let n = (&*self.r).read(&mut buf)?;
             if n == 0 {
                 return Err(std::io::ErrorKind::UnexpectedEof.into());
             }
             let mut w = self.wire.w.lock().unwrap_or_else(|e| e.into_inner());
             let (s, c) = &mut *w;
+            let mut io = &**s;
             let Some(c) = c else {
                 self.plain.extend_from_slice(&buf[..n]);
                 continue;
@@ -150,7 +203,7 @@ impl Reader {
                 }
             }
             while c.wants_write() {
-                c.write_tls(s)?;
+                c.write_tls(&mut io)?;
             }
         }
     }
@@ -190,11 +243,11 @@ fn der(tag: u8, body: &[u8]) -> Vec<u8> {
 }
 
 /// A fresh Ed25519 key and a self-signed X.509 certificate for it, built by hand with ring.
-fn self_signed() -> (CertificateDer<'static>, PrivatePkcs8KeyDer<'static>) {
+fn self_signed() -> Option<(CertificateDer<'static>, PrivatePkcs8KeyDer<'static>)> {
     use ring::signature::{Ed25519KeyPair, KeyPair};
     let rng = ring::rand::SystemRandom::new();
-    let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).expect("ed25519 key");
-    let kp = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("ed25519 key");
+    let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).ok()?;
+    let kp = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).ok()?;
     let alg = der(0x30, &der(0x06, &[0x2b, 0x65, 0x70])); // id-Ed25519
     let cn = der(0x0c, b"relay");
     let name = der(0x30, &der(0x31, &der(0x30, &[der(0x06, &[0x55, 0x04, 0x03]), cn].concat())));
@@ -208,5 +261,5 @@ fn self_signed() -> (CertificateDer<'static>, PrivatePkcs8KeyDer<'static>) {
     ].concat());
     let sig = kp.sign(&tbs);
     let cert = der(0x30, &[tbs, alg, der(0x03, &[&[0u8][..], sig.as_ref()].concat())].concat());
-    (CertificateDer::from(cert), PrivatePkcs8KeyDer::from(pkcs8.as_ref().to_vec()))
+    Some((CertificateDer::from(cert), PrivatePkcs8KeyDer::from(pkcs8.as_ref().to_vec())))
 }

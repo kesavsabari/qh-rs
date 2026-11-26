@@ -148,7 +148,8 @@ a packet and sent it on from elsewhere can't move the line.
 5. **Relay server.** After 6 s (3 s when no teammate could pass it on), hellos also go to our
    relay servers and the ones the teammate published (see below). The head start lets a teammate's
    path come up first. A line that is up through a relay server tries teammates again every 30 s,
-   and moves to one as soon as it answers. The default is `ovh-ca` (`15.235.127.134:47232`).
+   and moves to one as soon as it answers. The default is `oracle-fra` (`92.5.142.50:47232`, Frankfurt), with `ovh-ca`
+   (`15.235.127.134:47232`) as a backup: qh up to 0.2.8 knows only `ovh-ca`, so mixed teams still meet there.
 6. **TCP 443.** A relay that stays silent on UDP for 5 s is tried over TCP (443 unless the server
    line says `/port`), and TCP is retried every 60 s after that. Each packet on the stream is a
    2-byte length followed by the packet. The client opens TLS on the stream, so the lane looks

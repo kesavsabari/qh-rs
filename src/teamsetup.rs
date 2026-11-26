@@ -6,7 +6,7 @@ use crate::team::{api, auth_env, github_repo, remember, token};
 use serde_json::json;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 fn ask(q: &str) -> String {
     print!("{q}");
@@ -24,7 +24,7 @@ fn yes(q: &str) -> bool {
 }
 
 fn git(dir: &Path, args: &[&str], env: &[(&str, String)]) -> Result<String, String> {
-    let mut c = Command::new("git");
+    let mut c = crate::sandbox::git();
     c.current_dir(dir).args(args).env("GIT_TERMINAL_PROMPT", "0").stdin(Stdio::null());
     for (k, v) in env { c.env(k, v); }
     let o = c.output().map_err(|e| e.to_string())?;
@@ -34,34 +34,64 @@ fn git(dir: &Path, args: &[&str], env: &[(&str, String)]) -> Result<String, Stri
 
 fn looks_secret(name: &str) -> bool {
     let n = name.to_lowercase();
-    n == ".env" || n.starts_with(".env.") || n.ends_with(".pem") || n.ends_with(".key") || n.starts_with("id_rsa")
-        || n.starts_with("id_ed25519") || n.contains("credentials") || n == "secrets.toml"
+    if matches!(n.as_str(), ".env.example" | ".env.sample" | ".env.template" | ".env.dist" | ".env.defaults") {
+        return false;
+    }
+    n == ".env" || n.starts_with(".env.") || n.starts_with("id_rsa") || n.starts_with("id_ed25519") || n.starts_with("id_ecdsa")
+        || n.starts_with("id_dsa") || n.contains("credentials") || n == "secrets.toml"
+        || matches!(n.as_str(), ".npmrc" | ".pypirc" | ".netrc" | "_netrc" | ".git-credentials" | ".pgpass" | ".htpasswd" | ".vault-token")
+        || [".pem", ".key", ".p12", ".pfx", ".kdbx", ".jks", ".keystore", ".ppk", ".tfstate", ".tfstate.backup"].iter().any(|e| n.ends_with(e))
 }
 
-/// Files under `dir` that look like secrets, relative paths (skips .git and build folders).
-fn secrets(dir: &Path) -> Vec<String> {
-    fn walk(root: &Path, d: &Path, out: &mut Vec<String>, depth: usize) {
-        let Ok(rd) = std::fs::read_dir(d) else { return };
-        for e in rd.flatten() {
-            let p = e.path();
-            let name = e.file_name().to_string_lossy().to_string();
-            if p.is_dir() {
-                if depth < 6 && !matches!(name.as_str(), ".git" | "node_modules" | "target" | ".venv" | "venv" | "dist" | "build") {
-                    walk(root, &p, out, depth + 1);
-                }
-            } else if looks_secret(&name) {
-                out.push(p.strip_prefix(root).unwrap_or(&p).to_string_lossy().replace('\\', "/"));
-            }
-        }
+/// A cloud service account's key file (Google's JSON keys and the like), by what's in it.
+fn key_json(p: &Path) -> bool {
+    p.extension().is_some_and(|e| e.eq_ignore_ascii_case("json"))
+        && std::fs::metadata(p).is_ok_and(|m| m.len() < 256 << 10)
+        && std::fs::read_to_string(p).is_ok_and(|t| t.contains("\"private_key\"") || t.contains("\"service_account\""))
+}
+
+/// What `git add -A` in `dir` would add: every file of its repo that is tracked or new and not
+/// ignored, relative to the repo's top (`top`); without a repo yet, what one made in `dir` would
+/// add (its .gitignore files and your global excludes applied, through a throwaway git folder).
+/// (top, files)
+fn to_add(dir: &Path) -> Option<(PathBuf, Vec<String>)> {
+    let list = |out: String| -> Vec<String> { out.split('\0').filter(|f| !f.is_empty()).map(String::from).collect() };
+    if let Ok(top) = git(dir, &["rev-parse", "--show-toplevel"], &[]) {
+        let top = PathBuf::from(top.trim());
+        let out = git(&top, &["ls-files", "-z", "--cached", "--others", "--exclude-standard"], &[]).ok()?;
+        return Some((top, list(out)));
     }
-    let mut out = vec![];
-    walk(dir, dir, &mut out, 0);
-    // already ignored by git → not uploaded anyway
-    if Path::new(&dir.join(".git")).exists() {
-        out.retain(|f| git(dir, &["check-ignore", "-q", f], &[]).is_err());
-    }
+    let tmp = std::env::temp_dir().join(format!("qh-team-scan-{}-{}", std::process::id(), crate::team::now()));
+    let made = git(dir, &["init", "-q", "--bare", &tmp.to_string_lossy()], &[]).is_ok();
+    let out = made.then(|| git(dir, &["--git-dir", &tmp.to_string_lossy(), "--work-tree", ".", "-c", "core.bare=false",
+                                      "ls-files", "-z", "--others", "--exclude-standard"], &[]).ok()).flatten();
+    let _ = std::fs::remove_dir_all(&tmp);
+    Some((dir.to_path_buf(), list(out?)))
+}
+
+/// Files the first commit would upload that look like secrets: (the repo's top, their paths in it).
+/// Exactly the list `git add -A` takes, however deep or wherever (build folders, node_modules).
+fn secrets(dir: &Path) -> (PathBuf, Vec<String>) {
+    let Some((top, files)) = to_add(dir) else { return (dir.to_path_buf(), vec![]) };
+    let mut out: Vec<String> = files.into_iter().filter(|f| {
+        let p = top.join(f);
+        let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        looks_secret(&name) || key_json(&p)
+    }).map(|f| f.replace('\\', "/")).collect();
     out.sort();
-    out
+    out.dedup();
+    (top, out)
+}
+
+/// `f` (a path from the repo's top) as a .gitignore line that matches just it.
+fn ignore_line(f: &str) -> String {
+    let mut s = String::from("/");
+    for c in f.chars() {
+        if matches!(c, '*' | '?' | '[' | ']' | '\\' | '!' | '#') { s.push('\\') }
+        s.push(c);
+    }
+    if s.ends_with(' ') { s.pop(); s.push_str("\\ ") }
+    s
 }
 
 /// Your home folder (or anything above it) is never a project: it holds your keys and every
@@ -133,7 +163,7 @@ pub fn create_inner(friends: &[String]) -> Result<(), String> {
     };
     // no commits yet: an empty folder, or a create that stopped before its first push
     let unborn = git(&cwd, &["rev-parse", "-q", "--verify", "HEAD"], &[]).is_err();
-    let secret_files = if existing.is_none() || unborn { secrets(&cwd) } else { vec![] };
+    let (top, secret_files) = if existing.is_none() || unborn { secrets(&cwd) } else { (cwd.clone(), vec![]) };
 
     println!("\nReady to:");
     match &existing {
@@ -168,10 +198,23 @@ pub fn create_inner(friends: &[String]) -> Result<(), String> {
     }
     if existing.is_none() || unborn {
         if !secret_files.is_empty() {
-            let mut gi = std::fs::OpenOptions::new().create(true).append(true).open(cwd.join(".gitignore")).map_err(|e| e.to_string())?;
-            for f in &secret_files { let _ = writeln!(gi, "{f}"); }
+            // `top` is where the repo is (or, new, will be): `git init` above ran in this folder
+            let gi_path = top.join(".gitignore");
+            let ends_in_newline = std::fs::read(&gi_path).map_or(true, |b| b.is_empty() || b.ends_with(b"\n"));
+            let mut gi = std::fs::OpenOptions::new().create(true).append(true).open(&gi_path).map_err(|e| e.to_string())?;
+            if !ends_in_newline { let _ = writeln!(gi); }
+            for f in &secret_files {
+                let _ = writeln!(gi, "{}", ignore_line(f));
+                // already staged (a create that stopped before its first push): out of the index too
+                let _ = git(&top, &["--literal-pathspecs", "rm", "-q", "--cached", "--ignore-unmatch", "--", f], &[]);
+            }
         }
         let url = format!("https://github.com/{repo}.git");
+        // `add` runs the repo's clean filters, outside any sandbox
+        if !crate::prompt::filters_safe(&cwd) {
+            return Err("this repo's own git config names a filter program (filter.*.clean/smudge/process); \
+check .git/config, remove it if you didn't add it, and run this again".into());
+        }
         git(&cwd, &["add", "-A"], &[])?;
         // --allow-empty: an empty folder still gets a commit, or there's nothing to push
         git(&cwd, &["-c", "user.name=qh", "-c", "user.email=qh@localhost", "commit", "-q", "--allow-empty", "-m", "First commit"], &[])?;
@@ -290,6 +333,44 @@ pub fn join_inner(repo: &str, invite_code: Option<&str>) -> Result<PathBuf, Stri
 
 #[cfg(test)]
 mod tests {
+    /// The scan before the first commit sees exactly what `git add -A` takes: deep files, build
+    /// folders and node_modules included, ignored files left out.
+    #[test]
+    fn team_create_scan_finds_what_add_would_upload() {
+        let d = std::env::temp_dir().join(format!("qh-scan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let files = ["node_modules/x/.npmrc", "a/b/c/d/e/f/g/h/k.pem", "build/.pypirc", "target/.netrc", "keys/store.p12", "keys/w.pfx", "pw.kdbx",
+                     "infra/terraform.tfstate", "gcp/sa.json", ".venv/.env"];
+        for f in files.iter().chain(&["src/main.rs", ".env.example", "local/.env", "data.json"]) {
+            let p = d.join(f);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, "x").unwrap();
+        }
+        std::fs::write(d.join("gcp/sa.json"), "{\"type\": \"service_account\", \"private_key\": \"-----BEGIN\"}").unwrap();
+        std::fs::write(d.join(".gitignore"), "local/\n").unwrap();
+        let mut want: Vec<String> = files.iter().map(|f| f.to_string()).collect();
+        want.sort();
+        // no repo yet
+        let (top, got) = super::secrets(&d);
+        assert_eq!((top.as_path(), &got), (d.as_path(), &want));
+        // a repo, run from a folder inside it
+        assert!(std::process::Command::new("git").args(["init", "-q"]).arg(&d).status().unwrap().success());
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        let (top, got) = super::secrets(&d.join("src"));
+        assert_eq!(top.canonicalize().unwrap(), d.canonicalize().unwrap());
+        assert_eq!(got, want);
+        // what create writes to .gitignore takes each of them out, odd names too
+        std::fs::write(d.join("we[ir]d *.pem"), "x").unwrap();
+        let (_, got) = super::secrets(&d);
+        assert!(got.contains(&"we[ir]d *.pem".to_string()), "{got:?}");
+        let lines: Vec<String> = got.iter().map(|f| super::ignore_line(f)).collect();
+        std::fs::write(d.join(".gitignore"), format!("local/\n{}\n", lines.join("\n"))).unwrap();
+        assert_eq!(super::secrets(&d).1, Vec::<String>::new());
+        let left = super::git(&d, &["ls-files", "--others", "--exclude-standard"], &[]).unwrap();
+        assert!(left.contains("src/main.rs") && left.contains(".env.example") && left.contains("data.json"), "{left}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn a_folder_inside_a_repo_at_home_is_not_a_project() {
         let home = std::env::temp_dir().join(format!("qh-home-{}", std::process::id()));

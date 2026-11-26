@@ -165,6 +165,16 @@ pub fn no_tty(cmd: &mut Command) {
     cmd.env("GIT_TERMINAL_PROMPT", "0").env("GCM_INTERACTIVE", "never").env("SSH_ASKPASS_REQUIRE", "never");
 }
 
+/// git for qh's own calls, which run outside the sandbox. A command in the sandbox can write the
+/// project's git settings, so these calls never run what a repository asks for: its fsmonitor, its
+/// hooks, a transport that is a program, or a pager. Settings given here beat every config file.
+pub fn git() -> Command {
+    let mut c = Command::new("git");
+    c.args(["-c", "core.fsmonitor=false", "-c", if cfg!(windows) { "core.hooksPath=NUL" } else { "core.hooksPath=/dev/null" },
+            "-c", "protocol.ext.allow=never", "-c", "core.pager=cat"]);
+    c
+}
+
 pub fn run_timeout(mut cmd: Command, stdin: Option<&[u8]>, secs: u64, cwd: &Path, stop: Option<&AtomicBool>)
                    -> std::io::Result<(Output, bool)> {
     no_tty(&mut cmd);
@@ -199,8 +209,19 @@ pub fn run_timeout(mut cmd: Command, stdin: Option<&[u8]>, secs: u64, cwd: &Path
             break s;
         }
         if stop.is_some_and(|f| f.load(Relaxed)) || t0.elapsed() > Duration::from_secs(secs) {
+            // TERM first: the Linux sandbox helper uses it to stop what left the group (setsid)
             #[cfg(unix)]
-            let _ = Command::new("kill").args(["-9", &format!("-{}", child.id())]).status();
+            {
+                let group = format!("-{}", child.id());
+                let quiet = |sig: &str| Command::new("kill").args([sig, &group])
+                    .stdout(Stdio::null()).stderr(Stdio::null()).status();
+                let _ = quiet("-TERM");
+                let t = Instant::now();
+                while t.elapsed() < Duration::from_millis(250) && matches!(child.try_wait(), Ok(None)) {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                let _ = quiet("-9");
+            }
             #[cfg(windows)]
             let _ = Command::new("taskkill").args(["/T", "/F", "/PID", &child.id().to_string()]).output();
             let _ = child.kill();

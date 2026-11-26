@@ -602,18 +602,102 @@ pub fn helper_main(args: &[String]) -> i32 {
             Ok(())
         });
     }
-    match cmd.status() {
-        Ok(s) => {
-            use std::os::unix::process::ExitStatusExt;
-            s.code().unwrap_or_else(|| 128 + s.signal().unwrap_or(0))
+    // whatever this command leaves running goes with it, wherever it went (setsid, a double fork:
+    // orphans come to this process): a leftover could write protected files after they're checked
+    unsafe {
+        libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0);
+        let on_term: extern "C" fn(libc::c_int) = term_seen;
+        libc::signal(libc::SIGTERM, on_term as *const () as libc::sighandler_t);
+    }
+    let child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => return fail(format!("{prog}: {e}")),
+    };
+    let code = wait_for(child.id() as libc::pid_t);
+    let left = stop_leftovers();
+    if left > 0 && code < 128 {
+        eprintln!("qh sandbox: stopped {left} process(es) this command left running; start a server with background=true");
+    }
+    code
+}
+
+static TERM_SEEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+extern "C" fn term_seen(_: libc::c_int) {
+    TERM_SEEN.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// The command's exit code, reaping orphans meanwhile; 143 if qh asked to stop it.
+fn wait_for(pid: libc::pid_t) -> i32 {
+    let mut pause = 1;
+    loop {
+        let mut st = 0;
+        let r = unsafe { libc::waitpid(-1, &mut st, libc::WNOHANG) };
+        if r == pid {
+            return if libc::WIFEXITED(st) { libc::WEXITSTATUS(st) } else { 128 + libc::WTERMSIG(st) };
         }
-        Err(e) => fail(format!("{prog}: {e}")),
+        if r < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD) {
+            return 126;
+        }
+        if TERM_SEEN.load(std::sync::atomic::Ordering::SeqCst) {
+            return 143;
+        }
+        if r <= 0 {
+            std::thread::sleep(std::time::Duration::from_millis(pause));
+            pause = (pause * 2).min(20);
+        }
     }
 }
 
-/// `qh __sandbox --holder <{port, sock}>`: make a tab's namespaces (loopback up, the proxy bridge
-/// when there's a proxy), say "ready", and keep them until stdin closes (qh exited) or it's killed.
-/// It runs no command: only qh's own bridge code lives here.
+/// This process's descendants, from /proc: (pid, parent) of every process, walked from here.
+fn descendants() -> Vec<libc::pid_t> {
+    let all: Vec<(libc::pid_t, libc::pid_t)> = std::fs::read_dir("/proc").into_iter().flatten().flatten().filter_map(|e| {
+        let pid: libc::pid_t = e.file_name().to_str()?.parse().ok()?;
+        let stat = std::fs::read_to_string(e.path().join("stat")).ok()?;
+        // pid (name, which may hold spaces and parens) state ppid …
+        let ppid = stat.rsplit_once(')')?.1.split_whitespace().nth(1)?.parse().ok()?;
+        Some((pid, ppid))
+    }).collect();
+    let mut out = vec![];
+    let mut todo = vec![unsafe { libc::getpid() }];
+    while let Some(p) = todo.pop() {
+        for (c, _) in all.iter().filter(|(_, pp)| *pp == p) {
+            out.push(*c);
+            todo.push(*c);
+        }
+    }
+    out
+}
+
+/// Kill every descendant, again until none are left (a fork can race the scan). How many there were.
+fn stop_leftovers() -> usize {
+    // what is finishing anyway (git's own maintenance after a commit) gets a moment; this is safe
+    // because protected files are checked only after this process ends
+    if !TERM_SEEN.load(std::sync::atomic::Ordering::SeqCst) {
+        for _ in 0..20 {
+            unsafe { while libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG) > 0 {} }
+            if descendants().is_empty() {
+                return 0;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..200 {
+        let kids = descendants();
+        if kids.is_empty() {
+            break;
+        }
+        for k in kids {
+            seen.insert(k);
+            unsafe { libc::kill(k, libc::SIGKILL) };
+        }
+        unsafe { while libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG) > 0 {} }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    seen.len()
+}
+
 fn holder_main(spec: &str) -> i32 {
     let v: Value = serde_json::from_str(spec).unwrap_or_default();
     let mut token = String::new();

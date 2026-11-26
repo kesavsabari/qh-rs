@@ -425,8 +425,9 @@ fn git_in(root: &Path, args: &[&str], input: Option<&[u8]>, env: &[(&str, String
 }
 
 fn git_raw(root: &Path, args: &[&str], input: Option<&[u8]>, env: &[(&str, String)]) -> Option<Vec<u8>> {
+    let args = plain_args(root, args)?;
     let mut c = git_cmd(root);
-    c.args(args).env("GIT_TERMINAL_PROMPT", "0")
+    c.args(&args).env("GIT_TERMINAL_PROMPT", "0")
         .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() }) // never the UI's terminal
         .stdout(Stdio::piped()).stderr(Stdio::piped());
     for (k, v) in env { c.env(k, v); }
@@ -442,6 +443,27 @@ fn git(root: &Path, args: &[&str]) -> Option<String> {
     git_in(root, args, None, &[])
 }
 
+/// `args` made safe to run on a project whose .git/config a sandboxed command may have written:
+/// a diff, log or show never runs an external diff or textconv program, and one that compares the
+/// working tree (a diff, status) isn't run at all while the repo's own config names a filter
+/// program (see `prompt::filters_safe`). None: not run. A team store is qh's own and left alone.
+fn plain_args<'a>(root: &Path, args: &[&'a str]) -> Option<Vec<&'a str>> {
+    let mut v = args.to_vec();
+    if is_store(root) {
+        return Some(v);
+    }
+    let mut i = 0;
+    while i < v.len() && v[i] == "-c" { i += 2 }
+    let Some(sub) = v.get(i).copied() else { return Some(v) };
+    if matches!(sub, "diff" | "log" | "show") {
+        v.splice(i + 1..i + 1, ["--no-ext-diff", "--no-textconv"]);
+    }
+    if matches!(sub, "diff" | "status") && !crate::prompt::filters_safe(root) {
+        return None;
+    }
+    Some(v)
+}
+
 /// The team stores in use on this machine (see `board_store_in`). A list, not a look at the
 /// folder: these wrappers also run in folders we didn't make, and a bare repository that came
 /// with a clone must stay refused where the user's git refuses it (`safe.bareRepository`).
@@ -455,7 +477,7 @@ fn is_store(dir: &Path) -> bool {
 /// repository doesn't apply to it. `--git-dir` alone wouldn't do that: it overrides `GIT_DIR` but
 /// not, say, `GIT_OBJECT_DIRECTORY`.
 fn git_cmd(root: &Path) -> Command {
-    let mut c = Command::new("git");
+    let mut c = crate::sandbox::git();
     c.current_dir(root);
     if is_store(root) {
         c.arg("--git-dir=.");
@@ -741,7 +763,10 @@ pub fn token() -> Option<String> {
         let t = String::from_utf8_lossy(&o.stdout).trim().to_string();
         if o.status.success() && !t.is_empty() { return Some(t) }
     }
-    let out = git_in(Path::new("."), &["credential", "fill"], Some(b"protocol=https\nhost=github.com\n\n"), &[])?;
+    // not in the project: a command in the sandbox can write its git settings (a credential helper)
+    let home = crate::config::home();
+    let above = home.parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+    let out = git_in(&home, &["credential", "fill"], Some(b"protocol=https\nhost=github.com\n\n"), &[("GIT_CEILING_DIRECTORIES", above)])?;
     out.lines().find_map(|l| l.strip_prefix("password=")).map(String::from).filter(|t| !t.is_empty())
 }
 
@@ -5317,12 +5342,11 @@ fn may_read(s: &State, login: &str, from: &str) -> Result<(), String> {
 /// Read one file of the team repo at `root` for a teammate, or list what's changed against HEAD.
 /// Only plain text files inside the repo (symlinks resolved), never secrets, git's own files,
 /// protected files or anything git ignores; at most FILE_MAX_LINES lines / FILE_MAX_BYTES.
-pub(crate) fn serve_file(root: &Path, req: &Value) -> Result<String, String> {
-    let root = root.canonicalize().map_err(|_| "the project folder is gone".to_string())?;
-    if req["op"] == "list" {
-        return list_changed(&root);
-    }
-    let path = req["path"].as_str().unwrap_or("").trim();
+/// A file of this working copy a teammate may see (read_team_file), or this copy's agent may read
+/// while answering a teammate: relative to the project root (`root`, canonical), no `..`, no link
+/// out of the project, not git's own files, no secret or protected file and, with `ignored`, nothing
+/// git ignores (build output, local config). (the file, its path inside the project)
+pub(crate) fn shared_path(root: &Path, path: &str, ignored: bool) -> Result<(PathBuf, PathBuf), String> {
     if path.is_empty() || path.contains('\0') {
         return Err("no path given".into());
     }
@@ -5331,26 +5355,38 @@ pub(crate) fn serve_file(root: &Path, req: &Value) -> Result<String, String> {
         return Err(format!("{path}: give a path relative to the project root, without .."));
     }
     let full = root.join(rel).canonicalize().map_err(|_| format!("{path}: no such file in their working copy"))?;
-    if !crate::sandbox::under(&full, &root) {
+    if !crate::sandbox::under(&full, root) {
         return Err(format!("{path}: outside the project (a link out of it)"));
     }
-    let inner = full.strip_prefix(&root).map_err(|_| format!("{path}: outside the project"))?.to_path_buf();
+    let inner = full.strip_prefix(root).map_err(|_| format!("{path}: outside the project"))?.to_path_buf();
     if inner.as_os_str().is_empty() || !full.is_file() {
         return Err(format!("{path}: not a file"));
     }
     let named = [rel, inner.as_path()];
-    if named.iter().any(|p| p.components().any(|c| c.as_os_str() == ".git")) {
+    if named.iter().any(|p| p.components().any(|c| c.as_os_str().eq_ignore_ascii_case(".git"))) {
         return Err(format!("{path}: git's own files aren't shared"));
     }
     if crate::sandbox::secret(&full) || crate::sandbox::secret(&root.join(rel)) || crate::sandbox::protected(&full) {
         return Err(format!("{path}: a secret or protected file; it's never shared"));
     }
-    for p in named {
-        let p = p.to_string_lossy();
-        if git(&root, &["check-ignore", "-q", "--", &p]).is_some() {
-            return Err(format!("{path}: ignored by git, so it isn't shared"));
+    if ignored {
+        for p in named {
+            let p = p.to_string_lossy();
+            if git(root, &["check-ignore", "-q", "--", &p]).is_some() {
+                return Err(format!("{path}: ignored by git, so it isn't shared"));
+            }
         }
     }
+    Ok((full, inner))
+}
+
+pub(crate) fn serve_file(root: &Path, req: &Value) -> Result<String, String> {
+    let root = root.canonicalize().map_err(|_| "the project folder is gone".to_string())?;
+    if req["op"] == "list" {
+        return list_changed(&root);
+    }
+    let path = req["path"].as_str().unwrap_or("").trim();
+    let (full, inner) = shared_path(&root, path, true)?;
     let bytes = std::fs::read(&full).map_err(|e| format!("{path}: {e}"))?;
     if bytes[..bytes.len().min(8192)].contains(&0) {
         return Err(format!("{path}: a binary file"));
@@ -7553,6 +7589,51 @@ pub(crate) mod tests {
         let (_, err, held) = check_edit("main", &gone, false).expect("contract checked in warn mode");
         assert!(held && err.contains("removes or renames get_user"), "{err}");
         STATES.lock().unwrap().as_mut().unwrap().remove(repo);
+    }
+
+    /// A sandboxed command can write .git/config; the change notes and the file service run git
+    /// outside the sandbox, so no program the repo names may run (external diff, driver, textconv, filter).
+    #[cfg(unix)]
+    #[test]
+    fn change_notes_run_no_program_the_repo_names() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = std::env::temp_dir().join(format!("qh-note-ext-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let run = |a: &[&str]| assert!(Command::new("git").current_dir(&d).args(a).output().unwrap().status.success(), "{a:?}");
+        run(&["init", "-q"]);
+        std::fs::write(d.join("a.txt"), "one\n").unwrap();
+        run(&["add", "."]);
+        run(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "x"]);
+        let mark = d.join("RAN");
+        let script = d.join("x.sh");
+        std::fs::write(&script, format!("#!/bin/sh\ntouch {}\ncat\n", mark.display())).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(d.join(".git/info/attributes"), "* diff=x filter=x\n").unwrap();
+        let cfg = d.join(".git/config");
+        let plain = std::fs::read_to_string(&cfg).unwrap();
+        let repo = "o/note-ext";
+        let mut st = state("alice");
+        st.repo = repo.into();
+        STATES.lock().unwrap().get_or_insert_with(HashMap::new).insert(repo.into(), st);
+        let t = Touched { repo: repo.into(), root: d.clone(), file: "a.txt".into(), funcs: vec![], removed: vec![], uses: vec![], bodies: vec![] };
+        let x = script.display();
+        for (i, bad) in [format!("[diff]\n\texternal = {x}\n"), format!("[diff \"x\"]\n\tcommand = {x}\n"), format!("[diff \"x\"]\n\ttextconv = {x}\n"),
+                         format!("[core]\n\tpager = {x}\n"), format!("[filter \"x\"]\n\tclean = {x}\n")].iter().enumerate() {
+            std::fs::write(&cfg, format!("{plain}{bad}")).unwrap();
+            std::fs::write(d.join("a.txt"), format!("two{i}\n")).unwrap();
+            note_change("main", "", &t, "");
+            let _ = serve_file(&d, &json!({"op": "list"}));
+            let _ = serve_file(&d, &json!({"op": "read", "path": "a.txt"}));
+            let _ = changes_vs_main(&d);
+            assert!(!mark.exists(), "ran it: {bad}");
+            let text = with(repo, |s| s.my_notes.last().map(|n| n["text"].as_str().unwrap_or("").to_string())).flatten().unwrap_or_default();
+            // a filter program in the repo's config: no diff at all rather than one that runs it
+            assert!(bad.contains("filter") || text.contains(&format!("+two{i}")), "{bad}: {text}");
+        }
+        std::fs::write(&cfg, plain).unwrap();
+        STATES.lock().unwrap().as_mut().unwrap().remove(repo);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

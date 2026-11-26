@@ -43,6 +43,9 @@ pub fn open(key: &Key, aad: &str, sealed: &str) -> Option<Vec<u8>> {
 fn pair_key(mine: &StaticSecret, theirs: &str) -> Option<Key> {
     let pk: [u8; 32] = b64url_decode(theirs).try_into().ok()?;
     let shared = mine.diffie_hellman(&PublicKey::from(pk));
+    if !shared.was_contributory() {
+        return None; // a low-order key: an all-zero secret anyone can compute
+    }
     let salt = ring::hkdf::Salt::new(ring::hkdf::HKDF_SHA256, b"qh team wrap v1");
     let mut out = [0u8; 32];
     salt.extract(shared.as_bytes()).expand(&[], ring::hkdf::HKDF_SHA256).ok()?.fill(&mut out).ok()?;
@@ -63,6 +66,9 @@ pub fn unwrap(blob: &str, mine: &StaticSecret, sender_pub: &str, repo: &str) -> 
 fn dm_key(mine: &StaticSecret, theirs: &str) -> Option<Key> {
     let pk: [u8; 32] = b64url_decode(theirs).try_into().ok()?;
     let shared = mine.diffie_hellman(&PublicKey::from(pk));
+    if !shared.was_contributory() {
+        return None; // a low-order key: an all-zero secret anyone can compute
+    }
     let salt = ring::hkdf::Salt::new(ring::hkdf::HKDF_SHA256, b"qh team dm v1");
     let mut out = [0u8; 32];
     salt.extract(shared.as_bytes()).expand(&[], ring::hkdf::HKDF_SHA256).ok()?.fill(&mut out).ok()?;
@@ -148,6 +154,15 @@ mod tests {
         assert_eq!(unwrap(&w, &b, &pub_of(&a), "o/r"), Some(team), "b opens what a wrapped for b");
         assert_eq!(unwrap(&w, &c, &pub_of(&a), "o/r"), None, "c can't");
         assert_eq!(unwrap(&w, &b, &pub_of(&a), "other/repo"), None, "bound to the repo");
+    }
+
+    /// A low-order public key makes the shared secret all zeros, which anyone can compute.
+    #[test]
+    fn a_low_order_key_gets_no_pair_key() {
+        let mine = StaticSecret::from(random());
+        let zero = b64url(&[0u8; 32]);
+        assert!(wrap(&[7u8; 32], &mine, &zero, "o/r").is_none());
+        assert!(seal_for(&mine, &zero, "o/r", "dm", "a", "b", b"hi").is_none());
     }
 
     #[test]

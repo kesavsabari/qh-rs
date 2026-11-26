@@ -78,11 +78,18 @@ fn rel_home(p: &Path) -> Option<String> {
     p.strip_prefix(h.trim_end_matches('/')).and_then(|r| r.strip_prefix('/')).map(String::from)
 }
 
-/// Under home: credentials and keys.
-const SECRET_HOME: [&str; 30] = [".ssh", ".aws", ".gnupg", ".kube", ".docker/config.json", ".azure", ".config/gcloud",
+/// Under home: credentials and keys. A list, not deny-by-default: a command needs to read much of
+/// home (toolchains in ~/.rustup and ~/.cargo/bin, ~/.gitconfig, ~/.config/<tool>), so anything
+/// holding a login is named here.
+const SECRET_HOME: &[&str] = &[".ssh", ".aws", ".gnupg", ".kube", ".docker/config.json", ".azure", ".config/gcloud",
     ".config/gh", ".netrc", ".npmrc", ".pypirc", ".git-credentials", ".cargo/credentials", ".cargo/credentials.toml",
-    ".codex/auth.json", ".claude/.credentials.json", ".config/qh-release", ".password-store", ".local/share/keyrings",
-    ".vault-token", ".pgpass", ".terraform.d/credentials.tfrc.json",
+    ".codex/auth.json", ".config/qh-release", ".password-store", ".local/share/keyrings",
+    ".vault-token", ".pgpass", ".terraform.d", ".oci",
+    // AI tools' logins and sessions
+    ".claude", ".claude.json", ".local/share/opencode", ".grok", ".gemini", ".config/github-copilot", ".config/manicode",
+    ".config/doubletake", ".local/share/com.vercel.cli",
+    // apps holding logins, tokens or messages
+    ".config/Signal", ".steam/steam.token", ".config/1Password", ".config/rclone", ".config/heroic",
     // browsers' cookies and saved logins
     ".mozilla", ".config/google-chrome", ".config/chromium", ".config/BraveSoftware", ".config/microsoft-edge",
     "Library/Application Support/Google/Chrome", "Library/Keychains", "AppData/Local/Google/Chrome/User Data"];
@@ -107,7 +114,7 @@ pub fn secret(p: &Path) -> bool {
         return true;
     }
     if let Some(r) = rel_home(p) {
-        if SECRET_HOME.iter().any(|s| r == *s || r.starts_with(&format!("{}/", key(Path::new(s))))) {
+        if SECRET_HOME.iter().any(|s| { let s = key(Path::new(s)); r == s || r.starts_with(&format!("{s}/")) }) {
             return true;
         }
     }
@@ -199,7 +206,7 @@ fn hard_linked(_: &Path) -> bool {
 /// Bash commands that name a secret or a protected file: asked about in every mode. A heuristic on
 /// the text, on top of the OS sandbox (which blocks the read itself where it runs).
 static CMD_SECRET: LazyLock<Regex> = LazyLock::new(|| Regex::new(
-    r#"(?i)(^|[\s'"=/~:@<])(\.ssh|\.aws|\.gnupg|\.kube|\.netrc|\.git-credentials|\.pypirc|\.password-store|credentials\.toml|chatgpt\.json|team-identity\.key|id_(rsa|dsa|ecdsa|ed25519)\b|\.env\b(\.[\w-]+)?)"#).unwrap());
+    r#"(?i)(^|[\s'"=/~:@<])(\.ssh|\.aws|\.gnupg|\.kube|\.oci\b|\.netrc|\.npmrc|\.git-credentials|\.pypirc|\.password-store|\.docker/config\.json|\.claude\.json|credentials\.toml|chatgpt\.json|team-identity\.key|id_(rsa|dsa|ecdsa|ed25519)\b|[\w*-][\w*.-]*\.(pem|key|p12|pfx|kdbx)\b|\.env\b(\.[\w-]+)?)"#).unwrap());
 static CMD_PROTECT: LazyLock<Regex> = LazyLock::new(|| Regex::new(
     r#"(?i)(\.git/hooks|\.git/config|\bgit\s+config\b|core\.hookspath|\.(bash|zsh)rc\b|\.bash_profile|\.zprofile|\.zshenv|(^|[\s'"/~])\.profile\b|\.config/(autostart|systemd|fish|qh|qwen-harness)|\.envrc\b|crontab|systemctl\s+--user)"#).unwrap());
 
@@ -267,7 +274,7 @@ const CACHES: [(&str, &str); 14] = [(".cache", ""), (".cargo/registry", "cargo")
 /// Inside the project, paths a command must not change (they run code later, outside the sandbox).
 fn protect_candidates(root: &Path) -> Vec<PathBuf> {
     let r = canon(root);
-    let mut v: Vec<PathBuf> = [".git/hooks", ".qh", ".envrc", ".vscode/tasks.json"].iter().map(|x| r.join(x)).collect();
+    let mut v: Vec<PathBuf> = [".git/hooks", ".git/config.worktree", ".git/info/attributes", ".qh", ".envrc", ".vscode/tasks.json"].iter().map(|x| r.join(x)).collect();
     let h = canon(&crate::config::home());
     v.extend(PROTECT_HOME.iter().map(|x| h.join(x)).filter(|x| under(x, &r)));
     let qh = canon(&crate::config::config_dir());
@@ -310,20 +317,172 @@ pub fn policy(root: &Path, cfg: &Config, net: Net) -> Policy {
     }
     let qh = canon(&crate::config::config_dir());
     let mut deny_read: Vec<PathBuf> = SECRET_HOME.iter().map(|s| h.join(s)).chain(SECRET_QH.iter().map(|f| qh.join(f)))
-        .chain([crate::config::state_dir().join("browser")]).filter(|p| p.exists()).map(|p| canon(&p)).collect();
+        .chain([crate::config::state_dir().join("browser")])
+        // loose keys by name at the top of home and ~/.config (~/server.pem, ~/.env)
+        .chain([h.clone(), h.join(".config")].iter().flat_map(|d| std::fs::read_dir(d).into_iter().flatten().flatten())
+            .map(|e| e.path()).filter(|p| !p.is_symlink() && p.is_file() && secret(p)))
+        .filter(|p| p.exists()).map(|p| canon(&p)).collect();
+    deny_read.sort();
     deny_read.dedup();
     let protect = protect_candidates(root).into_iter().filter(|p| p.exists()).collect();
     Policy { write, deny_read, protect, net, local_ports: vec![] }
 }
 
-/// git settings that run a program: one appearing in .git/config during a command is taken out again.
-static GIT_EXEC: LazyLock<Regex> = LazyLock::new(|| Regex::new(
-    r"(?im)^\s*(hookspath|fsmonitor|sshcommand|askpass|pager|editor|program|textconv|clean|smudge|process|helper|path|gitproxy)\s*=|^\s*\[(include|includeif)\b").unwrap());
+/// A git setting a command may leave behind. Everything else appearing in .git/config during a
+/// command is taken out again: git has many settings that run a program or redirect a push, and
+/// more each year, so this names the harmless ones instead of the dangerous ones. `was` is the
+/// file's settings before the command: a remote's address may be set for a new remote (`git remote
+/// add`), never changed for one that existed (that would send your next push somewhere else).
+fn git_setting_ok(key: &str, value: &str, was: &[(String, String)]) -> bool {
+    let (section, var) = (key.split('.').next().unwrap_or(""), key.rsplit('.').next().unwrap_or(""));
+    let plain_url = |v: &str| { let v = v.trim(); !v.starts_with("ext::") && !v.starts_with("fd::") && !v.starts_with('-') && !v.contains("::") };
+    match section {
+        "core" => matches!(var, "repositoryformatversion" | "filemode" | "bare" | "logallrefupdates" | "ignorecase" | "precomposeunicode"
+            | "symlinks" | "autocrlf" | "eol" | "safecrlf" | "quotepath" | "abbrev" | "compression" | "sharedrepository"
+            | "checkstat" | "trustctime" | "preloadindex" | "longpaths" | "commitgraph" | "untrackedcache"),
+        "remote" => match var {
+            // a new remote's fetch address; never a changed one, and never a separate push address
+            "url" => plain_url(value) && key.matches('.').count() >= 2 && !was.iter().any(|(k, _)| k == key),
+            _ => key.matches('.').count() >= 2 && matches!(var, "fetch" | "tagopt" | "prune" | "prunetags" | "skipdefaultupdate" | "partialclonefilter" | "promisor"),
+        },
+        "branch" => matches!(var, "remote" | "merge" | "rebase" | "description"),
+        "submodule" => matches!(var, "url" | "active" | "branch") && plain_url(value),
+        "user" => matches!(var, "name" | "email"),
+        "init" => var == "defaultbranch",
+        "pull" => matches!(var, "rebase" | "ff"),
+        "push" => matches!(var, "default" | "autosetupremote" | "followtags"),
+        "fetch" => matches!(var, "prune" | "prunetags" | "parallel"),
+        "rerere" | "color" | "column" | "advice" | "maintenance" | "gc" | "pack" => true,
+        "merge" => matches!(var, "ff" | "conflictstyle" | "renames"),
+        "rebase" => matches!(var, "autosquash" | "autostash" | "updaterefs"),
+        "diff" => matches!(var, "renames" | "algorithm" | "noprefix" | "colormoved" | "context"),
+        "status" => matches!(var, "showuntrackedfiles" | "branch" | "short" | "renames"),
+        "commit" | "tag" => var == "gpgsign",
+        _ => false,
+    }
+}
+
+/// git for qh's own calls on a project, outside the sandbox: `platform::git` (no fsmonitor, hooks,
+/// ext transport or pager), and no external diff or pager named by the environment. Callers that
+/// diff pass `--no-ext-diff --no-textconv` too: an empty `diff.external` would make every diff fail.
+pub fn git() -> std::process::Command {
+    let mut c = crate::platform::git();
+    c.env_remove("GIT_EXTERNAL_DIFF").env_remove("GIT_PAGER");
+    c
+}
+
+/// A config file's settings, read by git itself (a key on its section's line, odd spacing, line
+/// continuations: a pattern would miss some), without following includes. None if git can't read it.
+fn git_settings(body: &[u8]) -> Option<Vec<(String, String)>> {
+    let mut c = std::process::Command::new("git");
+    c.args(["config", "--file", "-", "--null", "--list"]);
+    let (o, _) = crate::platform::run_timeout(c, Some(body), 5, &std::env::temp_dir(), None).ok()?;
+    o.status.success().then(|| String::from_utf8_lossy(&o.stdout).split('\0').filter(|e| !e.is_empty()).map(|e| {
+        let (k, v) = e.split_once('\n').unwrap_or((e, ""));
+        (k.to_ascii_lowercase(), v.to_string())
+    }).collect())
+}
+
+/// Settings in `new` that weren't in `old` and aren't harmless; everything if git can't read `new`.
+fn bad_git_settings(old: &[u8], new: &[u8]) -> Option<Vec<String>> {
+    if old == new {
+        return Some(vec![]);
+    }
+    let was = git_settings(old).unwrap_or_default();
+    Some(git_settings(new)?.into_iter().filter(|p| !was.contains(p) && !git_setting_ok(&p.0, &p.1, &was)).map(|p| p.0).collect())
+}
+
+/// What `.git` was before a command: replacing it (a `gitdir:` file, a renamed folder) points git at
+/// hooks and settings no other check looks at.
+enum DotGit {
+    Absent,
+    Dir(u64),
+    File(Vec<u8>),
+}
+
+#[cfg(unix)]
+fn dir_id(m: &std::fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    m.ino()
+}
+
+#[cfg(not(unix))]
+fn dir_id(_: &std::fs::Metadata) -> u64 {
+    0
+}
+
+impl DotGit {
+    fn take(root: &Path) -> DotGit {
+        let g = root.join(".git");
+        match std::fs::symlink_metadata(&g) {
+            Ok(m) if m.is_dir() => DotGit::Dir(dir_id(&m)),
+            Ok(m) if m.is_file() => std::fs::read(&g).map(DotGit::File).unwrap_or(DotGit::Absent),
+            _ => DotGit::Absent,
+        }
+    }
+
+    /// The folder this `.git` was moved to: the same folder by id, or on Windows one that looks like a repo.
+    fn moved(root: &Path, id: u64) -> Option<PathBuf> {
+        let mut todo = vec![(root.to_path_buf(), 0)];
+        let mut seen = 0;
+        while let Some((d, depth)) = todo.pop() {
+            for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+                let p = e.path();
+                seen += 1;
+                let Ok(m) = std::fs::symlink_metadata(&p) else { continue };
+                if !m.is_dir() || seen > 20000 || p == root.join(".git") { continue }
+                if if cfg!(unix) { dir_id(&m) == id } else { p.join("HEAD").is_file() && p.join("objects").is_dir() } {
+                    return Some(p);
+                }
+                if depth < 3 { todo.push((p, depth + 1)) }
+            }
+        }
+        None
+    }
+
+    /// Put `.git` back if it was replaced; true if it had to.
+    fn restore(&self, root: &Path) -> bool {
+        let g = root.join(".git");
+        let now = std::fs::symlink_metadata(&g).ok();
+        let not_dir = now.as_ref().is_some_and(|m| !m.is_dir());
+        match self {
+            DotGit::Dir(id) => {
+                if now.as_ref().is_some_and(|m| m.is_dir() && dir_id(m) == *id) {
+                    return false;
+                }
+                if not_dir {
+                    let _ = std::fs::remove_file(&g);
+                }
+                if let Some(old) = Self::moved(root, *id) {
+                    if g.exists() {
+                        let _ = std::fs::rename(&g, root.join(format!(".git.replaced-{}", std::process::id())));
+                    }
+                    let _ = std::fs::rename(old, &g);
+                    return true;
+                }
+                not_dir
+            }
+            DotGit::File(b) => {
+                if not_dir && !now.as_ref().is_some_and(|m| m.is_symlink()) && std::fs::read(&g).is_ok_and(|n| n == *b) {
+                    return false;
+                }
+                if not_dir { let _ = std::fs::remove_file(&g); } else if now.is_some() { let _ = std::fs::remove_dir_all(&g); }
+                let _ = std::fs::write(&g, b);
+                true
+            }
+            // a new repo is fine; a new pointer to somewhere else isn't
+            DotGit::Absent => {
+                if not_dir { let _ = std::fs::remove_file(&g); }
+                not_dir
+            }
+        }
+    }
+}
 
 /// Protected paths as they were before a command, to put back whatever it changed: the fallback
 /// where the OS can't make them read-only (no namespaces, Windows), and the only guard for ones
 /// that don't exist yet (a new .envrc).
-pub struct Snapshot(Vec<(PathBuf, Option<Files>)>);
+pub struct Snapshot(Vec<(PathBuf, Option<Files>)>, DotGit, PathBuf);
 
 /// Every file under a path, with its contents while they fit the budget. None: too big to keep, so
 /// it can't be put back, but it is known to have been there and so is never deleted.
@@ -347,16 +506,21 @@ impl Snapshot {
         let (own, steer) = qh_own(root);
         let mut paths: Vec<PathBuf> = protect_candidates(root).into_iter().filter(|p| !own.iter().any(|o| under(p, o))).collect();
         paths.extend(steer);
-        paths.push(canon(root).join(".git/config"));
+        // first: the budget must not run out before it, or there's nothing to put back
+        paths.insert(0, canon(root).join(".git/config"));
+        let dot_git = DotGit::take(&canon(root));
         Snapshot(paths.into_iter().map(|p| {
             let state = p.exists().then(|| { let mut v = vec![]; files_under(&p, &mut v, &mut budget); v });
             (p, state)
-        }).collect())
+        }).collect(), dot_git, canon(root))
     }
 
     /// Put back what changed; the paths it put back.
     pub fn restore(&self) -> Vec<PathBuf> {
         let mut fixed = vec![];
+        if self.1.restore(&self.2) {
+            fixed.push(self.2.join(".git"));
+        }
         for (p, before) in &self.0 {
             let mut now = vec![];
             let mut budget = 8 << 20;
@@ -365,16 +529,30 @@ impl Snapshot {
             }
             let git_config = p.ends_with(".git/config");
             match before {
+                // a repo made during the command: keep it, without the settings that run things
+                None if p.exists() && git_config => {
+                    let new = now.first().and_then(|f| f.1.clone()).unwrap_or_default();
+                    let bad = bad_git_settings(b"", &new);
+                    for k in bad.clone().unwrap_or_default() {
+                        let _ = std::process::Command::new("git").arg("config").arg("--file").arg(p).args(["--unset-all", &k]).output();
+                    }
+                    let again = std::fs::read(p).unwrap_or_default();
+                    if !bad_git_settings(b"", &again).is_some_and(|b| b.is_empty()) {
+                        let _ = std::fs::remove_file(p);
+                    }
+                    if bad.is_none_or(|b| !b.is_empty()) {
+                        fixed.push(p.clone());
+                    }
+                }
                 None if p.exists() && !git_config => {
                     let _ = if p.is_dir() { std::fs::remove_dir_all(p) } else { std::fs::remove_file(p) };
                     fixed.push(p.clone());
                 }
                 Some(files) if git_config => {
-                    // ordinary git commands rewrite it (remote add, branch -u): only a new program-running key is undone
-                    let body = |v: &Files| v.first().and_then(|f| f.1.clone()).unwrap_or_default();
-                    let (old, new) = (body(files), body(&now));
-                    let count = |b: &[u8]| GIT_EXEC.find_iter(&String::from_utf8_lossy(b)).count();
-                    if count(&new) > count(&old) {
+                    // ordinary git commands rewrite it (remote add, branch -u): the rest is undone
+                    let Some(Some(old)) = files.first().map(|f| f.1.clone()) else { continue };
+                    let new = now.first().and_then(|f| f.1.clone()).unwrap_or_default();
+                    if bad_git_settings(&old, &new).is_none_or(|b| !b.is_empty()) {
                         let _ = std::fs::write(p, old);
                         fixed.push(p.clone());
                     }
@@ -671,12 +849,17 @@ in every mode.", show(&p.write), show(&p.deny_read), if p.protect.is_empty() { "
         if gone.is_empty() { "none".into() } else { gone.join(", ") })
 }
 
-/// Package registries and git hosts commands may reach without asking.
-const HOSTS: [&str; 33] = ["crates.io", "*.crates.io", "static.rust-lang.org", "registry.npmjs.org", "registry.yarnpkg.com",
-    "pypi.org", "files.pythonhosted.org", "github.com", "*.github.com", "*.githubusercontent.com", "gitlab.com",
-    "*.gitlab.com", "bitbucket.org", "proxy.golang.org", "sum.golang.org", "storage.googleapis.com", "repo.maven.apache.org",
+/// Package registries and git hosts commands may reach without asking. The proxy sees only a host
+/// (HTTPS is a tunnel), so a host that takes uploads lets a command send the project out with a
+/// token of its own: hosts whose job is uploads or an API (api/uploads/gist.github.com, upload.pypi.org,
+/// storage.googleapis.com, the bare crates.io API, hex.pm's API, registry.gitlab.com) ask instead.
+/// Left on: the git hosts themselves (clones of git dependencies) and the registries an install
+/// downloads from, which also take a `publish` or a push given a token: a known gap.
+const HOSTS: &[&str] = &["index.crates.io", "static.crates.io", "static.rust-lang.org", "registry.npmjs.org", "registry.yarnpkg.com",
+    "pypi.org", "files.pythonhosted.org", "github.com", "codeload.github.com", "*.githubusercontent.com", "gitlab.com",
+    "bitbucket.org", "proxy.golang.org", "sum.golang.org", "repo.maven.apache.org",
     "repo1.maven.org", "plugins.gradle.org", "services.gradle.org", "downloads.gradle.org", "rubygems.org", "index.rubygems.org",
-    "api.nuget.org", "repo.packagist.org", "hex.pm", "repo.hex.pm", "pub.dev", "conda.anaconda.org", "repo.anaconda.com",
+    "api.nuget.org", "repo.packagist.org", "repo.hex.pm", "builds.hex.pm", "pub.dev", "conda.anaconda.org", "repo.anaconda.com",
     "registry.bower.io", "deno.land", "jsr.io"];
 
 /// `host` matches an allowlist entry: exact, or "*.suffix" for any subdomain.
@@ -829,13 +1012,136 @@ mod tests {
 
     #[test]
     fn allowlist_hosts() {
-        assert!(host_listed("crates.io", &[]) && host_listed("index.crates.io", &[]) && host_listed("objects.githubusercontent.com", &[]));
+        assert!(host_listed("static.crates.io", &[]) && host_listed("index.crates.io", &[]) && host_listed("objects.githubusercontent.com", &[]));
+        assert!(host_listed("codeload.github.com", &[]) && host_listed("files.pythonhosted.org", &[]) && host_listed("registry.npmjs.org", &[]));
+        // hosts whose job is taking uploads or an API ask first: a command could send the project out
+        for up in ["api.github.com", "uploads.github.com", "gist.github.com", "upload.pypi.org", "storage.googleapis.com", "crates.io",
+                   "hex.pm", "registry.gitlab.com"] {
+            assert!(!host_listed(up, &[]), "{up}");
+        }
         assert!(!host_listed("evil.com", &[]) && !host_listed("crates.io.evil.com", &[]) && !host_listed("notgithub.com", &[]));
         assert!(host_listed("api.example.com", &["*.example.com".into()]));
     }
 
     /// b026: a file over the snapshot's budget used to leave every later file unrecorded, and
     /// restore deleted them all as new.
+    /// Everything here runs a program or redirects a push; git's parser finds it however it's spelled.
+    #[test]
+    fn git_settings_that_run_things_are_undone_however_written() {
+        let root = canon(&std::env::temp_dir()).join(format!("qh-gitset-{}", std::process::id()));
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        let base = "[core]\n\tbare = false\n";
+        std::fs::write(root.join(".git/config"), base).unwrap();
+        for bad in ["[core] fsmonitor = ./x\n", "[core] hooksPath = h\n", "[CORE]\nHOOKSPATH=h\n", "[diff]\n\texternal = ./x\n", "[alias]\n\tst = !./x\n",
+                    "[diff \"x\"]\n\tcommand = ./x\n", "[merge \"x\"]\n\tdriver = ./x\n", "[filter \"x\"] clean = ./x\n", "[extensions]\n\tworktreeConfig = true\n",
+                    "[remote \"o\"]\n\turl = x\n\tuploadpack = ./x\n", "[remote \"o\"]\n\turl = ext::./x\n", "[url \"https://evil/\"]\n\tinsteadOf = https://github.com/\n",
+                    "[include]\n\tpath = ../x\n", "[core]\n\tsshCommand = ./x\n", "[http]\n\tproxy = http://evil\n", "[submodule \"m\"]\n\tupdate = !./x\n", "not a config [[["] {
+            let s = Snapshot::take(&root);
+            std::fs::write(root.join(".git/config"), format!("{base}{bad}")).unwrap();
+            assert_eq!(s.restore().len(), 1, "{bad}");
+            assert_eq!(std::fs::read_to_string(root.join(".git/config")).unwrap(), base, "{bad}");
+        }
+        for fine in ["[remote \"o\"]\n\turl = https://github.com/o/r\n\tfetch = +refs/heads/*:refs/remotes/o/*\n", "[branch \"m\"]\n\tremote = o\n\tmerge = refs/heads/m\n",
+                     "[user]\n\tname = a\n", "[pull]\n\trebase = true\n"] {
+            let s = Snapshot::take(&root);
+            let body = format!("{base}{fine}");
+            std::fs::write(root.join(".git/config"), &body).unwrap();
+            assert!(s.restore().is_empty(), "{fine}");
+            assert_eq!(std::fs::read_to_string(root.join(".git/config")).unwrap(), body);
+        }
+        // what was already there stays, whatever it is: only the command's changes are judged
+        let keep = format!("{base}[alias]\n\tst = !mine\n");
+        std::fs::write(root.join(".git/config"), &keep).unwrap();
+        let s = Snapshot::take(&root);
+        std::fs::write(root.join(".git/config"), format!("{keep}[user]\n\tname = a\n")).unwrap();
+        assert!(s.restore().is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Settings that pass git's own "harmless" look but run a program (git-lfs custom transfers) or
+    /// send the next push somewhere else (a changed or added push address, url rewriting).
+    #[test]
+    fn git_settings_that_redirect_a_push_are_undone() {
+        let root = canon(&std::env::temp_dir()).join(format!("qh-gitredir-{}", std::process::id()));
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        let base = "[core]\n\tbare = false\n[remote \"origin\"]\n\turl = https://github.com/me/proj.git\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n";
+        std::fs::write(root.join(".git/config"), base).unwrap();
+        for bad in ["[lfs \"customtransfer.x\"]\n\tpath = /tmp/x.sh\n", "[lfs]\n\tstandalonetransferagent = x\n", "[lfs]\n\turl = https://evil/\n",
+                    "[remote \"origin\"]\n\tpushurl = https://attacker.example/steal.git\n", "[remote \"evil\"]\n\tpushurl = https://attacker.example/x\n",
+                    "[branch \"main\"]\n\tpushRemote = evil\n", "[remote]\n\tpushDefault = evil\n", "[url \"https://evil/\"]\n\tpushInsteadOf = https://github.com/\n",
+                    "[url \"https://evil/\"]\n\tinsteadOf = https://github.com/\n", "[push]\n\tpushOption = x\n", "[pull]\n\ttwohead = x\n",
+                    "[fetch]\n\trecurseSubmodules = yes\n", "[remote \"x\"]\n\turl = persistent-https::x\n", "[remote \"origin\"]\n\tmirror = true\n"] {
+            let s = Snapshot::take(&root);
+            std::fs::write(root.join(".git/config"), format!("{base}{bad}")).unwrap();
+            assert_eq!(s.restore().len(), 1, "{bad}");
+            assert_eq!(std::fs::read_to_string(root.join(".git/config")).unwrap(), base, "{bad}");
+        }
+        // origin's address changed in place, however it's written
+        for moved in [base.replace("github.com/me/proj", "attacker.example/steal"), format!("{base}\turl = https://attacker.example/also\n")] {
+            let s = Snapshot::take(&root);
+            std::fs::write(root.join(".git/config"), &moved).unwrap();
+            assert_eq!(s.restore().len(), 1, "{moved}");
+            assert_eq!(std::fs::read_to_string(root.join(".git/config")).unwrap(), base);
+        }
+        // a new remote, an upstream for a branch, ordinary pull/push choices stay
+        for fine in ["[remote \"up\"]\n\turl = https://github.com/them/proj.git\n\tfetch = +refs/heads/*:refs/remotes/up/*\n",
+                     "[branch \"main\"]\n\tremote = origin\n\tmerge = refs/heads/main\n", "[pull]\n\trebase = true\n[push]\n\tautoSetupRemote = true\n"] {
+            let s = Snapshot::take(&root);
+            let body = format!("{base}{fine}");
+            std::fs::write(root.join(".git/config"), &body).unwrap();
+            assert!(s.restore().is_empty(), "{fine}");
+            std::fs::write(root.join(".git/config"), base).unwrap();
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn credential_files_are_secret_and_unreadable() {
+        let h = canon(&crate::config::home());
+        for f in [".oci/config", ".oci/oci_api_key.pem", ".local/share/opencode/auth.json", ".grok/auth.json", ".gemini/oauth_creds.json",
+                  ".config/github-copilot/apps.json", ".local/share/com.vercel.cli/auth.json", ".config/manicode/credentials.json",
+                  ".config/doubletake/x", ".claude.json", ".claude/.credentials.json", ".claude/sessions/x", ".config/Signal/config.json",
+                  ".steam/steam.token", ".config/1Password/x", ".config/rclone/rclone.conf", ".config/heroic/gog_store/auth.json", ".netrc", ".npmrc",
+                  ".pypirc", ".docker/config.json", ".kube/config", ".aws/credentials", ".azure/x", ".config/gcloud/x", ".terraform.d/x"] {
+            assert!(secret(&h.join(f)), "{f}");
+        }
+        assert!(!secret(&h.join(".config/nvim/init.lua")) && !secret(&h.join(".steam/steam/x")) && !secret(&h.join(".cargo/bin/cargo")));
+        for cmd in ["cat ~/.oci/config", "cat $HOME/.oci/oci_api_key.pem", "cat ./certs/server.key", "cp *.pem /tmp", "cat ~/.npmrc", "cat ~/.claude.json",
+                    "base64 ~/.docker/config.json", "cat backup.kdbx"] {
+            assert!(cmd_check(cmd).is_some(), "{cmd}");
+        }
+        for cmd in ["jq .key data.json", "cargo build", "cat src/key.rs", "cat .env.example", "ls ~/.config"] {
+            assert!(cmd_check(cmd).is_none(), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn a_replaced_dot_git_goes_back() {
+        let root = canon(&std::env::temp_dir()).join(format!("qh-dotgit-{}", std::process::id()));
+        std::fs::create_dir_all(root.join(".git/hooks")).unwrap();
+        std::fs::write(root.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::create_dir_all(root.join(".git/objects")).unwrap();
+        let s = Snapshot::take(&root);
+        std::fs::rename(root.join(".git"), root.join(".g2")).unwrap();
+        std::fs::write(root.join(".git"), "gitdir: .g3\n").unwrap();
+        assert!(!s.restore().is_empty());
+        assert!(root.join(".git/HEAD").is_file() && !root.join(".g2").exists());
+        // a pointer where there was no repo goes too; a real new repo stays
+        let bare = root.join("plain");
+        std::fs::create_dir_all(&bare).unwrap();
+        let s = Snapshot::take(&bare);
+        std::fs::write(bare.join(".git"), "gitdir: x\n").unwrap();
+        assert!(!s.restore().is_empty());
+        assert!(!bare.join(".git").exists());
+        let s = Snapshot::take(&bare);
+        std::fs::create_dir_all(bare.join(".git")).unwrap();
+        std::fs::write(bare.join(".git/config"), "[core]\n\tbare = false\n\tfsmonitor = ./x\n").unwrap();
+        assert!(!s.restore().is_empty());
+        let left = std::fs::read_to_string(bare.join(".git/config")).unwrap_or_default();
+        assert!(!left.contains("fsmonitor"), "{left}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn snapshot_over_budget_deletes_nothing() {
         let root = canon(&std::env::temp_dir()).join(format!("qh-snap-big-{}", std::process::id()));

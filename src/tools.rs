@@ -317,7 +317,7 @@ const SKIP_DIRS: [&str; 7] = [".git", ".venv", "venv", "node_modules", "__pycach
 
 pub fn source_files(cwd: &Path, root: &str) -> Vec<(PathBuf, String)> {
     let root = if root.is_empty() { cwd.to_path_buf() } else { resolve(cwd, root) };
-    let git = Command::new("git").arg("ls-files").current_dir(&root).output();
+    let git = crate::sandbox::git().arg("ls-files").current_dir(&root).output();
     let files: Vec<PathBuf> = if root.is_file() { vec![root.clone()] } else { match git {
         Ok(o) if o.status.success() && !o.stdout.is_empty() => {
             String::from_utf8_lossy(&o.stdout).lines().map(|f| root.join(f)).collect()
@@ -364,9 +364,13 @@ fn find_references(cwd: &Path, a: &Value) -> Result<String, String> {
             return Ok(r);
         }
     }
+    refs_in(&source_files(cwd, sa(a, "path")), a)
+}
+
+fn refs_in(files: &[(PathBuf, String)], a: &Value) -> Result<String, String> {
     let pat = word(sa(a, "name"))?;
     let mut hits = vec![];
-    for (f, t) in source_files(cwd, sa(a, "path")) {
+    for (f, t) in files {
         for (i, l) in t.lines().enumerate().filter(|(_, l)| pat.is_match(l)) {
             hits.push(format!("{}:{}: {}", f.display(), i + 1, l.trim()));
         }
@@ -512,8 +516,6 @@ fn bash(cwd: &mut PathBuf, a: &Value, cfg: &Config, sb: &crate::sandbox::Ctx) ->
 }
 
 fn grep(cwd: &Path, a: &Value) -> Result<String, String> {
-    let pattern = sa(a, "pattern");
-    let pat = Regex::new(pattern).or_else(|_| Regex::new(&regex::escape(pattern))).map_err(|e| e.to_string())?;
     let path = sa(a, "path");
     let file = resolve(cwd, path);
     let files = if !path.is_empty() && file.is_file() {
@@ -521,10 +523,16 @@ fn grep(cwd: &Path, a: &Value) -> Result<String, String> {
     } else {
         source_files(cwd, path)
     };
+    grep_in(&files, a)
+}
+
+fn grep_in(files: &[(PathBuf, String)], a: &Value) -> Result<String, String> {
+    let pattern = sa(a, "pattern");
+    let pat = Regex::new(pattern).or_else(|_| Regex::new(&regex::escape(pattern))).map_err(|e| e.to_string())?;
     let (only, offset) = (a["only_matching"].as_bool().unwrap_or(false), ia(a, "offset", 0).max(0) as usize);
     let budget = max_chars().saturating_sub(200).max(1000);
     let (mut out, mut total, mut shown, mut next) = (String::new(), 0usize, 0usize, None);
-    for (f, t) in &files {
+    for (f, t) in files {
         for (i, l) in t.lines().enumerate().filter(|(_, l)| pat.is_match(l)) {
             total += 1;
             if total <= offset || next.is_some() {
@@ -1001,6 +1009,91 @@ pub fn call(name: &str, a: &Value, cfg: &Config, cwd: &mut PathBuf, lim: &crate:
     r.unwrap_or_else(|e| format!("error: {e}"))
 }
 
+/// read_file, grep and find_references for an agent answering a teammate's question: the asker
+/// steers it, so it sees only what read_team_file would show them. Paths stay inside the project
+/// root (`root`); no `..`, `~`, link out of it, `.git`, secret, protected or git-ignored file.
+pub fn call_confined(name: &str, a: &Value, cwd: &Path, root: &Path) -> String {
+    let r = (|| {
+        let root = root.canonicalize().map_err(|_| "the project folder is gone".to_string())?;
+        let rel = project_rel(&root, cwd, sa(a, "path"))?;
+        match name {
+            "read_file" => {
+                let (full, _) = crate::team::shared_path(&root, &rel, true)?;
+                let mut b = a.clone();
+                b["path"] = Value::String(full.to_string_lossy().to_string());
+                read_file(&root, &b)
+            }
+            "grep" | "find_references" => {
+                let files = shared_files(&root, &rel)?;
+                if name == "grep" { grep_in(&files, a) } else { refs_in(&files, a) }
+            }
+            _ => Err(format!("{name} isn't available here: read_file, grep and find_references only")),
+        }
+    })();
+    r.unwrap_or_else(|e| format!("error: {e}"))
+}
+
+/// `path` (as the model gave it: relative to `cwd`, or absolute) as a path inside `root`, or why not.
+fn project_rel(root: &Path, cwd: &Path, path: &str) -> Result<String, String> {
+    let path = path.trim();
+    let outside = || format!("{path}: outside the project; only files under {} can be read here", root.display());
+    if path.starts_with('~') {
+        return Err(outside());
+    }
+    let p = Path::new(path);
+    let rel = if p.is_absolute() {
+        // as written, links not followed: shared_path decides where it really leads
+        p.strip_prefix(root).map(Path::to_path_buf).map_err(|_| outside())?
+    } else {
+        let here = crate::sandbox::canon(cwd);
+        here.strip_prefix(root).map_err(|_| outside())?.join(p)
+    };
+    if rel.components().any(|c| !matches!(c, std::path::Component::Normal(_) | std::path::Component::CurDir)) {
+        return Err(format!("{path}: give a path inside the project, without .."));
+    }
+    Ok(rel.to_string_lossy().to_string())
+}
+
+/// The files under `rel` (a file or folder inside `root`; "" = all of it) that `shared_path`
+/// allows, with their text: git's list (tracked, and new files it doesn't ignore), else a walk
+/// that follows no link.
+fn shared_files(root: &Path, rel: &str) -> Result<Vec<(PathBuf, String)>, String> {
+    let rel = rel.trim_start_matches("./");
+    let target = if rel.is_empty() || rel == "." { root.to_path_buf() } else { root.join(rel) };
+    if target.is_file() {
+        let (full, _) = crate::team::shared_path(root, rel, true)?;
+        let t = std::fs::read_to_string(&full).map_err(|e| format!("{rel}: {e}"))?;
+        return Ok(vec![(full, t)]);
+    }
+    let listed = crate::sandbox::git().current_dir(root).env("GIT_CONFIG_NOSYSTEM", "1")
+        .args(["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--"]).arg(if rel.is_empty() { "." } else { rel })
+        .stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output().ok().filter(|o| o.status.success());
+    let names: Vec<String> = match listed {
+        Some(o) => String::from_utf8_lossy(&o.stdout).split('\0').filter(|f| !f.is_empty()).map(String::from).collect(),
+        None => {
+            let mut out = vec![];
+            let mut stack = vec![target.clone()];
+            while let Some(d) = stack.pop() {
+                for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+                    let Ok(t) = e.file_type() else { continue };
+                    let p = e.path();
+                    if t.is_dir() && !SKIP_DIRS.contains(&e.file_name().to_string_lossy().as_ref()) {
+                        stack.push(p);
+                    } else if t.is_file() {
+                        if let Ok(r) = p.strip_prefix(root) { out.push(r.to_string_lossy().to_string()) }
+                    }
+                }
+            }
+            out
+        }
+    };
+    Ok(names.iter().take(20_000).filter_map(|f| {
+        let (full, _) = crate::team::shared_path(root, f, false).ok()?;
+        if std::fs::metadata(&full).ok()?.len() >= 1_000_000 { return None }
+        Some((full.clone(), std::fs::read_to_string(&full).ok()?))
+    }).collect())
+}
+
 #[cfg(test)]
 mod url_tests {
     #[test]
@@ -1147,4 +1240,57 @@ mod cwd_tests {
         assert!(bash(&mut d, &json!({"cmd": "false"})).unwrap().starts_with("exit 1"));
     }
 
+}
+
+#[cfg(test)]
+mod confined_tests {
+    use serde_json::json;
+
+    /// answer_question's lookups: a teammate steers them, so nothing outside the project, and
+    /// nothing read_team_file wouldn't show (links out, .git, secrets, ignored files).
+    #[cfg(unix)]
+    #[test]
+    fn lookups_for_a_teammate_stay_in_the_project() {
+        let base = crate::sandbox::canon(&std::env::temp_dir()).join(format!("qh-confined-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (root, out) = (base.join("proj"), base.join("outside"));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(&out).unwrap();
+        assert!(std::process::Command::new("git").arg("init").arg("-q").arg(&root).status().unwrap().success());
+        std::fs::write(out.join("secret.txt"), "CANARY outside\n").unwrap();
+        std::fs::write(root.join("src/a.rs"), "fn find_me() {}\n// CANARY? no: fine\n").unwrap();
+        std::fs::write(root.join(".env"), "CANARY env\n").unwrap();
+        std::fs::write(root.join(".gitignore"), "local.txt\n").unwrap();
+        std::fs::write(root.join("local.txt"), "CANARY ignored\n").unwrap();
+        std::os::unix::fs::symlink(out.join("secret.txt"), root.join("src/link.rs")).unwrap();
+        std::os::unix::fs::symlink(&out, root.join("dirlink")).unwrap();
+        let call = |name: &str, a: serde_json::Value| super::call_confined(name, &a, &root, &root);
+        let o = out.join("secret.txt").display().to_string();
+        for path in [o.as_str(), "../outside/secret.txt", "~/.ssh/id_rsa", "/etc/passwd", "src/link.rs", "dirlink/secret.txt", ".git/config", ".env", "local.txt",
+                     "src/../../outside/secret.txt"] {
+            let r = call("read_file", json!({"path": path}));
+            assert!(r.starts_with("error") && !r.contains("CANARY"), "{path}: {r}");
+        }
+        assert!(call("read_file", json!({"path": "src/a.rs"})).contains("fn find_me"));
+        assert!(call("read_file", json!({"path": root.join("src/a.rs").display().to_string()})).contains("fn find_me"));
+        // from a folder inside the project, relative to it
+        assert!(super::call_confined("read_file", &json!({"path": "a.rs"}), &root.join("src"), &root).contains("fn find_me"));
+        let all = call("grep", json!({"pattern": "CANARY"}));
+        assert!(all.contains("a.rs") && !all.contains("outside") && !all.contains("env") && !all.contains("ignored"), "{all}");
+        for path in ["/", "..", "dirlink", o.as_str(), "~"] {
+            let r = call("grep", json!({"pattern": "CANARY", "path": path}));
+            assert!(!r.contains("CANARY "), "{path}: {r}");
+        }
+        let r = call("find_references", json!({"name": "find_me", "path": ""}));
+        assert!(r.contains("a.rs:1"), "{r}");
+        assert!(call("find_references", json!({"name": "CANARY", "path": "/"})).starts_with("error"));
+        // outside a git repo: a walk that follows no link
+        let plain = base.join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        std::fs::write(plain.join("b.rs"), "CANARY? fine\n").unwrap();
+        std::os::unix::fs::symlink(&out, plain.join("l")).unwrap();
+        let r = super::call_confined("grep", &json!({"pattern": "CANARY"}), &plain, &plain);
+        assert!(r.contains("b.rs") && !r.contains("outside"), "{r}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }

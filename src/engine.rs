@@ -521,7 +521,7 @@ Then 'PROMISE: yes' only if your answer commits to the future: that something wo
 Saying what the code does today is 'PROMISE: no'.")}));
     let schemas: Vec<Value> = lock(&m.set).tools.iter()
         .filter(|t| matches!(t["function"]["name"].as_str(), Some("read_file" | "grep" | "find_references"))).cloned().collect();
-    let mut cwd = m.cwd();
+    let cwd = m.cwd();
     let mut text = String::new();
     for round in 0..=LOOKS {
         if round == LOOKS {
@@ -544,7 +544,8 @@ Saying what the code does today is 'PROMISE: no'.")}));
             let out = if let Some(why) = guarded {
                 format!("error: not here: it {why}")
             } else if schemas.iter().any(|s| s["function"]["name"] == name.as_str()) && read_only(hub, &name, &args) {
-                tools::call(&name, &args, &hub.cfg, &mut cwd, &hub.limits(m), &crate::sandbox::Ctx { root: m.root.clone(), proxy: None, tab: m.name.clone(), stop: None })
+                // the asker steers these: only what read_team_file would show them, never a path outside the project
+                tools::call_confined(&name, &args, &cwd, &m.root)
             } else {
                 format!("error: {name} isn't available here: read_file, grep and find_references only")
             };

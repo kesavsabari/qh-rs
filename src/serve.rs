@@ -278,7 +278,7 @@ fn team_pusher(st: Arc<State>) {
 /// untracked, .gitignore respected) in a repo, else a walk that skips the usual build folders. 20k max.
 fn project_files(root: &Path) -> Vec<String> {
     const MAX: usize = 20000;
-    let git = std::process::Command::new("git").args(["ls-files", "-z", "--cached", "--others", "--exclude-standard"])
+    let git = crate::platform::git().args(["ls-files", "-z", "--cached", "--others", "--exclude-standard"])
         .current_dir(root).stderr(std::process::Stdio::null()).output();
     let mut out: Vec<String> = match git {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).split('\0')

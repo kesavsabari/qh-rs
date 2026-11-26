@@ -2645,7 +2645,7 @@ $ARGUMENTS is replaced by what you type after the command".into()
             .split('-').filter(|w| !w.is_empty()).take(5).collect::<Vec<_>>().join("-");
         let branch = format!("qh/{n}-{slug}");
         let dir = crate::teamview::tasks_dir(&root).join(n.to_string());
-        let git = |args: &[&str]| std::process::Command::new("git").current_dir(&root).args(args)
+        let git = |args: &[&str]| crate::platform::git().current_dir(&root).args(args)
             .stdin(std::process::Stdio::null()).output().map_err(|e| e.to_string())
             .and_then(|o| if o.status.success() { Ok(()) } else { Err(String::from_utf8_lossy(&o.stderr).trim().to_string()) });
         if !dir.exists() {

@@ -96,6 +96,9 @@ const BDAY_SOCKETS: usize = 256;
 const BDAY_FOR: Duration = Duration::from_secs(20);
 const BDAY_RATE: u32 = 100; // probes a second from the side that sprays
 const BDAY_EVERY: Duration = Duration::from_secs(300);
+// Addresses a teammate may publish (their own list has a LAN, an IPv6, a public and a mapped one or
+// two): what they send beyond it is dropped, so they can't point our hellos at many hosts.
+const MAX_ADDRS: usize = 16;
 
 /// One packet on a TCP stream: a 2-byte length, then the packet.
 pub fn write_frame(w: &mut impl Write, pkt: &[u8]) -> std::io::Result<()> {
@@ -104,7 +107,11 @@ pub fn write_frame(w: &mut impl Write, pkt: &[u8]) -> std::io::Result<()> {
 }
 
 /// The relay used when the config says relay = "default". Empty until the project runs one.
-pub const DEFAULT_RELAY: Option<&str> = Some("15.235.127.134:47232");
+pub const DEFAULT_RELAY: Option<&str> = Some("92.5.142.50:47232");
+/// The old default (OVH, Canada), still in `relay = "default"`: every qh up to 0.2.8 has only this
+/// one, so a teammate on an older qh and one on a newer qh can still meet at it. Drop it once
+/// those releases are gone.
+pub const BACKUP_RELAY: &str = "15.235.127.134:47232";
 const RELAY_BYTES_PER_MIN: usize = 2 * 1024 * 1024;
 // A teammate who left: keep saying hello where they last were, a little more often than an
 // unanswered UDP flow is forgotten (30 s on Linux), so our side of the hole stays open for them.
@@ -128,7 +135,7 @@ pub enum Event {
 #[derive(Clone, Debug, PartialEq)]
 pub struct LineInfo {
     pub public: String,
-    pub path: Option<String>,   // "lan 192.168.1.4:7001", "via <key>", "relay ovh-ca"; None: no line
+    pub path: Option<String>,   // "lan 192.168.1.4:7001", "via <key>", "relay oracle-fra"; None: no line
     pub rtt_ms: Option<u64>,    // None until the first echo comes back (or they run an older qh)
     pub trying_secs: Option<u64>,
     pub why: Option<String>,    // why there's no line, when there isn't
@@ -285,6 +292,49 @@ fn rank(p: &Path) -> u8 {
             }
         },
     }
+}
+
+/// A teammate's text made safe for a terminal: control characters (escape sequences, carriage
+/// returns, new lines that would fake another line) and bidirectional overrides shown escaped.
+fn printable(s: &str) -> String {
+    s.chars().map(|c| if c.is_control() || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200e}' | '\u{200f}' | '\u{061c}') {
+        c.escape_unicode().to_string()
+    } else {
+        c.to_string()
+    }).collect()
+}
+
+/// An address a teammate published that we may send hellos to: a real host and port, not a
+/// broadcast, multicast or "any" address (where hellos would reach other machines than theirs).
+fn sendable(a: &SocketAddr) -> bool {
+    a.port() != 0 && match a.ip() {
+        IpAddr::V4(ip) => !(ip.is_unspecified() || ip.is_broadcast() || ip.is_multicast()),
+        IpAddr::V6(ip) => !(ip.is_unspecified() || ip.is_multicast()) && ip.to_ipv4_mapped().is_none_or(|v4| sendable(&SocketAddr::new(IpAddr::V4(v4), a.port()))),
+    }
+}
+
+/// A public IPv4 address on the internet: not private, shared (CGNAT), loopback, link-local,
+/// documentation, benchmarking, reserved, broadcast or multicast.
+fn global_v4(ip: Ipv4Addr) -> bool {
+    let o = ip.octets();
+    !(ip.is_private() || ip.is_loopback() || ip.is_link_local() || ip.is_multicast() || ip.is_broadcast() || ip.is_unspecified()
+        || ip.is_documentation() || o[0] == 0 || o[0] >= 240 || (o[0] == 100 && o[1] & 0xc0 == 64)
+        || (o[0] == 192 && o[1] == 0 && o[2] == 0) || (o[0] == 198 && o[1] & 0xfe == 18))
+}
+
+/// Where a birthday punch toward a teammate goes: one public IPv4 address of theirs (a NAT has
+/// one), never a local, reserved or multicast one, so their list can't aim our 100 packets a
+/// second at a network or a host of their choosing. One where a line to them worked before comes
+/// first; else the first public one they published (their newest STUN answer). The other side's
+/// address can't be checked further here: the relay doesn't say where it saw them.
+fn bday_target(addrs: &[SocketAddr], known: &[SocketAddr]) -> Vec<SocketAddr> {
+    let v4 = |a: &SocketAddr| match a.ip() {
+        IpAddr::V4(ip) => Some(ip),
+        IpAddr::V6(ip) => ip.to_ipv4_mapped(),
+    };
+    let claimed: Vec<(Ipv4Addr, &SocketAddr)> = addrs.iter().filter_map(|a| v4(a).filter(|ip| global_v4(*ip)).map(|ip| (ip, a))).collect();
+    let seen = claimed.iter().find(|(ip, _)| known.iter().any(|k| v4(k) == Some(*ip)));
+    seen.or(claimed.first()).map(|(ip, a)| SocketAddr::new(IpAddr::V4(*ip), a.port())).into_iter().collect()
 }
 
 fn kind(a: &SocketAddr) -> &'static str {
@@ -669,7 +719,7 @@ impl Link {
         let relays: Vec<Server> = addrs.iter().filter(|a| a.starts_with("relay=")).filter_map(|a| parse_server(a)).collect();
         let strict = addrs.iter().any(|a| a == "nat=strict");
         let addrs: Vec<SocketAddr> = addrs.iter()
-            .filter_map(|a| a.rsplit_once('=').map_or(a.as_str(), |(_, x)| x).parse().ok()).collect();
+            .filter_map(|a| a.rsplit_once('=').map_or(a.as_str(), |(_, x)| x).parse().ok()).filter(sendable).take(MAX_ADDRS).collect();
         let mut i = lock(&self.inner);
         let id = id_of(&pk);
         if id == i.me {
@@ -695,7 +745,12 @@ impl Link {
             }
             return;
         }
-        let static_dh = *i.secret.diffie_hellman(&PublicKey::from(pk)).as_bytes();
+        // a low-order key gives an all-zero secret anyone can compute: their hellos could be forged
+        let shared = i.secret.diffie_hellman(&PublicKey::from(pk));
+        if !shared.was_contributory() {
+            return;
+        }
+        let static_dh = *shared.as_bytes();
         let now = Instant::now();
         let known = i.memory.get(public).cloned().unwrap_or_default();
         i.peers.push(Peer {
@@ -949,7 +1004,7 @@ impl Link {
             let p = &mut i.peers[k];
             let direct = p.sess.as_ref().is_some_and(|s| matches!(s.path, Path::Direct(_)));
             let waiting = p.sess.is_some() || p.trying_since.is_some_and(|t| now - t >= TRY_RELAY_AFTER);
-            let public: Vec<SocketAddr> = p.addrs.iter().filter(|a| kind(a) == "public").copied().collect();
+            let public = bday_target(&p.addrs, &p.known);
             if !direct && waiting && p.strict != me_strict && !public.is_empty() && p.bday_at.is_none_or(|t| now - t > BDAY_EVERY) {
                 p.bday_at = Some(now);
                 bdays.push((p.public.clone(), public, me_strict));
@@ -1290,9 +1345,15 @@ fn describe(i: &Inner, p: &Path) -> String {
     }
 }
 
-/// "ovh-ca" for qh's default relay, else its address.
+/// "oracle-fra" / "ovh-ca" for qh's default relays, else its address.
 fn relay_name(a: &SocketAddr) -> String {
-    if DEFAULT_RELAY.is_some_and(|d| d.parse() == Ok(*a)) { "ovh-ca (qh's default)".into() } else { a.to_string() }
+    if DEFAULT_RELAY.is_some_and(|d| d.parse() == Ok(*a)) {
+        "oracle-fra (qh's default)".into()
+    } else if BACKUP_RELAY.parse() == Ok(*a) {
+        "ovh-ca (qh's backup)".into()
+    } else {
+        a.to_string()
+    }
 }
 
 /// Teammates with a direct line that could pass packets on to peer `k`.
@@ -1465,7 +1526,11 @@ fn on_hello(i: &mut Inner, k: usize, pkt: &[u8], plain: &[u8; 17], from: Path, s
     }
     p.hello_ts = p.hello_ts.max(ts);
     if fresh_eph {
-        let ee = *i.eph.diffie_hellman(&PublicKey::from(eph)).as_bytes();
+        let shared = i.eph.diffie_hellman(&PublicKey::from(eph));
+        if !shared.was_contributory() {
+            return; // a low-order point: the line's keys would rest on the long-term keys alone
+        }
+        let ee = *shared.as_bytes();
         let ikm = [&i.peers[k].static_dh[..], &ee].concat();
         let them = i.peers[k].id;
         let dir = |a: &Id, b: &Id, ea: &[u8; 32], eb: &[u8; 32]| [&a[..], b, ea, eb].concat();
@@ -1721,8 +1786,8 @@ fn on_data(i: &mut Inner, k: usize, pkt: &[u8], from: Path, sends: &mut Vec<(Soc
         ADDRS => {
             let text = String::from_utf8_lossy(body);
             let ms = text.split(' ').find_map(|t| t.strip_prefix("ms=")?.parse::<u64>().ok()).unwrap_or(0);
-            let addrs: Vec<SocketAddr> = text.split(' ').filter_map(|a| a.parse().ok()).collect();
-            let relays: Vec<Server> = text.split(' ').filter(|t| t.starts_with("relay=")).filter_map(parse_server).collect();
+            let addrs: Vec<SocketAddr> = text.split(' ').filter_map(|a| a.parse().ok()).filter(sendable).take(MAX_ADDRS).collect();
+            let relays: Vec<Server> = text.split(' ').filter(|t| t.starts_with("relay=")).filter_map(parse_server).take(MAX_ADDRS).collect();
             let p = &mut i.peers[k];
             if !relays.is_empty() {
                 p.relays = relays;
@@ -1828,7 +1893,7 @@ fn upnp_map(lan: IpAddr, port: u16) -> Option<(SocketAddr, Upnp)> {
 /// The relay setting ("default", "none", or "host:port#secret,...") as server specs.
 pub fn relay_specs(setting: &str) -> Vec<String> {
     match setting.trim() {
-        "" | "default" => DEFAULT_RELAY.map(String::from).into_iter().collect(),
+        "" | "default" => DEFAULT_RELAY.into_iter().chain([BACKUP_RELAY]).map(String::from).collect(),
         "none" | "off" => vec![],
         list => list.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
     }
@@ -1860,7 +1925,7 @@ pub fn cli(args: &[String]) -> i32 {
     std::thread::spawn(move || {
         for e in rx {
             match e {
-                Event::Msg { from, data } => println!("[{}] {}", &from[..6], String::from_utf8_lossy(&data)),
+                Event::Msg { from, data } => println!("[{}] {}", &from[..6], printable(&String::from_utf8_lossy(&data))),
                 Event::Up { peer, path } => println!("up {} ({path})", &peer[..6]),
                 Event::Down { peer } => println!("down {}", &peer[..6]),
                 Event::Delivered { peer, id } => println!("delivered #{} to {}", id % 1000, &peer[..6]),
@@ -1918,6 +1983,57 @@ mod tests {
 
     fn node() -> (Arc<Link>, Receiver<Event>) {
         Link::start(StaticSecret::from(random()), Options { port: 0, stun: false, upnp: false, relay: true, beacon: false, remember: None, relays: vec![] }).unwrap()
+    }
+
+    /// A teammate's published addresses can't aim the birthday spray (100 packets a second) at a
+    /// network or a host of their choosing: one public IPv4 address, never a local, reserved or
+    /// multicast one; one where a line to them worked before is preferred.
+    #[test]
+    fn the_spray_goes_only_to_one_public_address() {
+        let a = |s: &str| s.parse::<SocketAddr>().unwrap();
+        for bad in ["127.0.0.1:9", "10.0.0.5:9", "192.168.1.1:9", "172.16.0.1:9", "100.64.0.1:9", "169.254.1.1:9", "224.0.0.1:9",
+                    "255.255.255.255:9", "0.0.0.0:9", "240.0.0.1:9", "192.0.2.1:9", "198.51.100.1:9", "203.0.113.9:9", "198.18.0.1:9",
+                    "[::1]:9", "[2001:db8::1]:9", "[::ffff:10.0.0.1]:9", "[ff02::1]:9"] {
+            assert!(bday_target(&[a(bad)], &[]).is_empty(), "{bad}");
+        }
+        let many: Vec<SocketAddr> = (1..=40).map(|n| a(&format!("8.8.{n}.1:5000"))).collect();
+        assert_eq!(bday_target(&many, &[]), vec![a("8.8.1.1:5000")], "one address, not a list of victims");
+        assert_eq!(bday_target(&many, &[a("8.8.7.1:4000")]), vec![a("8.8.7.1:5000")], "where a line worked before comes first");
+        assert_eq!(bday_target(&[a("[::ffff:8.8.8.8]:7")], &[]), vec![a("8.8.8.8:7")]);
+        // and a published list is cut to a few sendable addresses
+        for bad in ["0.0.0.0:9", "255.255.255.255:9", "224.0.0.251:5353", "1.2.3.4:0", "[ff02::1]:9", "[::]:9"] {
+            assert!(!sendable(&a(bad)), "{bad}");
+        }
+        assert!(sendable(&a("127.0.0.1:9")) && sendable(&a("192.168.1.4:7001")) && sendable(&a("8.8.8.8:1")));
+        let (l, _r) = node();
+        let (k, _) = card(&l);
+        let (other, _r2) = node();
+        let list: Vec<String> = (1..=100).map(|n| format!("public=8.8.{n}.1:5000")).chain(["lan=224.0.0.1:9".into()]).collect();
+        other.peer(&k, &list, 0);
+        let held = lock(&other.inner).peers.iter().find(|p| p.public == k).map(|p| p.addrs.clone()).unwrap();
+        assert!(held.len() <= MAX_ADDRS && held.iter().all(sendable), "{held:?}");
+        l.stop();
+        other.stop();
+    }
+
+    #[test]
+    fn a_low_order_key_is_refused() {
+        let (l, _r) = node();
+        l.peer(&b64url(&[0u8; 32]), &["lan=127.0.0.1:9".into()], 0);
+        // the order-8 point: x25519 with it gives all zeros whatever our key
+        let hex = "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800";
+        let p8: Vec<u8> = (0..32).map(|n| u8::from_str_radix(&hex[2 * n..2 * n + 2], 16).unwrap()).collect();
+        l.peer(&b64url(&p8), &["lan=127.0.0.1:9".into()], 0);
+        assert!(lock(&l.inner).peers.is_empty());
+        l.stop();
+    }
+
+    #[test]
+    fn peer_text_is_shown_without_control_characters() {
+        assert_eq!(printable("hi"), "hi");
+        let shown = printable("ok\x1b]0;pwned\x07\r[abcdef] fake line\n\u{202e}gpj.exe");
+        assert!(!shown.chars().any(|c| c.is_control() || c == '\u{202e}'), "{shown}");
+        assert!(shown.contains("fake line"));
     }
 
     fn card(l: &Link) -> (String, Vec<String>) {
@@ -2262,6 +2378,38 @@ mod tests {
         b.stop();
     }
 
+    #[test]
+    fn default_means_the_new_relay_then_the_old_one() {
+        assert_eq!(relay_specs("default"), [DEFAULT_RELAY.unwrap(), BACKUP_RELAY]);
+        assert_eq!(relay_specs(""), relay_specs("default"));
+        assert!(relay_specs("none").is_empty());
+        for r in relay_specs("default") {
+            assert!(parse_server(&r).is_some(), "{r}");
+        }
+    }
+
+    /// A teammate on qh <= 0.2.8 knows only the backup relay: one on the new default list must still
+    /// meet them there. Live: `cargo test -- --ignored the_default_relay`.
+    #[test]
+    #[ignore]
+    fn the_default_relay_list_meets_an_older_qh_at_the_backup() {
+        let o = Options { port: 0, stun: false, upnp: false, relay: true, beacon: false, remember: None, relays: relay_specs("default") };
+        let (a, ra) = Link::start(StaticSecret::from(random()), o).unwrap();
+        let (b, rb) = with_relay(BACKUP_RELAY.to_string());
+        a.block(&b.me());
+        b.block(&a.me());
+        std::thread::sleep(Duration::from_millis(300));
+        meet(&a, &b);
+        let up = wait(&ra, 20, |e| matches!(e, Event::Up { peer, .. } if *peer == b.me())).expect("through the backup relay");
+        assert_eq!(up, Event::Up { peer: b.me(), path: "relay ovh-ca (qh's backup)".into() });
+        a.send(&b.me(), b"new meets old").unwrap();
+        assert!(wait(&rb, 10, |e| matches!(e, Event::Msg { data, .. } if data == b"new meets old")).is_some());
+        b.send(&a.me(), b"old answers").unwrap();
+        assert!(wait(&ra, 10, |e| matches!(e, Event::Msg { data, .. } if data == b"old answers")).is_some());
+        a.stop();
+        b.stop();
+    }
+
     /// Talks to the real default relay: `cargo test -- --ignored the_default_relay`.
     #[test]
     #[ignore]
@@ -2273,7 +2421,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(300));
         meet(&a, &b);
         let up = wait(&ra, 15, |e| matches!(e, Event::Up { peer, .. } if *peer == b.me())).expect("through the relay");
-        assert_eq!(up, Event::Up { peer: b.me(), path: "relay ovh-ca (qh's default)".into() });
+        assert_eq!(up, Event::Up { peer: b.me(), path: "relay oracle-fra (qh's default)".into() });
         a.send(&b.me(), b"via the default relay").unwrap();
         assert!(wait(&rb, 10, |e| matches!(e, Event::Msg { data, .. } if data == b"via the default relay")).is_some());
         a.stop();

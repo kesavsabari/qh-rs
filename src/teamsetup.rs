@@ -360,9 +360,11 @@ mod tests {
         assert_eq!(top.canonicalize().unwrap(), d.canonicalize().unwrap());
         assert_eq!(got, want);
         // what create writes to .gitignore takes each of them out, odd names too
-        std::fs::write(d.join("we[ir]d *.pem"), "x").unwrap();
+        // Windows refuses * in a file name
+        let odd = if cfg!(windows) { "we[ir]d .pem" } else { "we[ir]d *.pem" };
+        std::fs::write(d.join(odd), "x").unwrap();
         let (_, got) = super::secrets(&d);
-        assert!(got.contains(&"we[ir]d *.pem".to_string()), "{got:?}");
+        assert!(got.contains(&odd.to_string()), "{got:?}");
         let lines: Vec<String> = got.iter().map(|f| super::ignore_line(f)).collect();
         std::fs::write(d.join(".gitignore"), format!("local/\n{}\n", lines.join("\n"))).unwrap();
         assert_eq!(super::secrets(&d).1, Vec::<String>::new());

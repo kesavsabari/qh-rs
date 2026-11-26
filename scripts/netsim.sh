@@ -129,7 +129,7 @@ start_link() {
   mkdir -p "$work/home-$who"
   [ -f "$work/$who.key" ] || key > "$work/$who.key"
   local mem=(); [ -z "${NETSIM_NO_MEMORY:-}" ] && mem=(--remember "$work/home-$who/link-memory.json")
-  nsx "$p" env HOME="$work/home-$who" QH_STUN=203.0.113.1:3478,203.0.113.1:3479 "$@" \
+  nsx "$p" env HOME="$work/home-$who" QH_NETSIM_TESTNET=1 QH_STUN=203.0.113.1:3478,203.0.113.1:3479 "$@" \
     "$QH_BIN" link --key "$(cat "$work/$who.key")" "${mem[@]}" <"$work/$n.in" >"$work/$n.log" 2>&1 & pids+=($!)
   exec {fd}>"$work/$n.in"; eval "fd_$n=$fd"
 }

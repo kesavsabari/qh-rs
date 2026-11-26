@@ -332,7 +332,11 @@ fn bday_target(addrs: &[SocketAddr], known: &[SocketAddr]) -> Vec<SocketAddr> {
         IpAddr::V4(ip) => Some(ip),
         IpAddr::V6(ip) => ip.to_ipv4_mapped(),
     };
-    let claimed: Vec<(Ipv4Addr, &SocketAddr)> = addrs.iter().filter_map(|a| v4(a).filter(|ip| global_v4(*ip)).map(|ip| (ip, a))).collect();
+    // scripts/netsim.sh plays the internet on 203.0.113.0/24, a documentation range, so it sets
+    // this on its own machines; it's local only, nothing a teammate sends can turn it on
+    let test_net = std::env::var_os("QH_NETSIM_TESTNET").is_some_and(|v| v == "1");
+    let ok = |ip: Ipv4Addr| global_v4(ip) || test_net && ip.octets()[..3] == [203, 0, 113];
+    let claimed: Vec<(Ipv4Addr, &SocketAddr)> = addrs.iter().filter_map(|a| v4(a).filter(|ip| ok(*ip)).map(|ip| (ip, a))).collect();
     let seen = claimed.iter().find(|(ip, _)| known.iter().any(|k| v4(k) == Some(*ip)));
     seen.or(claimed.first()).map(|(ip, a)| SocketAddr::new(IpAddr::V4(*ip), a.port())).into_iter().collect()
 }

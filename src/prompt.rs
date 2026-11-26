@@ -335,14 +335,17 @@ mod tests {
         let hooks = d.join("hk");
         std::fs::create_dir_all(&hooks).unwrap();
         std::fs::copy(&script, hooks.join("post-index-change")).unwrap();
-        for bad in [format!("[core] fsmonitor = {}\n", script.display()), "[core] hooksPath = hk\n".to_string(), format!("[filter \"x\"] clean = {}\n", script.display())] {
+        // forward slashes: git reads a backslash in a config value as an escape, so a Windows path
+        // written as is makes the whole file unreadable and nothing would be tested
+        let sp = script.display().to_string().replace('\\', "/");
+        for bad in [format!("[core] fsmonitor = {sp}\n"), "[core] hooksPath = hk\n".to_string(), format!("[filter \"x\"] clean = {sp}\n")] {
             std::fs::write(&cfg, format!("{plain}{bad}")).unwrap();
             std::fs::write(d.join("tracked-change"), "x").unwrap();
             assert!(git_line(&d).is_some(), "{bad}");
             let _ = crate::route::subject(&d, &[]);
             assert!(!mark.exists(), "qh's own git ran it: {bad}");
         }
-        std::fs::write(&cfg, format!("{plain}[filter \"x\"] clean = {}\n", script.display())).unwrap();
+        std::fs::write(&cfg, format!("{plain}[filter \"x\"] clean = {sp}\n")).unwrap();
         assert!(!filters_safe(&d));
         std::fs::write(&cfg, format!("{plain}[filter \"lfs\"]\n\tclean = git-lfs clean -- %f\n")).unwrap();
         assert!(filters_safe(&d));

@@ -477,6 +477,10 @@ struct Inner {
     blocked: Vec<Id>, // tests only: pretend these can't be reached directly
     memory: HashMap<String, Vec<SocketAddr>>, // public key -> known endpoints, as saved
     memory_dirty: bool,
+    // public key -> newest hello time taken from them, saved beside their endpoints, so a hello
+    // recorded before a restart can't be played back to us afterwards
+    hello_seen: HashMap<String, u64>,
+    hello_saved: Instant,
     hello_keys: Arc<Vec<(Id, [u8; 32])>>, // each teammate's hello key: tried outside the lock
     over_tcp: Vec<SocketAddr>, // relay servers we reach over TCP right now
 }
@@ -589,11 +593,16 @@ impl Link {
             None => UdpSocket::bind((Ipv4Addr::UNSPECIFIED, o.port))?,
         });
         let v6 = UdpSocket::bind((Ipv6Addr::UNSPECIFIED, 0)).ok().map(Arc::new);
-        let memory: HashMap<String, Vec<SocketAddr>> = o.remember.as_ref()
+        let saved: HashMap<String, Vec<String>> = o.remember.as_ref()
             .and_then(|f| std::fs::read_to_string(f).ok())
-            .and_then(|t| serde_json::from_str::<HashMap<String, Vec<String>>>(&t).ok())
-            .map(|m| m.into_iter().map(|(k, v)| (k, v.iter().filter_map(|a| a.parse().ok()).collect())).collect())
+            .and_then(|t| serde_json::from_str(&t).ok())
             .unwrap_or_default();
+        // the list holds endpoints and one "hello_ts=<ms>"; older qh skips what isn't an address
+        let memory: HashMap<String, Vec<SocketAddr>> = saved.iter()
+            .map(|(k, v)| (k.clone(), v.iter().filter_map(|a| a.parse().ok()).collect())).collect();
+        let hello_seen: HashMap<String, u64> = saved.iter()
+            .filter_map(|(k, v)| v.iter().find_map(|a| a.strip_prefix("hello_ts=")?.parse().ok()).map(|t| (k.clone(), t)))
+            .collect();
         let eph = StaticSecret::from(random());
         let eph_pub = *PublicKey::from(&eph).as_bytes();
         let mut next = [0u8; 8];
@@ -601,7 +610,7 @@ impl Link {
         let inner = Inner {
             secret, me, eph, eph_pub, peers: vec![], hello_keys: Arc::new(vec![]), next_id: u64::from_be_bytes(next) >> 2,
             mine: vec![], mine_ms: 0, stun_tx: HashMap::new(), stun_seen: vec![], relay: o.relay, beacon: false, servers: vec![], relay_specs: o.relays.clone(), rediscover: false, blocked: vec![],
-            memory, memory_dirty: false, over_tcp: vec![],
+            memory, memory_dirty: false, hello_seen, hello_saved: Instant::now(), over_tcp: vec![],
         };
         let (tx, rx) = channel();
         let link = Arc::new(Link { inner: Arc::new(Mutex::new(inner)), v4, v6, stop: Arc::new(AtomicBool::new(false)), events: tx, mapping: Mutex::new(None),
@@ -630,6 +639,11 @@ impl Link {
                     l.save_memory(f);
                 }
                 std::thread::sleep(Duration::from_millis(100));
+            }
+            // on the way out, the newest hello times too
+            if let Some(f) = &file {
+                lock(&l.inner).memory_dirty = true;
+                l.save_memory(f);
             }
         });
         let l = link.clone();
@@ -674,7 +688,11 @@ impl Link {
             return;
         }
         i.memory_dirty = false;
-        let m: HashMap<&String, Vec<String>> = i.memory.iter().map(|(k, v)| (k, v.iter().map(|a| a.to_string()).collect())).collect();
+        let m: HashMap<&String, Vec<String>> = i.memory.iter().map(|(k, v)| {
+            let ts = i.peers.iter().find(|p| &p.public == k).map(|p| p.hello_ts).filter(|t| *t > 0)
+                .or_else(|| i.hello_seen.get(k).copied());
+            (k, v.iter().map(|a| a.to_string()).chain(ts.map(|t| format!("hello_ts={t}"))).collect())
+        }).collect();
         let text = serde_json::to_string(&m).unwrap_or_default();
         drop(i);
         let _ = std::fs::create_dir_all(file.parent().unwrap_or(file));
@@ -757,9 +775,12 @@ impl Link {
         let static_dh = *shared.as_bytes();
         let now = Instant::now();
         let known = i.memory.get(public).cloned().unwrap_or_default();
+        // a hello no newer than the last one taken before a restart is a replay; a saved time far
+        // in the future (a broken clock then) is ignored rather than locking them out
+        let hello_ts = i.hello_seen.get(public).copied().filter(|t| *t <= now_ms() + 600_000).map_or(0, |t| t + 1);
         i.peers.push(Peer {
             public: public.to_string(), id, static_dh, hello_key: aead(&hkdf(&static_dh, b"hello")), addrs, addrs_ms: ms, known, relays,
-            sess: None, trying_since: None, next_hello: now, last_upgrade: now, punch: None, hello_ts: 0,
+            sess: None, trying_since: None, next_hello: now, last_upgrade: now, punch: None, hello_ts,
             out: VecDeque::new(), parts: HashMap::new(), done: VecDeque::new(), resync_at: now, relayed: (now, 0),
             proved: now - Duration::from_secs(1), strict, bday_at: None,
         });
@@ -1529,6 +1550,12 @@ fn on_hello(i: &mut Inner, k: usize, pkt: &[u8], plain: &[u8; 17], from: Path, s
         return;
     }
     p.hello_ts = p.hello_ts.max(ts);
+    // save the newest time now and then (a replay after a restart then has at most this long)
+    if i.memory.contains_key(&i.peers[k].public) && (fresh_eph || i.hello_saved.elapsed() >= Duration::from_secs(20)) {
+        i.hello_saved = now;
+        i.memory_dirty = true;
+    }
+    let p = &mut i.peers[k];
     if fresh_eph {
         let shared = i.eph.diffie_hellman(&PublicKey::from(eph));
         if !shared.was_contributory() {
@@ -2623,6 +2650,41 @@ mod tests {
         assert!(wait(&ra2, 5, |e| matches!(e, Event::Up { peer, .. } if *peer == b2.me())).is_some(), "found again");
         a2.stop();
         b2.stop();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_hello_from_before_a_restart_cant_be_played_back() {
+        let dir = std::env::temp_dir().join(format!("qh-link-replay-{}", u64::from_be_bytes(random()[..8].try_into().unwrap())));
+        let ka: [u8; 32] = random();
+        let o = || Options { port: 0, stun: false, upnp: false, relay: true, beacon: false, remember: Some(dir.join("a.json")), relays: vec![] };
+        let (a, ra) = Link::start(StaticSecret::from(ka), o()).unwrap();
+        let (b, _rb) = node();
+        meet(&a, &b);
+        wait(&ra, 5, |e| matches!(e, Event::Up { .. })).expect("up");
+        // someone on the path keeps a copy of a hello of b's that a took
+        let h = hello(&lock(&b.inner), 0, false);
+        let m = UdpSocket::bind("127.0.0.1:0").unwrap();
+        m.send_to(&h, ("127.0.0.1", a.port())).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        b.stop();
+        a.stop();
+        std::thread::sleep(Duration::from_millis(400));
+        drop(a);
+        let saved = std::fs::read_to_string(dir.join("a.json")).unwrap();
+        assert!(saved.contains("hello_ts="), "{saved}");
+        // a comes back and gets the copy: nothing happens
+        let (a2, _ra2) = Link::start(StaticSecret::from(ka), o()).unwrap();
+        a2.peer(&b.me(), &[], 0);
+        m.send_to(&h, ("127.0.0.1", a2.port())).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(lock(&a2.inner).peers[0].sess.is_none(), "a replayed hello made a session");
+        // while a newer hello from b is taken as before
+        let fresh = hello(&lock(&b.inner), 0, false);
+        m.send_to(&fresh, ("127.0.0.1", a2.port())).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(lock(&a2.inner).peers[0].sess.is_some(), "a new hello is still taken");
+        a2.stop();
         let _ = std::fs::remove_dir_all(&dir);
     }
 

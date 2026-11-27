@@ -2,414 +2,735 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>qh — a coding agent for your terminal</title>
-<meta name="description" content="qh is an open-source coding agent for your terminal: many sessions at once, any model (local Ollama, cloud, or your ChatGPT plan), and your whole team on one project over qh-link. One 5 MB binary for Windows, macOS and Linux.">
-<meta property="og:title" content="qh — a coding agent for your terminal">
-<meta property="og:description" content="Many sessions. Any model. Your whole team. One 5 MB binary, MIT licensed.">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>qh, a coding agent for your terminal</title>
+<meta name="description" content="qh is an open-source coding agent for your terminal: many sessions at once, any model (local Ollama, cloud, or your ChatGPT plan), and your whole team on one project over qh-link. One 4.6 MB file for Windows, macOS and Linux.">
+<meta property="og:title" content="qh, a coding agent for your terminal">
+<meta property="og:description" content="Many sessions. Any model. Your whole team. One 4.6 MB file, MIT licensed.">
 <meta property="og:image" content="img/qh-grid.webp">
-<meta name="theme-color" content="#f6f6f3">
+<meta name="theme-color" content="#f3f2ee">
 <link rel="icon" href="img/favicon.svg" type="image/svg+xml">
 <link rel="preload" href="fonts/Geist-Medium.woff2" as="font" type="font/woff2" crossorigin>
 <script>try{var t=localStorage.getItem("qh-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+<script>if (!matchMedia('(prefers-reduced-motion: reduce)').matches) document.documentElement.classList.add('mo');</script>
 <style>
 @font-face{font-family:Geist;src:url(fonts/Geist-Regular.woff2) format('woff2');font-weight:400;font-display:swap}
-@font-face{font-family:Geist;src:url(fonts/Geist-Medium.woff2) format('woff2');font-weight:500;font-display:swap}
+@font-face{font-family:Geist;src:url(fonts/Geist-Medium.woff2) format('woff2');font-weight:500 600;font-display:swap}
 @font-face{font-family:'Geist Mono';src:url(fonts/GeistMono-Regular.woff2) format('woff2');font-weight:400;font-display:swap}
 @font-face{font-family:'Geist Mono';src:url(fonts/GeistMono-Medium.woff2) format('woff2');font-weight:500;font-display:swap}
-.root{--paper:#f6f6f3;--ink:#0e0e0d;--soft:#6b6b66;--body:#3d3d39;--faint:#9a9a94;--rule:#d9d9d3;--keyb:#c9c9c2;--keybg:#fbfbf9;--accent:#ff4d1c;
-  --fbg:#0e0e0d;--fink:#f6f6f3;--fsoft:#8a8a84;--fbody:#b9b9b2;--frule:#3a3a36;--frule2:#2a2a27;--fbtn:#5a5a55;--flink:#c9c9c2;transition:background .4s,color .4s}
-html[data-theme=dark] .root{--paper:#0d0d0c;--ink:#ecebe6;--soft:#9c9b94;--body:#c4c3bc;--faint:#6f6e68;--rule:#2a2a27;--keyb:#3a3a36;--keybg:#161614;--accent:#ff5a2a;
-  --fbg:#f1f0ea;--fink:#0e0e0d;--fsoft:#6b6b66;--fbody:#3d3d39;--frule:#d9d9d3;--frule2:#e2e2dc;--fbtn:#b9b9b2;--flink:#3d3d39}
-.sheet,.over,.sec,.band{transition:background .4s}
-.theme{background:none;border:0;padding:0;font:inherit;color:var(--soft);cursor:pointer}
-.theme:hover{color:var(--accent)}
-body{margin:0;background:#0e0e0d}
-a{color:var(--ink);text-decoration:none}
-a:hover{color:var(--accent)}
-.m{font-family:'Geist Mono',ui-monospace,monospace}
-.lab{font-family:'Geist Mono',ui-monospace,monospace;font-size:12px;color:var(--soft);letter-spacing:.01em}
-.h2{margin:0;font-weight:500;font-size:clamp(40px,5vw,96px);line-height:.95;letter-spacing:-.055em}
-.lead{margin:0;font-size:clamp(17px,1.4vw,21px);line-height:1.55;color:var(--body);max-width:620px}
-.wrap{max-width:1680px;margin:0 auto;padding:0 clamp(20px,3.2vw,56px)}
-.sec{display:grid;grid-template-columns:minmax(150px,1fr) minmax(0,3.4fr);gap:0 clamp(32px,4vw,88px);padding:clamp(110px,18vh,200px) 0 0}
-.rail .lab{position:sticky;top:96px;display:block;border-top:1px solid var(--ink);padding-top:14px}
-.body{min-width:0}
-.head{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,400px),1fr));gap:28px clamp(40px,5vw,96px);align-items:end;margin-bottom:clamp(44px,7vh,80px)}
-.list{display:flex;flex-direction:column;border-top:1px solid var(--ink)}
-.li{display:grid;grid-template-columns:minmax(0,240px) minmax(0,1fr);gap:8px 40px;padding:24px 0;border-bottom:1px solid var(--rule)}
-.li>*{transition:transform .35s cubic-bezier(.2,.8,.2,1)}
-.li:hover>*{transform:translateX(12px)}
-.li b{font-weight:500;letter-spacing:-.01em}
-.li span{color:var(--body)}
-.key{display:inline-block;min-width:22px;padding:1px 7px;border:1px solid var(--keyb);border-radius:4px;font-family:'Geist Mono',monospace;font-size:12px;text-align:center;margin-right:3px;background:var(--keybg)}
-.big{font-weight:500;font-size:clamp(84px,10vw,200px);line-height:.82;letter-spacing:-.07em}
-.note{font-family:'Geist Mono',monospace;font-size:12px;color:var(--faint);line-height:1.6;margin:28px 0 0;max-width:960px}
-.over,.sec,.band{position:relative;z-index:1;background:var(--paper)}
-@keyframes blink{0%,49%{opacity:1}50%,100%{opacity:0}}
-@keyframes rise{from{opacity:0;transform:translateY(18px)}to{opacity:1;transform:none}}
-@keyframes cycle{0%,4%{opacity:0;transform:translateY(8px)}8%,29%{opacity:1;transform:none}33%,100%{opacity:0;transform:translateY(-8px)}}
-@keyframes run{from{left:-2%}to{left:102%}}
-@keyframes hop{0%,40%{top:0;opacity:0}45%{opacity:1}55%{top:0}75%{top:100%}85%{opacity:1}90%,100%{top:100%;opacity:0}}
-@keyframes draw{from{transform:scaleX(0)}to{transform:scaleX(1)}}
-@keyframes type{from{clip-path:inset(0 100% 0 0)}to{clip-path:inset(0 0 0 0)}}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
-@keyframes heroOut{to{transform:translateY(35vh);opacity:0}}
-@keyframes drift{from{transform:translateY(14%)}to{transform:translateY(-14%)}}
-@keyframes revealIn{from{opacity:.25;transform:translateY(60px)}to{opacity:1;transform:none}}
-@keyframes showUp{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:none}}
-.qh-cursor{animation:blink 1.1s steps(1) infinite}
-.qh-rise{opacity:0;animation:rise .9s cubic-bezier(.2,.8,.2,1) forwards}
-.qh-w{position:absolute;left:0;top:0;opacity:0;animation:cycle 9s infinite}
-.qh-line{transform-origin:left;transform:scaleX(0);animation:draw 1.2s cubic-bezier(.6,0,.2,1) forwards}
-.qh-dot{position:absolute;top:-3px;width:7px;height:7px;border-radius:50%;background:var(--ink);animation:run linear infinite}
-.qh-dot.hot{background:var(--accent)}
-.qh-hop{position:absolute;width:1px}
-.qh-hop i{position:absolute;left:-3px;width:7px;height:7px;border-radius:50%;background:var(--accent);opacity:0;animation:hop 6s ease-in-out infinite}
-.qh-msg{animation:type 1.4s steps(48) both}
-.live{animation:pulse 1.6s ease-in-out infinite}
-.hero-par{position:relative;z-index:0}
-.hero-qh{font-size:clamp(120px,min(30vw,62vh),900px)}
-.cyc{display:grid}
-.cyc>.qh-w{grid-area:1/1;position:static;white-space:nowrap;align-self:end}
-.float{position:fixed;top:0;left:0;right:0;z-index:20;display:flex;justify-content:space-between;align-items:center;padding:22px clamp(20px,3.2vw,56px);pointer-events:none;mix-blend-mode:difference;color:#fff}
-.float a{pointer-events:auto;color:#fff}
-.copy{transition:background .2s,color .2s}
-.copy:hover{background:var(--fink);color:var(--fbg)}
-@supports (animation-timeline: scroll()){
-  .sv{animation:rise linear both;animation-timeline:view();animation-range:entry 0% cover 22%}
-  .qh-msg{animation:type linear both;animation-timeline:view();animation-range:entry 20% cover 45%}
-  .hero-par{animation:heroOut linear both;animation-timeline:scroll(root);animation-range:0 100vh}
-  .drift{animation:drift linear both;animation-timeline:view()}
-  .reveal-in{animation:revealIn linear both;animation-timeline:view();animation-range:entry 0% cover 60%}
-  .float{animation:showUp linear both;animation-timeline:scroll(root);animation-range:80vh 100vh}
+/* Full site in the "follow the dot" language: each published section keeps one pinned motion scene (the dot carries the story), then a quiet Swiss grid with the details. Paper, ink, one orange. */
+:root{
+  --paper:#f3f2ee; --ink:#121211; --ink2:#55544d; --ink3:#8a897f; --line:#d5d3ca;
+  --signal:#ff4d1c; --signal-ink:#c13a0f;
+  --sans:"Geist",ui-sans-serif,system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;
+  --mono:"Geist Mono",ui-monospace,"SFMono-Regular",Menlo,Consolas,monospace;
+  --ease:cubic-bezier(.76,0,.24,1);
+  --pl:max(28px,env(safe-area-inset-left,0px)); --pr:max(28px,env(safe-area-inset-right,0px));
 }
-@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}.qh-rise,.qh-w:first-child,.float{opacity:1}.qh-line{transform:none}.qh-w~.qh-w,.qh-dot,.qh-hop{display:none}}
-.stage{position:relative;height:clamp(340px,40vh,420px);margin-top:8px}
-.tl{position:absolute}
-.tline{position:absolute;height:1px;background:var(--rule)}
-.chan{position:absolute;height:0;border-top:1px dashed var(--keyb)}
-.vlink{position:absolute;top:110px;height:81px;width:1px;background:var(--rule)}
-.pk{position:absolute;width:10px;height:10px;border-radius:50%;transform:translate(-50%,-50%);opacity:0;animation:14s linear infinite}
-.pa{background:var(--ink);animation-name:pA}
-.pb{background:var(--paper);border:2px solid var(--ink);box-sizing:border-box;animation-name:pB}
-.pc{background:var(--accent);width:12px;height:12px;animation-name:pC}
-.chip{position:absolute;left:32%;top:146px;transform:translateX(-50%);font-size:12px;padding:5px 11px;border-radius:999px;white-space:nowrap;opacity:0;animation:14s linear infinite}
-.chip.wait{border:1px solid var(--accent);color:var(--accent);animation-name:waitc}
-.chip.ok{background:var(--ink);color:var(--paper);animation-name:okc}
-.caps{position:absolute;left:0;right:0;bottom:0;height:56px;border-top:1px solid var(--rule)}
-.cap{position:absolute;left:0;right:0;top:18px;margin:0;font-size:clamp(17px,1.5vw,22px);letter-spacing:-.02em;opacity:0;animation:capc 14s linear infinite}
-.cap .m{display:inline-block;width:28px;font-size:12px;color:var(--accent)}
-@keyframes pA{0%{left:18%;top:110px;opacity:0}2%{opacity:1}9%{left:38%;top:110px}11%{left:38%;top:150px}17%{left:62%;top:150px}19%{left:62%;top:110px}23%{left:80%;top:110px;opacity:1}25%,100%{left:80%;top:110px;opacity:0}}
-@keyframes pB{0%,25%{left:80%;top:110px;opacity:0}27%{opacity:1}31%{left:62%;top:110px}33%{left:62%;top:150px}39%{left:38%;top:150px}41%{left:38%;top:110px}48%{left:18%;top:110px;opacity:1}50%,100%{left:18%;top:110px;opacity:0}}
-@keyframes pC{0%,50%{left:80%;top:190px;opacity:0}52%{opacity:1}56%{left:62%;top:190px}58%{left:62%;top:150px}63%{left:38%;top:150px}65%{left:38%;top:190px}68%,78%{left:32%;top:190px;opacity:1}95%{left:6%;top:190px;opacity:1}97%,100%{left:6%;top:190px;opacity:0}}
-@keyframes waitc{0%,68%{opacity:0}70%,72%,76%{opacity:1}74%{opacity:.35}78%,100%{opacity:0}}
-@keyframes okc{0%,77%{opacity:0}79%,93%{opacity:1}96%,100%{opacity:0}}
-@keyframes capc{0%{opacity:0;transform:translateY(6px)}3%,22%{opacity:1;transform:none}25%,100%{opacity:0}}
-/* the team stage, upright for phones: your machine on top, Alex's below, qh-link down the middle */
-.stage-m{display:none;height:430px}
-.stage-m .vl{position:absolute;left:50%;width:0;border-left:1px solid var(--rule)}
-.stage-m .vc{position:absolute;left:50%;width:0;border-left:1px dashed var(--keyb)}
-.stage-m .pa{animation-name:mA}.stage-m .pb{animation-name:mB}.stage-m .pc{animation-name:mC}
-.stage-m .chip{left:0;top:120px;transform:none}
-.stage-m .caps{height:92px}
-@keyframes mA{0%{left:30%;top:54px;opacity:0}2%{opacity:1}9%{left:50%;top:54px}17%{left:50%;top:224px}23%{left:74%;top:224px;opacity:1}25%,100%{left:74%;top:224px;opacity:0}}
-@keyframes mB{0%,25%{left:74%;top:224px;opacity:0}27%{opacity:1}31%{left:50%;top:224px}41%{left:50%;top:54px}48%{left:30%;top:54px;opacity:1}50%,100%{left:30%;top:54px;opacity:0}}
-@keyframes mC{0%,50%{left:74%;top:274px;opacity:0}52%{opacity:1}56%{left:50%;top:274px}65%{left:50%;top:104px}68%,78%{left:30%;top:104px;opacity:1}95%{left:17%;top:104px;opacity:1}97%,100%{left:17%;top:104px;opacity:0}}
-.cmd{display:flex;align-items:center;gap:16px;padding:18px 0;border-bottom:1px solid var(--frule)}
-.cmd code{flex:1;min-width:0;overflow-wrap:anywhere}
-.cmd .copy{flex:none}
-.float.off{opacity:0!important;visibility:hidden}
-@media (prefers-reduced-motion:reduce){.pk,.chip{display:none}.caps{position:static;height:auto;border:0}.stage{height:auto;min-height:240px;padding-top:240px}.stage-m{padding-top:330px}.cap{position:static;opacity:1;margin-top:8px}}
-@media (max-width:1000px){.hero-grid{grid-template-columns:1fr!important;align-content:center}.hero-qh{font-size:clamp(110px,min(46vw,36vh),420px)}}
-@media (max-width:900px){.sec{grid-template-columns:1fr}.rail .lab{position:static;margin-bottom:28px}}
-@media (max-width:640px){.li{grid-template-columns:1fr}.navl{display:none!important}
-  .stage-d{display:none}.stage-m{display:block}
-  .top{gap:14px}.top nav{width:100%;justify-content:space-between;border-top:1px solid var(--rule);padding-top:14px}
-  .float{mix-blend-mode:normal;pointer-events:auto;color:var(--ink);background:var(--paper);border-bottom:1px solid var(--rule);padding:12px 20px}
-  .float a{color:var(--ink)}.float a.m{border-color:var(--ink)!important;padding:7px 14px!important}
-  .cmd{gap:12px}.cmd .copy{padding:0 14px!important}}
-@media (prefers-color-scheme:dark){html:not([data-theme=light]) .root{--paper:#0d0d0c;--ink:#ecebe6;--soft:#9c9b94;--body:#c4c3bc;--faint:#6f6e68;--rule:#2a2a27;--keyb:#3a3a36;--keybg:#161614;--accent:#ff5a2a;
-  --fbg:#f1f0ea;--fink:#0e0e0d;--fsoft:#6b6b66;--fbody:#3d3d39;--frule:#d9d9d3;--frule2:#e2e2dc;--fbtn:#b9b9b2;--flink:#3d3d39}}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--paper:#0f0f0e;--ink:#eeede8;--ink2:#b3b2ab;--ink3:#86857e;--line:#33332f;--signal:#ff5a2b;--signal-ink:#ff8a63;color-scheme:dark}}
+:root[data-theme="dark"]{--paper:#0f0f0e;--ink:#eeede8;--ink2:#b3b2ab;--ink3:#86857e;--line:#33332f;--signal:#ff5a2b;--signal-ink:#ff8a63;color-scheme:dark}
+
+*{box-sizing:border-box}
+html.lenis,html.lenis body{height:auto}
+.lenis.lenis-smooth{scroll-behavior:auto!important}
+body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans);-webkit-font-smoothing:antialiased;overflow-x:hidden}
+a{color:inherit}
+::selection{background:var(--signal);color:#111}
+:focus-visible{outline:2px solid var(--signal);outline-offset:3px}
+section[tabindex="-1"]:focus,section[tabindex="-1"]:focus-visible{outline:none}
+.skip{position:absolute;left:-9999px}
+.curtain{position:fixed;inset:0;z-index:60;display:none;flex-direction:column;justify-content:flex-end;padding:0 var(--pl,6vw) 7vh;background:var(--signal);color:#111;transform:translate3d(0,100%,0);overflow:hidden;pointer-events:none;will-change:transform}
+.curtain.ink{background:var(--ink);color:var(--paper)}
+.curtain .cn{display:block;font:600 min(34vw,52vh)/.8 var(--sans);letter-spacing:-.07em;will-change:transform}
+.curtain .cl{font:500 clamp(14px,1.6vw,22px) var(--mono);margin-top:3vh}
+.skip:focus{left:20px;top:20px;z-index:50;background:var(--paper);padding:8px}
+code{font-family:var(--mono);font-size:.9em}
+
+/* header */
+.hd{position:fixed;inset:0 0 auto 0;z-index:30;display:grid;grid-template-columns:1fr auto 1fr;align-items:center;padding:calc(20px + env(safe-area-inset-top,0px)) var(--pr) 16px var(--pl);font:500 14px var(--sans);transition:color .35s,background-color .35s}
+html:not(.mo) .hd,.hd.sc{background:var(--paper)}
+.mark{justify-self:start;text-decoration:none;font:600 19px/1 var(--sans);letter-spacing:-.045em}
+.mark small{font:400 11px var(--mono);color:var(--ink3);letter-spacing:0;margin-left:8px;transition:color .35s}
+.nav{justify-self:center}
+.nav a,.theme,.lk{text-decoration:none;background:none;border:0;padding:0;font:inherit;color:inherit;cursor:pointer;background-image:linear-gradient(currentColor,currentColor);background-size:0 1px;background-repeat:no-repeat;background-position:100% 100%;transition:background-size .5s var(--ease)}
+.nav a:hover,.theme:hover,.lk:hover,.nav a:focus-visible,.lk:focus-visible{background-size:100% 1px;background-position:0 100%}
+.nav .go{color:var(--signal-ink)}
+.theme{justify-self:end}
+.hd.inv{color:#111}.hd.inv .mark small{color:#111}.hd.inv .nav .go{color:#111}
+@media (max-width:760px){.nav .opt{display:none}}
+
+section{position:relative}
+.full{height:100vh;height:100svh;overflow:hidden}
+.idx{margin:0 0 22px;font:400 12px var(--mono);color:var(--ink3)}
+.ln{display:block;overflow:hidden;padding-bottom:.08em;margin-bottom:-.08em}
+.ln>span{display:block}
+.hl{margin:0;font:500 clamp(40px,6.6vw,118px)/.95 var(--sans);letter-spacing:-.055em;text-wrap:balance}
+.hl.md{font-size:clamp(34px,4.6vw,80px)}
+.cap{margin:0;font:400 13px/1.55 var(--mono);color:var(--ink2)}
+kbd{display:inline-block;min-width:2.3em;text-align:center;font:500 12px/1 var(--mono);color:var(--ink);background:var(--paper);border:1px solid var(--ink);border-bottom-width:3px;border-radius:6px;padding:6px 9px;transition:transform .12s,border-bottom-width .12s,background .2s,color .2s,border-color .2s}
+kbd.press{transform:translateY(2px);border-bottom-width:1px;background:var(--signal);border-color:var(--signal);color:#111}
+
+/* Swiss detail grids */
+.more{padding:14vh var(--pr) 16vh var(--pl)}
+.more .lead{max-width:30ch;margin:0 0 9vh;font:500 clamp(22px,2.3vw,36px)/1.15 var(--sans);letter-spacing:-.03em}
+.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:56px 28px}
+.grid.g3{grid-template-columns:repeat(3,minmax(0,1fr))}
+.cell{position:relative;padding-top:20px}
+.cell .rule{position:absolute;top:0;left:0;right:0;height:1px;background:var(--ink);transform-origin:0 50%}
+.cell .k{display:block;font:400 12px var(--mono);color:var(--ink3)}
+.cell h3{margin:16px 0 10px;font:500 21px/1.15 var(--sans);letter-spacing:-.025em}
+.cell p{margin:0;font:400 15px/1.55 var(--sans);color:var(--ink2);max-width:34ch}
+@media (max-width:980px){.grid,.grid.g3{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:560px){.grid,.grid.g3{grid-template-columns:1fr;gap:40px}}
+
+/* 0 hero */
+.hero{--fs:min(84vh,62vw)}
+.mo .hero{opacity:0}
+.intro{position:absolute;top:19vh;left:var(--pl);margin:0;font:500 clamp(20px,1.9vw,30px)/1.16 var(--sans);letter-spacing:-.03em}
+.intro .ln+.ln{color:var(--ink3)}
+.ctas{position:absolute;top:calc(19vh + 3.6em + 26px);left:var(--pl);margin:0;display:flex;gap:26px;font:500 14px var(--sans)}
+.ctas .go{color:var(--signal-ink)}
+.meta{position:absolute;top:19vh;right:var(--pr);margin:0;padding:0;list-style:none;font:400 12px/1.8 var(--mono);color:var(--ink2);text-align:right}
+.word{position:absolute;margin:0;font:600 var(--fs)/1 var(--sans);letter-spacing:-.065em;white-space:nowrap}
+.word .ch{display:inline-block}
+.bl{display:inline-block;width:0;height:0}
+.hero .word{left:calc(var(--pl) - .045 * var(--fs));bottom:calc(var(--fs) * -.3)}
+.eye{position:absolute;z-index:2;pointer-events:none;will-change:transform}
+.eye b{display:block;width:100%;height:100%;border-radius:50%;background:var(--signal)}
+.hint{position:absolute;right:var(--pr);bottom:30px;display:flex;align-items:center;gap:10px;font:400 12px var(--mono);color:var(--ink3)}
+.hint i{display:block;width:1px;height:30px;background:currentColor;animation:drip 2s var(--ease) infinite}
+@keyframes drip{0%{transform:scaleY(0);transform-origin:50% 0}45%{transform:scaleY(1);transform-origin:50% 0}55%{transform:scaleY(1);transform-origin:50% 100%}100%{transform:scaleY(0);transform-origin:50% 100%}}
+@media (max-width:640px){.hero{--fs:min(56vh,66vw)}.meta{top:auto;bottom:calc(var(--fs) * .86)}.intro{top:15vh}.ctas{top:calc(15vh + 4.8em + 20px)}.hint{display:none}}
+
+/* 1 team, on orange */
+.ask{background:var(--signal);color:#111}
+.ask .cap,.ask .idx{color:#111}
+.ask-in{height:100%;display:grid;grid-template-rows:auto 1fr auto;padding:calc(12vh + env(safe-area-inset-top,0px)) var(--pr) 30px var(--pl)}
+.diag{align-self:center;width:100%}
+.ends{display:flex;justify-content:space-between;align-items:baseline;font:500 13px var(--mono);margin-bottom:12px}
+.ends em{font-style:normal;font-weight:400;margin-left:12px;display:inline-flex;align-items:center;gap:7px}
+.ends em i{width:7px;height:7px;border-radius:50%;background:#111;animation:blink 1.06s steps(1) infinite}
+.ends em.ok i{animation:none;background:#f3f2ee}
+.net{display:block;width:100%;height:auto;overflow:visible}
+#wire{stroke:#111;stroke-width:2;fill:none}
+#you{fill:#111}#alex{fill:#111;fill-opacity:0;stroke:#111;stroke-width:2}
+#pkt{fill:#f3f2ee}
+.steps{list-style:none;margin:26px 0 0;padding:0;display:grid;gap:7px;font:400 clamp(13px,1.3vw,17px)/1.45 var(--mono)}
+.steps li{display:grid;grid-template-columns:2.2em 8.5em minmax(0,1fr);min-height:1.45em}
+.steps .n{opacity:.55}.steps .who{font-weight:500}
+@media (max-width:640px){.ends>span:first-child{display:flex;flex-direction:column;gap:6px}.ends em{margin-left:0}.steps li{grid-template-columns:2em minmax(0,1fr)}.steps .tx{grid-column:2}}
+
+/* 2 proof */
+.weight{padding:22vh var(--pr) 10vh var(--pl)}
+.weight .hl{margin-bottom:9vh}
+.row{display:grid;grid-template-columns:minmax(110px,1fr) 5fr;column-gap:24px;align-items:end;margin-top:4vh}
+.row .lbl{font:400 12px var(--mono);color:var(--ink2);padding-bottom:.9em}
+.row .num{font:500 clamp(64px,13.5vw,240px)/.8 var(--sans);letter-spacing:-.065em;font-variant-numeric:tabular-nums}
+.r1 .num{color:var(--ink3)}
+.row .track{grid-column:2;margin-top:18px;height:12px;display:flex;align-items:center}
+.row .bar{display:block;height:2px;width:100%;background:var(--ink3);transform-origin:0 50%}
+.r2 .bar{height:12px;width:calc(100% * 1200 / 14000);background:var(--signal)}
+.weight .cap{margin-top:7vh;max-width:56ch}
+.stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:28px;padding:8vh var(--pr) 6vh var(--pl)}
+.stat{position:relative;padding-top:20px}
+.stat .rule{position:absolute;top:0;left:0;right:0;height:1px;background:var(--ink);transform-origin:0 50%}
+.stat b{display:block;font:500 clamp(54px,7vw,120px)/.85 var(--sans);letter-spacing:-.06em;font-variant-numeric:tabular-nums}
+.stat b small{font-size:.38em;letter-spacing:-.02em;margin-left:.12em}
+.stat h3{margin:22px 0 8px;font:500 17px/1.2 var(--sans);letter-spacing:-.015em}
+.stat p{margin:0;font:400 15px/1.5 var(--sans);color:var(--ink2);max-width:30ch}
+.foot-note{padding:0 var(--pr) 4vh var(--pl);max-width:none}
+@media (max-width:640px){.row{grid-template-columns:1fr}.row .track,.row .num{grid-column:1}.row .lbl{padding:0 0 6px}.stats{grid-template-columns:1fr;gap:48px}}
+
+/* ribbon */
+.rib{padding:2vh 0 10vh;overflow:hidden}
+.rib svg{display:block;width:118%;margin-left:-9%;height:auto;overflow:visible}
+#ribBand{fill:none;stroke:var(--signal);stroke-width:112}
+#ribText{font:600 58px var(--sans);letter-spacing:-.015em;fill:#111;text-transform:uppercase}
+
+/* 3 sessions */
+.sess-in{height:100%;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.55fr);gap:5vw;align-items:center;padding:calc(12vh + env(safe-area-inset-top,0px)) var(--pr) 6vh var(--pl)}
+.keys{list-style:none;margin:30px 0 0;padding:0;display:grid;gap:10px;font:400 12px var(--mono);color:var(--ink3)}
+.keys li{display:flex;align-items:center;gap:6px}
+.keys li span{margin-left:8px}
+.stage{position:relative;aspect-ratio:16/10;border:1.5px solid var(--ink);border-radius:12px}
+.vl{position:absolute;left:50%;top:0;bottom:0;width:1.5px;margin-left:-.75px;background:var(--ink);transform-origin:50% 0}
+.hz{position:absolute;top:50%;left:0;right:0;height:1.5px;margin-top:-.75px;background:var(--ink);transform-origin:0 50%}
+.pane{position:absolute;width:50%;height:50%;padding:14px 16px;font:400 12px var(--mono);color:var(--ink2)}
+.pane em{font-style:normal;color:var(--ink);margin-right:10px;transition:color .3s}
+.pane.on em{color:var(--signal)}
+.pane strong{position:absolute;right:16px;bottom:12px;font:500 clamp(54px,8vw,140px)/.8 var(--sans);letter-spacing:-.06em;color:var(--line);transition:color .4s}
+.pane.on strong{color:var(--ink)}
+.p1{left:0;top:0}.p2{left:50%;top:0}.p3{left:0;top:50%}.p4{left:50%;top:50%}
+.hop{position:absolute;left:25%;top:25%;width:22px;height:22px;margin:-11px 0 0 -11px;z-index:2;border-radius:50%;background:var(--signal)}
+.ex{list-style:none;margin:18px 0 0;padding:0;display:grid;gap:5px;font:400 clamp(12px,1.05vw,14px)/1.45 var(--mono);color:var(--ink2)}
+.ex li{display:grid;grid-template-columns:9.5em minmax(0,1fr);min-height:1.45em}
+.ex b{font-weight:500;color:var(--ink)}
+@media (max-width:800px){.sess-in{grid-template-columns:1fr;align-content:start;gap:4vh}.keys{display:none}.ex li{grid-template-columns:1fr}}
+
+/* real screenshot */
+.shot{margin:0 auto;padding:8vh var(--pr) 6vh var(--pl);width:min(100%,1040px);box-sizing:content-box}
+@media (max-width:1100px){.shot{width:auto}}
+.shot-in{overflow:hidden;border-radius:14px;background:#15171b}
+.shot img{display:block;width:100%;height:auto;transform-origin:50% 50%}
+.shot figcaption{margin-top:14px;display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;font:400 12px var(--mono);color:var(--ink3)}
+
+/* 4 safety */
+.safe-in{height:100%;display:grid;grid-template-rows:1fr auto;padding:calc(14vh + env(safe-area-inset-top,0px)) var(--pr) 30px var(--pl)}
+.term{align-self:center;justify-self:center;width:min(880px,100%);font:400 clamp(16px,2.1vw,30px)/1.5 var(--mono)}
+.term p{margin:0;min-height:1.5em}
+.term .pr{color:var(--ink3)}
+.ask2{display:flex;align-items:center;gap:.6em;color:var(--ink2);margin-top:.5em!important}
+.ask2 .dot{width:.45em;height:.45em;border-radius:50%;background:var(--signal);animation:blink 1.06s steps(1) infinite}
+@keyframes blink{50%{opacity:0}}
+.yn{display:flex;gap:12px;margin-top:.7em}
+.yn kbd{font-size:clamp(15px,1.5vw,21px);padding:.45em .95em}
+.done{margin-top:.7em!important}
+.safe-foot{display:flex;justify-content:space-between;align-items:flex-end;gap:24px;flex-wrap:wrap}
+
+/* news */
+.news{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin:0 var(--pr) 0 var(--pl);padding:22px 0;border-top:1px solid var(--line);border-bottom:1px solid var(--line);font:400 14px/1.5 var(--sans);color:var(--ink2)}
+.news i{width:8px;height:8px;border-radius:50%;background:var(--signal);flex:none;animation:blink 1.06s steps(1) infinite}
+.news b{font-weight:500;color:var(--ink)}
+.news a{margin-left:auto;font-weight:500;color:var(--ink)}
+
+/* 5 install */
+.install{padding:22vh var(--pr) 18vh var(--pl)}
+.install .hl{font-size:clamp(64px,15vw,260px);line-height:.85;letter-spacing:-.07em}
+.panel{margin-top:8vh;max-width:900px}
+.os{display:flex;gap:22px;margin-bottom:12px;font:500 13px var(--mono)}
+.os button{background:none;border:0;padding:0;color:var(--ink3);cursor:pointer;font:inherit}
+.os button[aria-pressed="true"]{color:var(--ink)}
+.os button[aria-pressed="true"]::before{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--signal);margin-right:8px;vertical-align:2px}
+.cmd{display:flex;align-items:stretch;border-top:1px solid var(--ink);border-bottom:1px solid var(--ink)}
+.cmd code{flex:1;min-width:0;font:500 clamp(13px,1.6vw,20px)/1.3 var(--mono);padding:18px 0;overflow-x:auto;white-space:nowrap;scrollbar-width:none}
+.cmd code::-webkit-scrollbar{display:none}
+.cmd code .p{color:var(--signal)}
+.copy{border:0;background:var(--ink);color:var(--paper);font:500 14px var(--sans);padding:0 26px;cursor:pointer;transition:background .3s,color .3s}
+.copy:hover{background:var(--signal);color:#111}
+.then{margin-top:12px;display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;font:400 12px var(--mono);color:var(--ink3)}
+.works{margin:7vh 0 0;max-width:40ch;font:500 clamp(18px,1.6vw,24px)/1.3 var(--sans);letter-spacing:-.02em;color:var(--ink2)}
+.works b{color:var(--ink);font-weight:500}
+
+/* footer */
+.ft{position:relative;--fs:min(48vw,80vh);height:calc(var(--fs) * .86);overflow:hidden;border-top:1px solid var(--line)}
+.ft-row{position:absolute;top:22px;left:var(--pl);right:var(--pr);display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;font:500 14px var(--sans)}
+.ft-row span{font:400 12px var(--mono);color:var(--ink3)}
+.ft .word{left:calc(var(--pl) - .045 * var(--fs));bottom:calc(var(--fs) * -.235)}
+@media (max-width:640px){.ft{--fs:64vw;height:calc(var(--fs) * .86 + 84px)}.safe .cap br{display:none}}
+
+@media (prefers-reduced-motion:reduce){.hint i,.ask2 .dot,.news i,.ends em i{animation:none}}
 </style>
 </head>
 <body>
-<div class="root" style="background: var(--fbg); color: var(--ink); font-family: Geist, system-ui, sans-serif; font-size: 16px; line-height: 1.55">
 
-<div class="float" aria-label="Quick links">
-<a href="#top" style="font-weight: 500; font-size: 15px; letter-spacing: -0.02em">qh</a>
-<a href="#install" class="m" style="font-size: 12px; border: 1px solid #fff; border-radius: 999px; padding: 9px 16px">install ↓</a>
-</div>
+<a class="skip" href="#install">Skip to install</a>
 
-<div class="sheet" style="position: relative; z-index: 1; background: var(--paper)">
-<div class="wrap">
-
-<section id="top" class="hero-par" style="height: 100svh; min-height: 620px; box-sizing: border-box; display: flex; flex-direction: column; padding: 26px 0 24px">
-<header class="qh-rise lab top" style="display: flex; justify-content: space-between; align-items: center; gap: 24px; flex-wrap: wrap; animation-delay: .05s">
-<span>a coding agent for your terminal · 0.2.8</span>
-<nav style="display: flex; gap: clamp(16px, 2.4vw, 30px)">
-<span class="navl" style="display: flex; gap: clamp(16px, 2.4vw, 30px)">
-<a href="#team" style="color: var(--soft)">team</a>
-<a href="#sessions" style="color: var(--soft)">sessions</a>
-<a href="#safety" style="color: var(--soft)">safety</a>
-</span>
-<a href="docs/" style="color: var(--soft)">docs</a>
-<a href="https://github.com/kesavsabari/qh-rs" style="color: var(--soft)">github</a>
-<a href="#install">install</a>
-<button class="theme" type="button" id="theme" aria-label="Switch between light and dark">◐ dark</button>
-</nav>
+<header class="hd" id="hd">
+  <a class="mark" href="#top" aria-label="qh, back to the top">qh<small>0.2.8</small></a>
+  <nav class="nav" aria-label="Site"><a class="opt" href="#team">Team</a><span class="opt">, </span><a class="opt" href="#sessions">Sessions</a><span class="opt">, </span><a class="opt" href="#safety">Safety</a><span class="opt">, </span><a href="docs/">Docs</a>, <a href="https://github.com/kesavsabari/qh-rs">GitHub</a>, <a class="go" href="#install">Install</a></nav>
+  <button class="theme" id="theme" type="button">Dark</button>
 </header>
-<div class="hero-grid" style="flex: 1; min-height: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 32px clamp(48px, 6vw, 140px); align-items: center">
-<h1 class="qh-rise hero-qh" style="margin: 0; font-weight: 500; line-height: 0.78; letter-spacing: -0.075em; margin-left: -0.04em; padding-bottom: 0.2em; animation-delay: .2s">qh<span class="qh-cursor" style="display: inline-block; width: 0.07em; height: 0.62em; background: var(--accent); margin-left: 0.06em"></span></h1>
-<div style="display: flex; flex-direction: column; gap: clamp(24px, 3.4vh, 40px)">
-<div class="qh-rise" style="display: flex; flex-direction: column; gap: 4px; font-size: clamp(30px, 3.4vw, 68px); letter-spacing: -0.045em; line-height: 1.1; font-weight: 500; animation-delay: .4s">
-<span class="cyc">
-<span class="qh-w" style="animation-delay: 0s">Many sessions.</span>
-<span class="qh-w" style="animation-delay: 3s">Any model.</span>
-<span class="qh-w" style="animation-delay: 6s">Your whole team.</span>
-</span>
-</div>
-<p class="qh-rise lead" style="font-size: clamp(17px, 1.25vw, 21px); max-width: 600px; animation-delay: .55s">Built so small local models do real work. Sessions that ask, answer and hand work to each other, on local models, cloud models or your ChatGPT plan, with your friends on the same project.</p>
-<div class="qh-rise" style="display: flex; flex-wrap: wrap; gap: 14px 26px; align-items: center; animation-delay: .65s">
-<a href="#install" style="display: inline-flex; align-items: center; min-height: 48px; padding: 0 22px; background: var(--ink); color: var(--paper); font-family: 'Geist Mono', monospace; font-size: 13px">get qh ↓</a>
-<a href="docs/" class="m" style="font-size: 13px; border-bottom: 1px solid var(--ink); padding-bottom: 2px">read the docs</a>
-</div>
-</div>
-</div>
-<div class="qh-rise lab" style="display: flex; justify-content: space-between; gap: 16px; animation-delay: .9s"><span>scroll <span class="qh-cursor" style="color: var(--accent)">↓</span></span><span>windows · macos · linux</span></div>
-</section>
 
-<section id="team" class="sec">
-<div class="rail"><span class="lab">01 — team</span></div>
-<div class="body">
-<div class="head sv">
-<h2 class="h2">Your agent<br>can ask theirs.</h2>
-<p class="lead">Friends on one project, each on their own computer. Agents ask each other's agents, hand work across, and nothing lands on your machine without your yes. It all travels over <b style="font-weight: 500; color: var(--ink)">qh-link</b>, an encrypted direct line between your machines; the project's GitHub repo is just where you find each other.</p>
-</div>
+<main>
+  <!-- 0 hero -->
+  <section class="hero full" id="top">
+    <h1 class="intro"><span class="ln"><span>A coding agent for your terminal.</span></span><span class="ln"><span>Many sessions. Any model. Your whole team.</span></span></h1>
+    <p class="ctas"><a class="lk go" href="#install">Get qh</a><a class="lk" href="docs/">Read the docs</a></p>
+    <ul class="meta"><li>v0.2.8</li><li>Windows, macOS, Linux</li><li>One 4.6 MB file</li></ul>
+    <p class="word" aria-hidden="true"><span class="ch q">q</span><span class="ch h">h</span><i class="bl"></i></p>
+    <div class="eye" id="eye1" aria-hidden="true"><b></b></div>
+    <div class="hint" aria-hidden="true">Scroll<i></i></div>
+  </section>
 
-<div class="stage stage-d sv" role="img" aria-label="Two machines joined by qh-link: your agent asks Alex's agent, Alex's agent answers, Alex sends work that waits for you, you allow it and it runs on your machine.">
-<div class="lab" style="position: absolute; left: 0; top: 0">you · laptop</div>
-<div class="lab" style="position: absolute; left: 50%; top: 124px; transform: translateX(-50%); white-space: nowrap; color: var(--ink)"><span style="color: var(--accent)">●</span> qh-link · encrypted</div>
-<div class="lab" style="position: absolute; right: 0; top: 0">alex · mac</div>
+  <!-- 1 team -->
+  <section class="ask full" id="team">
+    <div class="ask-in">
+      <div>
+        <p class="idx">01 Team</p>
+        <h2 class="hl"><span class="ln"><span>Your agent</span></span><span class="ln"><span>can ask theirs.</span></span></h2>
+      </div>
+      <div class="diag">
+        <div class="ends"><span>you · laptop<em id="youSt" aria-live="off"></em></span><span>alex · mac</span></div>
+        <svg class="net" viewBox="0 0 1000 80" aria-hidden="true">
+          <line id="wire" x1="62" y1="40" x2="938" y2="40"/>
+          <circle id="you" cx="24" cy="40" r="22"/>
+          <circle id="alex" cx="976" cy="40" r="21"/>
+          <circle id="pkt" cx="62" cy="40" r="8"/>
+        </svg>
+        <ol class="steps">
+          <li id="st1"><span class="n">1</span><span class="who">you to alex</span><span class="tx" data-t="How does the API work?">How does the API work?</span></li>
+          <li id="st2"><span class="n">2</span><span class="who">alex to you</span><span class="tx" data-t="Answered from alex's working copy. Live, read-only.">Answered from alex's working copy. Live, read-only.</span></li>
+          <li id="st3"><span class="n">3</span><span class="who">alex to you</span><span class="tx" data-t="Sends work to your session. It waits for you.">Sends work to your session. It waits for you.</span></li>
+          <li id="st4"><span class="n">4</span><span class="who">you</span><span class="tx" data-t="Allowed. It runs on your machine, with your model.">Allowed. It runs on your machine, with your model.</span></li>
+        </ol>
+      </div>
+      <p class="cap">Over qh-link, an encrypted direct line between your machines. The GitHub repo is only where you find each other.</p>
+    </div>
+  </section>
 
-<div class="lab tl" style="top: 102px; left: 0">main</div>
-<div class="tline" style="top: 110px; left: 5%; width: 33%"><i class="qh-dot" style="animation-duration: 9s"></i></div>
-<div class="lab tl" style="top: 182px; left: 0">tests</div>
-<div class="tline" style="top: 190px; left: 5%; width: 33%"><i class="qh-dot" style="animation-duration: 12s; animation-delay: -5s"></i></div>
+  <section class="more" id="teamMore" aria-label="How teams work">
+    <p class="lead">Friends on one project, each on their own computer. Nothing lands on your machine without your yes.</p>
+    <div class="grid">
+      <div class="cell"><i class="rule"></i><span class="k">01</span><h3>One line to start</h3><p><code>/team create</code> shares the folder, private, secrets left out, and invites friends by GitHub name. They run <code>qh join you/project</code>.</p></div>
+      <div class="cell"><i class="rule"></i><span class="k">02</span><h3>See the board</h3><p>Who's online, what their agents are doing, and their sessions to read along.</p></div>
+      <div class="cell"><i class="rule"></i><span class="k">03</span><h3>Requests wait for you</h3><p>A teammate's work lands in Requests. It runs only when you accept, and you approve every edit it leads to.</p></div>
+      <div class="cell"><i class="rule"></i><span class="k">04</span><h3>qh-link</h3><p>Same network, across the internet, or through a relay when nothing else gets through. Viewer, member or trusted, enforced by your own qh.</p></div>
+    </div>
+  </section>
 
-<div class="vlink" style="left: 38%"></div>
-<div class="chan" style="top: 150px; left: 38%; width: 24%"></div>
-<div class="vlink" style="left: 62%"></div>
+  <!-- 2 proof -->
+  <section class="weight" id="proof">
+    <p class="idx">02 Proof</p>
+    <h2 class="hl md"><span class="ln"><span>Light enough</span></span><span class="ln"><span>for a 9B model.</span></span></h2>
+    <div class="row r1"><span class="lbl">a popular agent CLI</span><b class="num" id="nA">14,000</b><span class="track"><i class="bar"></i></span></div>
+    <div class="row r2"><span class="lbl">qh</span><b class="num" id="nB">1,200</b><span class="track"><i class="bar"></i></span></div>
+    <p class="cap">Tokens sent to the model before you say hello. Same scale, both bars: 12 times less overhead.</p>
+  </section>
+  <div class="stats">
+    <div class="stat"><i class="rule"></i><b><span class="cu" data-to="4.6" data-dp="1">4.6</span><small>MB</small></b><h3>The whole thing</h3><p>One Rust binary, 5 MB of memory when idle. The GPU and RAM go to the model.</p></div>
+    <div class="stat"><i class="rule"></i><b><span class="cu" data-to="96" data-dp="0">96</span><small>%</small></b><h3>On a 9B model</h3><p>18 tasks, 3 runs each. A change stays only if this number goes up.</p></div>
+    <div class="stat"><i class="rule"></i><b><span class="cu" data-to="12" data-dp="0">12</span><small>×</small></b><h3>Less overhead</h3><p>About 1,200 tokens before you say hello, against about 14,000.</p></div>
+  </div>
+  <p class="cap foot-note">Measured 2026-10-09 and 10 on a laptop with an 8 GB NVIDIA GPU, qwen3.5:9b on Ollama. Your numbers will vary. This is weight, not capability.</p>
 
-<div class="lab tl" style="top: 102px; right: 0">api</div>
-<div class="tline" style="top: 110px; left: 62%; width: 33%"><i class="qh-dot" style="animation-duration: 10s; animation-delay: -3s"></i></div>
-<div class="lab tl" style="top: 182px; right: 0">docs</div>
-<div class="tline" style="top: 190px; left: 62%; width: 33%"><i class="qh-dot" style="animation-duration: 13s; animation-delay: -8s"></i></div>
+  <section class="rib" aria-label="18 tasks, 3 runs each, on qwen3.5:9b: 52 of 54 passed">
+    <svg viewBox="0 0 1600 480" aria-hidden="true">
+      <defs><path id="ribPath" d="M -200 140 Q 800 440 1800 140"/></defs>
+      <use href="#ribPath" id="ribBand"/>
+      <text id="ribText" dy="20"><textPath href="#ribPath" id="ribTp" startOffset="0">Small model, real work &#8226; 52 of 54 runs passed &#8226; qwen3.5:9b on an 8 GB GPU &#8226; Small model, real work &#8226; 52 of 54 runs passed &#8226; qwen3.5:9b on an 8 GB GPU &#8226; Small model, real work &#8226; 52 of 54 runs passed &#8226; qwen3.5:9b on an 8 GB GPU &#8226; </textPath></text>
+    </svg>
+  </section>
 
-<i class="pk pa"></i>
-<i class="pk pb"></i>
-<i class="pk pc"></i>
-<span class="chip wait m">waiting for you</span>
-<span class="chip ok m">allowed ✓</span>
+  <!-- 3 sessions -->
+  <section class="sess full" id="sessions">
+    <div class="sess-in">
+      <div>
+        <p class="idx">03 Sessions</p>
+        <h2 class="hl md"><span class="ln"><span>Four lines,</span></span><span class="ln"><span>one operator.</span></span></h2>
+        <ul class="keys">
+          <li><kbd>Ctrl</kbd><kbd id="kN">N</kbd><span>new line</span></li>
+          <li><kbd>Ctrl</kbd><kbd id="kG">G</kbd><span>2×2 grid</span></li>
+          <li><kbd>Shift</kbd><kbd>Tab</kbd><span>ask, auto, plan</span></li>
+        </ul>
+      </div>
+      <div>
+        <div class="stage" aria-hidden="true">
+          <i class="vl"></i><i class="hz"></i>
+          <div class="pane p1"><em>01</em>main<strong>1</strong></div>
+          <div class="pane p2"><em>02</em>tests<strong>2</strong></div>
+          <div class="pane p3"><em>03</em>docs<strong>3</strong></div>
+          <div class="pane p4"><em>04</em>web<strong>4</strong></div>
+          <i class="hop"></i>
+        </div>
+        <ol class="ex">
+          <li id="ex1"><b>main to tests</b><span class="tx" data-t="Which test in test_cart.py is failing?">Which test in test_cart.py is failing?</span></li>
+          <li id="ex2"><b>tests to main</b><span class="tx" data-t="test_total() fails on assert total([10, 20], 0.1) == 33.0">test_total() fails on assert total([10, 20], 0.1) == 33.0</span></li>
+          <li id="ex3"><b>main</b><span class="tx" data-t="edits cart.py, then the tests pass.">edits cart.py, then the tests pass.</span></li>
+        </ol>
+      </div>
+    </div>
+  </section>
 
-<div class="caps">
-<p class="cap" style="animation-delay: 0s"><span class="m">1</span>Your agent asks Alex's agent how the API works.</p>
-<p class="cap" style="animation-delay: 3.5s"><span class="m">2</span>Alex's agent answers from their working copy: live, read-only.</p>
-<p class="cap" style="animation-delay: 7s"><span class="m">3</span>Alex sends work to your session. It waits for you.</p>
-<p class="cap" style="animation-delay: 10.5s"><span class="m">4</span>You allow it. It runs on your machine, with your model.</p>
-</div>
-</div>
+  <figure class="shot">
+    <div class="shot-in"><img src="img/tui-grid.webp" width="2772" height="1686" loading="lazy" alt="qh in the 2×2 grid: four sessions named main, tests, docs and web, each working on its own task."></div>
+    <figcaption><span>The real thing: four sessions in the 2×2 grid.</span><span>Ctrl+G</span></figcaption>
+  </figure>
 
-<div class="stage stage-m sv" role="img" aria-label="Two machines joined by qh-link: your agent asks Alex's agent, Alex's agent answers, Alex sends work that waits for you, you allow it and it runs on your machine.">
-<div class="lab" style="position: absolute; left: 0; top: 0">you · laptop</div>
-<div class="lab tl" style="top: 46px; left: 0">main</div>
-<div class="tline" style="top: 54px; left: 17%; width: 83%"><i class="qh-dot" style="animation-duration: 9s"></i></div>
-<div class="lab tl" style="top: 96px; left: 0">tests</div>
-<div class="tline" style="top: 104px; left: 17%; width: 83%"><i class="qh-dot" style="animation-duration: 12s; animation-delay: -5s"></i></div>
-<div class="vl" style="top: 54px; height: 50px"></div>
-<div class="vc" style="top: 104px; height: 120px"></div>
-<div class="lab" style="position: absolute; left: calc(50% + 14px); top: 158px; white-space: nowrap; color: var(--ink)"><span style="color: var(--accent)">●</span> qh-link · encrypted</div>
-<div class="lab tl" style="top: 216px; left: 0">api</div>
-<div class="tline" style="top: 224px; left: 17%; width: 83%"><i class="qh-dot" style="animation-duration: 10s; animation-delay: -3s"></i></div>
-<div class="lab tl" style="top: 266px; left: 0">docs</div>
-<div class="tline" style="top: 274px; left: 17%; width: 83%"><i class="qh-dot" style="animation-duration: 13s; animation-delay: -8s"></i></div>
-<div class="vl" style="top: 224px; height: 50px"></div>
-<div class="lab" style="position: absolute; left: 0; top: 300px">alex · mac</div>
-<i class="pk pa"></i>
-<i class="pk pb"></i>
-<i class="pk pc"></i>
-<span class="chip wait m">waiting for you</span>
-<span class="chip ok m">allowed ✓</span>
-<div class="caps">
-<p class="cap" style="animation-delay: 0s"><span class="m">1</span>Your agent asks Alex's agent how the API works.</p>
-<p class="cap" style="animation-delay: 3.5s"><span class="m">2</span>Alex's agent answers from their working copy: live, read-only.</p>
-<p class="cap" style="animation-delay: 7s"><span class="m">3</span>Alex sends work to your session. It waits for you.</p>
-<p class="cap" style="animation-delay: 10.5s"><span class="m">4</span>You allow it. It runs on your machine, with your model.</p>
-</div>
-</div>
+  <section class="more" aria-label="How sessions work">
+    <p class="lead">Give each line a job and let them talk: one asks and waits, one hands off and moves on, one starts a worker that reports back.</p>
+    <div class="grid g3">
+      <div class="cell"><i class="rule"></i><span class="k">01</span><h3>Jobs that report back</h3><p>Whoever hands work over hears when it's done, and reports never trigger replies, so nothing ping-pongs.</p></div>
+      <div class="cell"><i class="rule"></i><span class="k">02</span><h3>A model per line</h3><p>Local models take turns on your GPU. Cloud ones run at the same time.</p></div>
+      <div class="cell"><i class="rule"></i><span class="k">03</span><h3>No collisions</h3><p>A file one session is editing is locked for the others until it's done.</p></div>
+    </div>
+  </section>
 
-<div class="list sv" style="margin-top: clamp(48px, 8vh, 88px)">
-<div class="li"><b>One line to start</b><span>/team create shares the folder (private, secrets left out) and invites friends by GitHub name; they run qh join you/project.</span></div>
-<div class="li"><b>See the board</b><span>Who's online, what their agents are doing, and their sessions to read along.</span></div>
-<div class="li"><b>Requests wait for you</b><span>A teammate's work lands in Requests; it runs only when you accept, and you approve every edit it leads to.</span></div>
-<div class="li"><b>qh-link</b><span>A direct, encrypted line between teammates: same network, across the internet, or through a relay when nothing else gets through. Viewer, member or trusted, enforced by your own qh.</span></div>
-</div>
-</div>
-</section>
+  <!-- 4 safety -->
+  <section class="safe full" id="safety">
+    <div class="safe-in">
+      <div class="term" aria-hidden="true">
+        <p><span class="pr">$</span> <span id="sCmd">git push --force origin main</span></p>
+        <p class="ask2" id="ask2"><i class="dot" id="sDot"></i>qh wants to run this. Allow?</p>
+        <div class="yn" id="yn"><kbd id="kY">y</kbd><kbd>n</kbd></div>
+        <p class="done" id="sDone">Ran it. You said yes.</p>
+      </div>
+      <div class="safe-foot">
+        <div>
+          <p class="idx">04 Safety</p>
+          <h2 class="hl md"><span class="ln"><span>Nothing runs</span></span><span class="ln"><span>without your yes.</span></span></h2>
+        </div>
+        <p class="cap">Every command runs in your system's own sandbox,<br>so auto mode is safe to leave on.</p>
+      </div>
+    </div>
+  </section>
 
+  <section class="more" aria-label="Safety rules">
+    <p class="lead">The operator's rules. Anything that crosses a line still asks you.</p>
+    <div class="grid">
+      <div class="cell"><i class="rule"></i><span class="k">01</span><h3>Sandboxed commands</h3><p>They write only in the project, can't read secrets, and reach the network through an allowlist. On Linux, macOS and Windows.</p></div>
+      <div class="cell"><i class="rule"></i><span class="k">02</span><h3>Dangerous still asks</h3><p>Even in auto: <code>rm</code>, <code>sudo</code>, <code>git push</code>, <code>curl | sh</code>.</p></div>
+      <div class="cell"><i class="rule"></i><span class="k">03</span><h3>Secrets stay yours</h3><p><code>~/.ssh</code>, <code>.env</code> and keys are never read without your yes.</p></div>
+      <div class="cell"><i class="rule"></i><span class="k">04</span><h3>Everything undoes</h3><p><code>/undo</code> reverts the last change. <code>/diff</code> shows the whole session.</p></div>
+    </div>
+  </section>
 
-<section id="proof" class="sec">
-<div class="rail"><span class="lab">02 — proof</span></div>
-<div class="body">
-<div class="sv" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: 56px clamp(32px, 4vw, 72px)">
-<div><div class="big drift">12×</div><div style="margin-top: 22px; font-weight: 500">less overhead</div><div style="color: var(--body); margin-top: 4px">≈1,200 tokens before you say hello; a popular agent CLI spends ≈14,000.</div></div>
-<div><div class="big drift">4.6<span style="font-size: .3em; letter-spacing: -0.02em; margin-left: .15em">MB</span></div><div style="margin-top: 22px; font-weight: 500">the whole thing</div><div style="color: var(--body); margin-top: 4px">One Rust binary, 5 MB of memory idle. The GPU and RAM go to the model.</div></div>
-<div><div class="big drift">96%</div><div style="margin-top: 22px; font-weight: 500">on a 9B model</div><div style="color: var(--body); margin-top: 4px">18 tasks × 3 runs. A change stays only if this number goes up.</div></div>
-</div>
-<p class="note">Measured 2026-10-09/10 on a laptop with an 8 GB NVIDIA GPU, qwen3.5:9b on Ollama. Your numbers will vary; this is weight, not capability.</p>
-</div>
-</section>
+  <p class="news"><i aria-hidden="true"></i><span><b>0.2.8 is out.</b> A stalled network no longer holds up requests, and a teammate's session stays current while you watch it.</span><a class="lk" href="docs/updates/">What's new</a></p>
 
-<section id="sessions" class="sec">
-<div class="rail"><span class="lab">03 — sessions</span></div>
-<div class="body">
-<div class="head sv">
-<h2 class="h2">Four lines,<br>one operator.</h2>
-<p class="lead">Open sessions like lines on a board, give each a job, and let them talk: one asks and waits, one hands off and moves on, one spawns a worker that reports back.</p>
-</div>
-<div class="list sv">
-<div class="li"><b>Jobs that report back</b><span>Whoever hands work over hears when it's done, and reports never trigger replies, so nothing ping-pongs.</span></div>
-<div class="li"><b>A model per line</b><span>Local models take turns on your GPU; cloud ones run at the same time.</span></div>
-<div class="li"><b>No collisions</b><span>A file one session is editing is locked for the others until it's done.</span></div>
-</div>
-<div class="sv" style="margin-top: 48px; display: flex; flex-direction: column; gap: 10px; max-width: 1100px" class="m">
-<div style="display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 16px; font-size: 14px"><span style="color: var(--faint)">01 main → 02 tests</span><span class="qh-msg">Which test in test_cart.py is failing?</span></div>
-<div style="display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 16px; font-size: 14px"><span style="color: var(--faint)">02 tests → 01 main</span><span class="qh-msg">test_total() fails on assert total([10, 20], 0.1) == 33.0.</span></div>
-<div style="display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 16px; font-size: 14px"><span style="color: var(--accent)">01 main</span><span class="qh-msg">edits cart.py, then the tests pass.</span></div>
-</div>
-<div class="sv" style="margin-top: 44px; display: flex; flex-wrap: wrap; gap: 18px 40px; font-size: 15px; color: var(--body)">
-<div><span class="key">Ctrl</span><span class="key">N</span> new line</div>
-<div><span class="key">Ctrl</span><span class="key">G</span> 2×2 grid</div>
-<div><span class="key">⇧</span><span class="key">Tab</span> ask → auto → plan</div>
-</div>
-</div>
-</section>
+  <!-- 5 install -->
+  <section class="install" id="install">
+    <p class="idx">05 Install</p>
+    <h2 class="hl"><span class="ln"><span>Try it.</span></span></h2>
+    <div class="panel">
+      <div class="os" role="group" aria-label="Operating system"><button type="button" id="osUnix" aria-pressed="true">Linux / macOS</button><button type="button" id="osWin" aria-pressed="false">Windows</button></div>
+      <div class="cmd"><code id="cmd"><span class="p">$</span> curl -fsSL kesavsabari.github.io/qh/sh | sh</code><button class="copy" id="copy" type="button">Copy</button></div>
+      <div class="then"><span>then: cd my-project &amp;&amp; qh</span><a class="lk" href="docs/">Every feature and FAQ in the docs</a></div>
+      <p class="works">Works with <b>your ChatGPT plan</b>, <b>Ollama</b> local or cloud, <b>coding plans</b>, or <b>any API key</b>.</p>
+    </div>
+  </section>
+</main>
 
-<section id="safety" class="sec">
-<div class="rail"><span class="lab">04 — safety</span></div>
-<div class="body">
-<div class="head sv">
-<h2 class="h2">The operator's<br>rules.</h2>
-<p class="lead">Every command runs in your system's own sandbox, so auto mode is safe to leave on. Anything that crosses a line still asks you.</p>
-</div>
-<div class="list sv">
-<div class="li"><b>Sandboxed commands</b><span>They write only in the project, can't read secrets, and reach the network through an allowlist, on Linux, macOS and Windows.</span></div>
-<div class="li"><b>Dangerous still asks</b><span>Even in auto: rm, sudo, git push, curl | sh.</span></div>
-<div class="li"><b>Secrets stay yours</b><span>~/.ssh, .env and keys are never read without your yes.</span></div>
-<div class="li"><b>Everything undoes</b><span>/undo reverts the last change; /diff shows the whole session.</span></div>
-</div>
-</div>
-</section>
-
-
-
-<div class="band" style="padding: clamp(110px, 18vh, 200px) 0 clamp(80px, 12vh, 140px)">
-<a href="docs/updates/" style="display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 12px 32px; padding: 22px 0; border-top: 1px solid var(--ink); border-bottom: 1px solid var(--rule)">
-<span style="font-size: clamp(18px, 1.8vw, 24px); letter-spacing: -0.02em"><span style="color: var(--accent)">●</span> 0.2.8 is out: a stalled network no longer holds up requests, and a teammate's session stays current while you watch it.</span>
-<span class="m" style="font-size: 13px; color: var(--soft)">what's new ↗</span>
-</a>
-</div>
-
-</div>
-</div>
-
-<footer id="install" class="reveal" style="position: sticky; bottom: 0; z-index: 0; min-height: 100vh; min-height: 100svh; box-sizing: border-box; background: var(--fbg); color: var(--fink); display: flex; flex-direction: column; justify-content: space-between; gap: 48px; padding: clamp(84px, 12vh, 120px) clamp(20px, 3.2vw, 56px) clamp(28px, 5vh, 48px)">
-<div class="lab" style="color: var(--fsoft)">05 — get a line</div>
-<div class="reveal-in">
-<div style="font-weight: 500; font-size: clamp(56px, 10vw, 200px); line-height: .88; letter-spacing: -0.065em">Plug in your<br>first line<span class="qh-cursor" style="display: inline-block; width: 0.08em; height: 0.7em; background: var(--accent); margin-left: 0.08em"></span></div>
-<div style="margin-top: clamp(36px, 6vh, 64px); display: flex; flex-direction: column; border-top: 1px solid var(--frule)">
-<div class="cmd">
-<code class="m" style="font-size: clamp(14px, 1.8vw, 22px); color: var(--fink)"><span style="color: var(--accent)">$</span> curl -fsSL kesavsabari.github.io/qh/sh | sh</code>
-<button class="copy m" type="button" data-copy="curl -fsSL kesavsabari.github.io/qh/sh | sh" style="font-size: 12px; min-height: 44px; padding: 0 18px; border: 1px solid var(--fink); background: transparent; color: var(--fink); cursor: pointer">copy</button>
-</div>
-<div class="cmd">
-<code class="m" style="font-size: clamp(13px, 1.4vw, 17px); color: var(--fbody)">windows: irm kesavsabari.github.io/qh | iex</code>
-<button class="copy m" type="button" data-copy="irm kesavsabari.github.io/qh | iex" style="font-size: 12px; min-height: 44px; padding: 0 18px; border: 1px solid var(--fbtn); background: transparent; color: var(--fink); cursor: pointer">copy</button>
-</div>
-</div>
-<p class="m" style="margin: 20px 0 0; font-size: 13px; color: var(--fbody)">then: cd my-project &amp;&amp; qh · works with your ChatGPT plan, Ollama (local or cloud), coding plans or any API key</p>
-</div>
-<div class="lab" style="color: var(--fsoft); display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px; border-top: 1px solid var(--frule2); padding-top: 22px"><span>qh · MIT licensed · windows · macos · linux</span><span><a href="docs/" style="color: var(--flink)">every feature &amp; faq: docs</a> · <a href="https://github.com/kesavsabari/qh-rs" style="color: var(--flink)">github</a> · <a href="#top" style="color: var(--flink)">top ↑</a></span></div>
+<footer class="ft">
+  <div class="ft-row"><nav aria-label="Footer"><a class="lk" href="docs/">Docs</a>, <a class="lk" href="https://github.com/kesavsabari/qh-rs">GitHub</a>, <a class="lk" href="docs/updates/">Updates</a>, <a class="lk" href="#top">Top</a></nav><span>qh 0.2.8 · MIT licensed · Windows, macOS, Linux</span></div>
+  <p class="word" aria-hidden="true"><span class="ch q">q</span><span class="ch h">h</span><i class="bl"></i></p>
+  <div class="eye" id="eye2" aria-hidden="true"><b></b></div>
 </footer>
 
-</div>
-
+<script src="vendor/lenis.min.js"></script>
+<script src="vendor/gsap.min.js"></script>
+<script src="vendor/ScrollTrigger.min.js"></script>
 <script>
-// copy buttons
-document.querySelectorAll('[data-copy]').forEach(b => b.addEventListener('click', () => {
-  navigator.clipboard.writeText(b.dataset.copy).then(() => { b.textContent = 'copied'; setTimeout(() => (b.textContent = 'copy'), 1600); });
-}));
-// light / dark: the system's until you pick, then remembered
-const html = document.documentElement, tb = document.getElementById('theme');
-const dark = () => html.dataset.theme ? html.dataset.theme === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
-const label = () => { tb.textContent = dark() ? '◑ light' : '◐ dark'; };
-label();
-tb.addEventListener('click', () => { const t = dark() ? 'light' : 'dark'; html.dataset.theme = t; try { localStorage.setItem('qh-theme', t); } catch (e) {} label(); });
-matchMedia('(prefers-color-scheme: dark)').addEventListener('change', label);
-// heavy, smooth wheel scrolling: each frame moves 5% of the way to where the wheel asked for
-const se = document.scrollingElement || html;
-const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
-let target = 0, cur = 0, raf = 0, jump = 0, gen = 0;
-// the next frame, or a timer if the browser holds frames back (seen in headless Chrome mid-page)
-const frame = f => { let ran = false; const id = requestAnimationFrame(t => { ran = true; f(t); });
-  setTimeout(() => { if (!ran) { cancelAnimationFrame(id); f(performance.now()); } }, 34); return id; };
-const step = () => {
-  if (!raf) return;  // a jump took over
-  cur += (target - cur) * 0.05;
-  if (Math.abs(target - cur) < 0.5) { cur = target; se.scrollTop = cur; raf = 0; return; }
-  se.scrollTop = cur; raf = frame(step);
-};
-if (!still) addEventListener('wheel', e => {
-  if (e.ctrlKey || Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;
-  if (jump) jump = 0;  // the wheel takes over from a jump
-  if (!raf) target = cur = se.scrollTop;
-  target = Math.max(0, Math.min(se.scrollHeight - innerHeight, target + e.deltaY * (e.deltaMode === 1 ? 32 : 0.85)));
-  e.preventDefault();
-  if (!raf) raf = frame(step);
-}, { passive: false });
-// links within the page: an eased glide timed to the distance (the wheel's lerp lurches over long ones)
-const ease = t => t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
-function glide(to) {
-  raf = 0;
-  const me = ++gen;
-  to = Math.max(0, Math.min(se.scrollHeight - innerHeight, to));
-  if (still) { se.scrollTop = to; return; }
-  const from = se.scrollTop, d = to - from, dur = Math.min(1500, 650 + Math.abs(d) * 0.18), t0 = performance.now();
-  const tick = now => {
-    if (me !== gen || !jump) return;  // a newer jump or the wheel took over
-    const p = Math.min(1, (now - t0) / dur);
-    se.scrollTop = from + d * ease(p);
-    if (p < 1) frame(tick); else { jump = 0; target = cur = se.scrollTop; }
-  };
-  jump = 1;
-  frame(tick);
+(() => {
+const root = document.documentElement, RM = matchMedia('(prefers-reduced-motion: reduce)').matches;
+const $ = (s, el = document) => el.querySelector(s), $$ = (s, el = document) => [...el.querySelectorAll(s)];
+const clamp = (v, a = 0, b = 1) => Math.min(b, Math.max(a, v)), lerp = (a, b, t) => a + (b - a) * t;
+const G = window.gsap && window.ScrollTrigger;
+const MO = G && !RM;
+if (!MO) root.classList.remove('mo');
+
+/* theme */
+const themeBtn = $('#theme');
+const isDark = () => root.dataset.theme ? root.dataset.theme === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
+try { const t = localStorage.getItem('qh-theme'); if (t === 'dark' || t === 'light') root.dataset.theme = t; } catch (e) {}
+const syncTheme = () => { themeBtn.textContent = isDark() ? 'Light' : 'Dark'; };
+syncTheme();
+themeBtn.addEventListener('click', () => { root.dataset.theme = isDark() ? 'light' : 'dark'; try { localStorage.setItem('qh-theme', root.dataset.theme); } catch (e) {} syncTheme(); });
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', syncTheme);
+
+/* smooth scroll, his tuning */
+let lenis = null;
+if (!RM && window.Lenis) lenis = new Lenis({ lerp: 0.05, wheelMultiplier: 0.85 });
+if (G) {
+  gsap.registerPlugin(ScrollTrigger);
+  if (lenis) { lenis.on('scroll', ScrollTrigger.update); gsap.ticker.add(t => lenis.raf(t * 1000)); gsap.ticker.lagSmoothing(0); }
+} else if (lenis) { const raf = t => { lenis.raf(t); requestAnimationFrame(raf); }; requestAnimationFrame(raf); }
+/* in-page links. Lenis 1.1 drops a timed scrollTo that has no easing, so pass one.
+   Pinned sections are measured from their ScrollTrigger: a pinned element reports
+   its fixed position, and _land moves past the empty first frames of a scene. */
+const easeIO = t => t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+function landY(el) {
+  const st = G && ScrollTrigger.getAll().find(s => s.pin === el);
+  if (st) return st.start + (el._land || 0) * (st.end - st.start);
+  return el.getBoundingClientRect().top + scrollY;
 }
-document.querySelectorAll('a[href^="#"]').forEach(a => a.addEventListener('click', e => {
-  const id = a.getAttribute('href').slice(1);
-  // install is the footer the page lifts off at the very end: it's always "on screen" underneath, so go to the end
-  const to = id === 'top' ? 0 : id === 'install' ? Infinity : (() => {
-    const el = document.getElementById(id);
-    return el ? el.getBoundingClientRect().top + se.scrollTop : null;
-  })();
-  if (to === null) return;
-  e.preventDefault();
-  glide(to);
-  history.replaceState(null, '', id === 'top' ? location.pathname : '#' + id);
+$$('a[href^="#"]').forEach(a => a.addEventListener('click', e => {
+  const el = $(a.getAttribute('href')); if (!el) return; e.preventDefault();
+  const y = Math.max(0, Math.round(landY(el)));
+  if (lenis && MO && Math.abs(y - scrollY) > innerHeight * 1.6) curtainTo(y, el);
+  else if (lenis) lenis.scrollTo(y, { duration: Math.min(2.4, .9 + Math.abs(y - scrollY) / 7000), easing: easeIO });
+  else scrollTo({ top: y, behavior: RM ? 'auto' : 'smooth' });
+  el.setAttribute('tabindex', '-1'); el.focus({ preventScroll: true });
+  if (history.replaceState) history.replaceState(null, '', a.getAttribute('href'));
 }));
-// the quick-links bar steps aside once the install footer is showing: it is the install
-const fl = document.querySelector('.float'), sheet = document.querySelector('.sheet');
-const aside = () => fl.classList.toggle('off', sheet.getBoundingClientRect().bottom < innerHeight * 0.75);
-addEventListener('scroll', aside, { passive: true }); addEventListener('resize', aside); aside();
+/* far jumps: the curtain. A panel sweeps up over the screen showing where you're going (its section
+   number and name), the page jumps underneath while it's covered, then the panel lifts off the top to
+   reveal the section. Orange, or ink when the destination is the orange Team screen. */
+const curt = document.createElement('div'); curt.className = 'curtain'; curt.setAttribute('aria-hidden', 'true');
+curt.innerHTML = '<span class="cn"></span><span class="cl"></span>'; document.body.appendChild(curt);
+const cNum = $('.cn', curt), cName = $('.cl', curt), eIOc = t => t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+let curtaining = false;
+function curtainTo(y, el) {
+  if (curtaining) return; curtaining = true;
+  const idx = $('.idx', el), m = idx ? idx.textContent.trim().match(/^(\d+)\s+(.*)$/) : null;
+  cNum.textContent = m ? m[1] : '00'; cName.textContent = m ? m[2] : 'Top';
+  curt.classList.toggle('ink', el.classList.contains('ask'));
+  if (lenis) lenis.stop();
+  curt.style.display = 'flex';
+  const IN = .42, HOLD = .2, OUT = .5, T0 = performance.now(); let jumped = false;
+  const frame = now => {
+    const t = (now - T0) / 1000 / (window.__mslow || 1);
+    if (t < IN) { const e = eIOc(t / IN); curt.style.transform = `translate3d(0,${(1 - e) * 100}%,0)`; cNum.style.transform = `translate3d(0,${(1 - e) * 40}%,0)`; }
+    else {
+      if (!jumped) {
+        jumped = true;
+        if (lenis) { lenis.start(); lenis.scrollTo(y, { immediate: true, force: true }); lenis.stop(); } else scrollTo(0, y);
+        if (G) { ScrollTrigger.update(); ScrollTrigger.getAll().forEach(st => { const tw = st.getTween && st.getTween(); if (tw) tw.progress(1); }); }
+      }
+      const e = eIOc(clamp((t - IN - HOLD) / OUT));
+      curt.style.transform = `translate3d(0,${-e * 100}%,0)`; cNum.style.transform = `translate3d(0,${-e * 60}%,0)`;
+    }
+    if (t < IN + HOLD + OUT) requestAnimationFrame(frame);
+    else { curt.style.display = 'none'; if (lenis) lenis.start(); curtaining = false; }
+  };
+  requestAnimationFrame(frame);
+}
+/* framed (as in the artifact viewer), sites like GitHub refuse to load in place */
+if (self !== top) $$('a[href^="http"]').forEach(a => { a.target = '_blank'; a.rel = 'noopener'; });
+
+/* the eye: find the counter of the q, put the dot in it */
+const mc = document.createElement('canvas').getContext('2d', { willReadFrequently: true });
+function counter(fs) {
+  const c = mc.canvas, pad = Math.ceil(fs * .2); c.width = Math.ceil(fs * .9) + pad * 2; c.height = Math.ceil(fs * 1.3);
+  const base = Math.round(fs * .95), y = Math.round(base - fs * .27);
+  mc.clearRect(0, 0, c.width, c.height); mc.font = `600 ${fs}px Geist, sans-serif`; mc.fillStyle = '#000'; mc.fillText('q', pad, base);
+  const row = mc.getImageData(0, y, c.width, 1).data, ink = i => row[i * 4 + 3] > 128;
+  let i = 0; while (i < c.width && !ink(i)) i++; while (i < c.width && ink(i)) i++; const g0 = i; while (i < c.width && !ink(i)) i++; const g1 = i;
+  if (!(g1 > g0) || g1 >= c.width) return { x: fs * .28, y: -fs * .27, r: fs * .075 };
+  return { x: (g0 + g1) / 2 - pad, y: -fs * .27, r: (g1 - g0) / 2 * .62 };
+}
+const eyes = [[$('.hero .word'), $('#eye1')], [$('.ft .word'), $('#eye2')]];
+function placeEyes() {
+  eyes.forEach(([w, e]) => {
+    const q = $('.q', w), bl = $('.bl', w), fs = parseFloat(getComputedStyle(w).fontSize), k = counter(fs);
+    const x = w.offsetLeft + q.offsetLeft + k.x, y = w.offsetTop + bl.offsetTop + k.y;
+    Object.assign(e.style, { left: x - k.r + 'px', top: y - k.r + 'px', width: k.r * 2 + 'px', height: k.r * 2 + 'px' });
+    e._cx = x; e._cy = y; e._r = k.r;
+  });
+}
+
+/* it watches the pointer and blinks */
+const ptr = { x: 0, y: 0, on: false };
+addEventListener('pointermove', e => { ptr.x = e.clientX; ptr.y = e.clientY; ptr.on = true; }, { passive: true });
+let blinkT = -1e4, nextBlink = performance.now() + 3200;
+function look(now) {
+  if (now > nextBlink) { blinkT = now; nextBlink = now + 2600 + Math.random() * 3600; }
+  const bk = now - blinkT < 170 ? 1 - Math.sin(Math.PI * (now - blinkT) / 170) * .9 : 1;
+  for (const [, e] of eyes) {
+    const r = e.getBoundingClientRect(); if (r.bottom < 0 || r.top > innerHeight) continue;
+    const b = e.firstElementChild;
+    if (r.width > e._r * 3) { b.style.transform = ''; continue; }
+    const cx = r.left + r.width / 2, cy = r.top + r.height / 2, dx = ptr.x - cx, dy = ptr.y - cy, d = Math.hypot(dx, dy) || 1, k = ptr.on ? Math.min(1, d / 500) * .3 : 0;
+    e._ox = lerp(e._ox || 0, dx / d * k, .12); e._oy = lerp(e._oy || 0, dy / d * k, .12);
+    b.style.transform = `translate(${e._ox * 100}%,${e._oy * 100}%) scaleY(${bk})`;
+  }
+  requestAnimationFrame(look);
+}
+
+/* the ribbon bends with scroll speed */
+const ribPath = $('#ribPath'), ribTp = $('#ribTp');
+let ribOn = false, ribOff = 0, bend = 0, unit = 0;
+new IntersectionObserver(es => es.forEach(x => ribOn = x.isIntersecting)).observe($('.rib'));
+function ribbon(dt) {
+  if (!ribOn) return;
+  if (!unit) unit = $('#ribText').getComputedTextLength() / 3;
+  const v = lenis ? lenis.velocity : 0;
+  bend = lerp(bend, clamp(v * 7, -150, 150), .08);
+  ribOff -= (1.1 + Math.min(6, Math.abs(v) * .35)) * dt / 16.7;
+  if (unit && ribOff < -unit) ribOff += unit;
+  ribTp.setAttribute('startOffset', ribOff.toFixed(1));
+  ribPath.setAttribute('d', `M -200 140 Q 800 ${(440 + bend).toFixed(1)} 1800 140`);
+}
+
+/* typed text: any .tx with data-t, plus the safety command */
+const typeTo = (el, p) => { const t = el.dataset.t; el.textContent = t.slice(0, Math.round(t.length * p)); };
+
+/* install */
+const CMDS = { unix: '<span class="p">$</span> curl -fsSL kesavsabari.github.io/qh/sh | sh', win: '<span class="p">&gt;</span> irm kesavsabari.github.io/qh | iex' };
+const RAW = { unix: 'curl -fsSL kesavsabari.github.io/qh/sh | sh', win: 'irm kesavsabari.github.io/qh | iex' };
+let os = /Win/.test(navigator.platform || navigator.userAgent) ? 'win' : 'unix';
+const osU = $('#osUnix'), osW = $('#osWin'), cmd = $('#cmd'), copy = $('#copy');
+function setOS(o) { os = o; cmd.innerHTML = CMDS[o]; osU.setAttribute('aria-pressed', o === 'unix'); osW.setAttribute('aria-pressed', o === 'win'); }
+setOS(os); osU.addEventListener('click', () => setOS('unix')); osW.addEventListener('click', () => setOS('win'));
+copy.addEventListener('click', () => {
+  const done = () => { copy.textContent = 'Copied'; setTimeout(() => copy.textContent = 'Copy', 1600); };
+  const fallback = () => { const r = document.createRange(); r.selectNodeContents(cmd); const s = getSelection(); s.removeAllRanges(); s.addRange(r); copy.textContent = 'Press Ctrl+C'; setTimeout(() => copy.textContent = 'Copy', 2200); };
+  try { navigator.clipboard.writeText(RAW[os]).then(done, fallback); } catch (e) { fallback(); }
+});
+
+const fontsReady = () => document.fonts && document.fonts.load ? Promise.race([document.fonts.load('600 100px Geist'), new Promise(r => setTimeout(r, 1500))]) : Promise.resolve();
+fontsReady().then(() => {
+  placeEyes();
+  if (!RM) requestAnimationFrame(look);
+  let rz; addEventListener('resize', () => { clearTimeout(rz); rz = setTimeout(() => { placeEyes(); if (G) ScrollTrigger.refresh(); }, 150); });
+  if (MO) motion();
+});
+
+function motion() {
+  const hd = $('#hd'), eye1 = $('#eye1');
+  const lines = s => $$(s + ' .ln > span');
+  let inAsk = false, heroInv = false, past = false;
+  const syncHd = () => { hd.classList.toggle('inv', inAsk || heroInv); hd.classList.toggle('sc', past && !inAsk && !heroInv); };
+  gsap.ticker.add((t, dt) => ribbon(dt));
+  const reveal = (sel, trigger, start = 'top 70%') => gsap.to(lines(sel), { yPercent: 0, duration: 1.1, stagger: .09, ease: 'expo.out', scrollTrigger: { trigger, start, toggleActions: 'play none none reverse' } });
+  // a scrubbed typing tween for one element
+  const type = (tl, el, dur, pos) => { const o = { p: 0 }; typeTo(el, 0); return tl.to(o, { p: 1, duration: dur, ease: 'none', onUpdate: () => typeTo(el, o.p) }, pos); };
+
+  /* 0 intro: the dot pops in at the centre, then lands in the q as the letters rise */
+  gsap.set('.hero .ch', { yPercent: 105 });
+  gsap.set(lines('.intro'), { yPercent: 105 });
+  gsap.set('.meta li, .hint, .ctas a', { opacity: 0, y: 8 });
+  gsap.set(eye1, { x: innerWidth / 2 - eye1._cx, y: innerHeight / 2 - eye1._cy, scale: 0 });
+  gsap.set('.hero', { opacity: 1 });
+  const intro = gsap.timeline({ delay: .25 });
+  intro.to(eye1, { scale: 2.2, duration: .7, ease: 'back.out(2.2)' })
+    .to(eye1, { scale: 1.6, duration: .35, ease: 'power2.inOut' }, '+=.2')
+    .to('.hero .ch', { yPercent: 0, duration: 1.2, ease: 'expo.out', stagger: .09 }, '-=.05')
+    .to(eye1, { x: 0, y: 0, scale: 1, duration: 1, ease: 'expo.inOut' }, '<+.05')
+    .to(lines('.intro'), { yPercent: 0, duration: 1, ease: 'expo.out', stagger: .08 }, '-=.55')
+    .to('.ctas a, .meta li, .hint', { opacity: 1, y: 0, duration: .6, stagger: .05, ease: 'power2.out' }, '<+.15');
+  if (scrollY > 20) intro.progress(1);
+
+  /* 0 -> 1: the letters part, the eye grows until the screen is orange */
+  const cover = () => { const W = innerWidth, H = innerHeight, x = eye1._cx, y = eye1._cy; return 2 * Math.max(Math.hypot(x, y), Math.hypot(W - x, y), Math.hypot(x, H - y), Math.hypot(W - x, H - y)) / (eye1._r * 2) + .5; };
+  gsap.timeline({ scrollTrigger: { trigger: '.hero', start: 'top top', end: '+=130%', pin: true, scrub: 1, invalidateOnRefresh: true, onUpdate: s => { heroInv = s.isActive && s.progress > .72; syncHd(); }, onLeave: () => { heroInv = false; syncHd(); } } })
+    .to('.hero .q', { xPercent: -150, ease: 'power2.in', duration: 1 }, 0)
+    .to('.hero .h', { xPercent: 170, ease: 'power2.in', duration: 1 }, 0)
+    .to('.intro, .meta, .hint, .ctas', { y: -50, opacity: 0, ease: 'power1.in', duration: .5 }, 0)
+    .fromTo(eye1, { scale: 1 }, { scale: cover, ease: 'power3.in', duration: .9, immediateRender: false }, .15);
+
+  /* 1 team: four steps along one wire */
+  const youSt = $('#youSt');
+  gsap.set('#wire', { attr: { 'stroke-dasharray': 876, 'stroke-dashoffset': 876 } });
+  gsap.set('#pkt, .steps li, .ask .cap, .ends span, #you, #alex, .ask .idx', { opacity: 0 });
+  gsap.set(lines('.ask'), { yPercent: 105 });
+  const tx = n => $(`#st${n} .tx`);
+  const aTl = gsap.timeline({ scrollTrigger: { trigger: '.ask', start: 'top top', end: '+=360%', pin: true, scrub: 1, onUpdate: s => aMarks(s.progress * aTl.duration()) } });
+  aTl.to('.ask .idx', { opacity: 1, duration: .2 })
+    .to(lines('.ask'), { yPercent: 0, duration: .5, stagger: .1, ease: 'power3.out' }, '<')
+    .to('#you, #alex, .ends span', { opacity: 1, duration: .3, stagger: .06 }, '-=.1')
+    .to('#wire', { attr: { 'stroke-dashoffset': 0 }, duration: .6, ease: 'power1.inOut' })
+    .addLabel('ready')
+    // 1 ask
+    .to('#st1, #pkt', { opacity: 1, duration: .1 });
+  type(aTl, tx(1), .45)
+    .to('#pkt', { attr: { cx: 938 }, duration: .6, ease: 'power2.inOut' }, '<+.15')
+    .to('#alex', { attr: { 'fill-opacity': 1 }, duration: .15 })
+    // 2 answer from alex's copy
+    .to('#st2', { opacity: 1, duration: .1 });
+  type(aTl, tx(2), .5)
+    .to('#pkt', { attr: { cx: 62 }, duration: .6, ease: 'power2.inOut' }, '<+.1')
+    // 3 alex sends work; it waits for you
+    .set('#pkt', { attr: { cx: 938, r: 12 } }, '+=.15')
+    .to('#st3', { opacity: 1, duration: .1 });
+  type(aTl, tx(3), .5)
+    .to('#pkt', { attr: { cx: 62 }, duration: .7, ease: 'power2.inOut' }, '<+.1')
+    .addLabel('wait')
+    // 4 you allow it
+    .to('#st4', { opacity: 1, duration: .1 }, '+=.35')
+    .addLabel('ok');
+  type(aTl, tx(4), .5)
+    .to('#pkt', { attr: { r: 0 }, duration: .2 })
+    .to('.ask .cap', { opacity: 1, duration: .25 })
+    .to({}, { duration: .4 });
+  $('#team')._land = aTl.labels.ready / aTl.duration();
+  function aMarks(t) {
+    const L = aTl.labels, st = t >= L.ok ? 'allowed' : t >= L.wait ? 'waiting for you' : '';
+    if (youSt.dataset.s !== st) { youSt.dataset.s = st; youSt.innerHTML = st ? `<i></i>${st}` : ''; youSt.classList.toggle('ok', st === 'allowed'); }
+  }
+  ScrollTrigger.create({ trigger: '.ask', start: 'top 50px', end: 'bottom 50px', onToggle: s => { inAsk = s.isActive; syncHd(); } });
+
+  /* detail grids: rules draw, then the words */
+  $$('.grid, .stats').forEach(g => {
+    gsap.set($$('.rule', g), { scaleX: 0 });
+    gsap.set($$('.cell > :not(.rule), .stat > :not(.rule)', g), { opacity: 0, y: 16 });
+    gsap.timeline({ scrollTrigger: { trigger: g, start: 'top 82%', toggleActions: 'play none none reverse' } })
+      .to($$('.rule', g), { scaleX: 1, duration: 1.2, stagger: .1, ease: 'expo.out' })
+      .to($$('.cell > :not(.rule), .stat > :not(.rule)', g), { opacity: 1, y: 0, duration: .8, stagger: .035, ease: 'power2.out' }, '-=1');
+  });
+  $$('.more .lead').forEach(l => gsap.from(l, { opacity: 0, y: 24, duration: 1, ease: 'expo.out', scrollTrigger: { trigger: l, start: 'top 85%', toggleActions: 'play none none reverse' } }));
+
+  /* 2 proof: both bars at one scale, numbers count with them */
+  const nA = $('#nA'), nB = $('#nB'), cnt = { a: 0, b: 0 }, fmt = v => (Math.round(v / 100) * 100).toLocaleString('en-US');
+  const renderN = () => { nA.textContent = fmt(cnt.a); nB.textContent = fmt(cnt.b); };
+  renderN();
+  gsap.set(lines('.weight'), { yPercent: 105 });
+  gsap.set('.weight .bar', { scaleX: 0 });
+  reveal('.weight', '.weight');
+  gsap.timeline({ scrollTrigger: { trigger: '.weight .r1', start: 'top 85%', end: 'bottom 35%', scrub: 1 } })
+    .to('.weight .r1 .bar', { scaleX: 1, ease: 'none', duration: 1 }, 0)
+    .to(cnt, { a: 14000, ease: 'none', duration: 1, onUpdate: renderN }, 0)
+    .to('.weight .r2 .bar', { scaleX: 1, ease: 'none', duration: .4 }, .55)
+    .to(cnt, { b: 1200, ease: 'none', duration: .4, onUpdate: renderN }, .55);
+  $$('.cu').forEach(el => { const to = +el.dataset.to, dp = +el.dataset.dp, o = { v: 0 }; el.textContent = (0).toFixed(dp);
+    gsap.to(o, { v: to, duration: 1.6, ease: 'expo.out', onUpdate: () => el.textContent = o.v.toFixed(dp), scrollTrigger: { trigger: el, start: 'top 85%', toggleActions: 'play none none reverse' } }); });
+
+  /* 3 sessions: split into four lines, then main asks tests */
+  gsap.set(lines('.sess'), { yPercent: 105 });
+  gsap.set('.vl', { scaleY: 0 }); gsap.set('.hz', { scaleX: 0 });
+  gsap.set('.p2, .p3, .p4, .hop, .ex li', { opacity: 0 });
+  gsap.set('.stage, .keys, .sess .idx', { opacity: 0, y: 30 });
+  gsap.timeline({ scrollTrigger: { trigger: '.sess', start: 'top 60%', toggleActions: 'play none none reverse' } })
+    .to('.sess .idx', { opacity: 1, y: 0, duration: .6 })
+    .to(lines('.sess'), { yPercent: 0, duration: 1.1, stagger: .09, ease: 'expo.out' }, '<')
+    .to('.stage, .keys', { opacity: 1, y: 0, duration: 1, ease: 'expo.out' }, '-=.9');
+  const kN = $('#kN'), kG = $('#kG'), panes = $$('.pane');
+  const sTl = gsap.timeline({ scrollTrigger: { trigger: '.sess', start: 'top top', end: '+=260%', pin: true, scrub: 1, onUpdate: s => sMarks(s.progress * sTl.duration()) } });
+  sTl.addLabel('n1', .2)
+    .to('.vl', { scaleY: 1, duration: .5, ease: 'power2.inOut' }, 'n1+=.1')
+    .to('.p2', { opacity: 1, duration: .15 })
+    .addLabel('n2')
+    .to('.hz', { scaleX: 1, duration: .5, ease: 'power2.inOut' }, '+=.1')
+    .to('.p3, .p4', { opacity: 1, duration: .15, stagger: .05 })
+    .addLabel('g')
+    .to('.hop', { opacity: 1, duration: .1 }, '+=.2').addLabel('h1')
+    .to('#ex1', { opacity: 1, duration: .1 });
+  type(sTl, $('#ex1 .tx'), .45)
+    .to('.hop', { left: '75%', duration: .5, ease: 'power2.inOut' }, '<+.1').addLabel('h2')
+    .to('#ex2', { opacity: 1, duration: .1 });
+  type(sTl, $('#ex2 .tx'), .55)
+    .to('.hop', { left: '25%', duration: .5, ease: 'power2.inOut' }, '<+.1').addLabel('h3')
+    .to('#ex3', { opacity: 1, duration: .1 });
+  type(sTl, $('#ex3 .tx'), .4)
+    .to('.hop', { scale: 1.6, duration: .15, yoyo: true, repeat: 1 })
+    .to({}, { duration: .4 });
+  const SL = sTl.labels;
+  function sMarks(t) {
+    kN.classList.toggle('press', (t > SL.n1 && t < SL.n1 + .14) || (t > SL.n2 && t < SL.n2 + .14));
+    kG.classList.toggle('press', t > SL.g && t < SL.g + .14);
+    const a = t >= SL.h3 ? 0 : t >= SL.h2 ? 1 : t >= SL.h1 ? 0 : -1;
+    panes.forEach((p, i) => p.classList.toggle('on', i === a));
+  }
+
+  /* the real screenshot opens up to full width */
+  gsap.timeline({ scrollTrigger: { trigger: '.shot', start: 'top 90%', end: 'center 55%', scrub: 1 } })
+    .fromTo('.shot-in', { clipPath: 'inset(14% 24% 14% 24% round 14px)' }, { clipPath: 'inset(0% 0% 0% 0% round 14px)', ease: 'none' }, 0)
+    .fromTo('.shot img', { scale: 1.3 }, { scale: 1, ease: 'none' }, 0);
+
+  /* 4 safety: the command waits for your yes */
+  gsap.set(lines('.safe'), { yPercent: 105 });
+  gsap.set('#ask2, #yn, #sDone, .safe .cap, .safe .idx', { opacity: 0 });
+  gsap.timeline({ scrollTrigger: { trigger: '.safe', start: 'top 60%', toggleActions: 'play none none reverse' } })
+    .to('.safe .idx', { opacity: 1, duration: .6 })
+    .to(lines('.safe'), { yPercent: 0, duration: 1.1, stagger: .09, ease: 'expo.out' }, '<')
+    .to('.safe .cap', { opacity: 1, duration: .6 }, '-=.7');
+  const kY = $('#kY'), sDot = $('#sDot'), sCmd = $('#sCmd'); sCmd.dataset.t = sCmd.textContent;
+  const fTl = gsap.timeline({ scrollTrigger: { trigger: '.safe', start: 'top top', end: '+=200%', pin: true, scrub: 1, onUpdate: s => fMarks(s.progress * fTl.duration()) } });
+  type(fTl, sCmd, .6, .15)
+    .to('#ask2', { opacity: 1, duration: .15 })
+    .to('#yn', { opacity: 1, duration: .15 })
+    .addLabel('yes', '+=.5')
+    .to('#sDone', { opacity: 1, duration: .15 }, 'yes+=.15')
+    .to({}, { duration: .5 });
+  function fMarks(t) { const y = t >= fTl.labels.yes; kY.classList.toggle('press', y); sDot.style.visibility = y ? 'hidden' : ''; }
+
+  /* news, install, footer */
+  gsap.from('.news', { opacity: 0, y: 20, duration: .9, ease: 'expo.out', scrollTrigger: { trigger: '.news', start: 'top 90%', toggleActions: 'play none none reverse' } });
+  gsap.set(lines('.install'), { yPercent: 105 });
+  gsap.set('.panel, .install .idx', { opacity: 0, y: 20 });
+  gsap.timeline({ scrollTrigger: { trigger: '.install', start: 'top 65%', toggleActions: 'play none none reverse' } })
+    .to('.install .idx', { opacity: 1, y: 0, duration: .6 })
+    .to(lines('.install'), { yPercent: 0, duration: 1.2, ease: 'expo.out' }, '<')
+    .to('.panel', { opacity: 1, y: 0, duration: .8, ease: 'power2.out' }, '-=.8');
+  gsap.set('.ft .ch', { yPercent: 105 });
+  gsap.set('#eye2', { scale: 0 });
+  gsap.timeline({ scrollTrigger: { trigger: '.ft', start: 'top 97%', toggleActions: 'play none none reverse' } })
+    .to('.ft .ch', { yPercent: 0, duration: 1.2, stagger: .09, ease: 'expo.out' })
+    .to('#eye2', { scale: 1, duration: .6, ease: 'back.out(2.4)' }, '-=.5');
+
+  /* made last so it measures after every pin spacer above it */
+  ScrollTrigger.create({ trigger: '#teamMore', start: 'top 70px', endTrigger: 'html', end: 'bottom bottom', onToggle: s => { past = s.isActive; syncHd(); } });
+  ScrollTrigger.refresh();
+}
+})();
 </script>
-</body>
-</html>
+
+</body></html>

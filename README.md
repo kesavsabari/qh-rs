@@ -1,7 +1,7 @@
 # qh
 
 A coding agent for your terminal. It works with local models through Ollama or with cloud
-models through an API key. It's a single 4 MB binary with nothing else to install.
+models through an API key. It's a single binary of about 8 MB with nothing else to install.
 
 It reads and edits your files, runs commands, browses the web, and can run several agents
 side by side in tabs.

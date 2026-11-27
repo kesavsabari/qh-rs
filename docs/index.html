@@ -4,9 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>qh, a coding agent for your terminal</title>
-<meta name="description" content="qh is an open-source coding agent for your terminal: many sessions at once, any model (local Ollama, cloud, or your ChatGPT plan), and your whole team on one project over qh-link. One 4.6 MB file for Windows, macOS and Linux.">
+<meta name="description" content="qh is an open-source coding agent for your terminal: many sessions at once, any model (local Ollama, cloud, or your ChatGPT plan), and your whole team on one project over qh-link. One file, about 8 MB, for Windows, macOS and Linux.">
 <meta property="og:title" content="qh, a coding agent for your terminal">
-<meta property="og:description" content="Many sessions. Any model. Your whole team. One 4.6 MB file, MIT licensed.">
+<meta property="og:description" content="Many sessions. Any model. Your whole team. One file, about 8 MB, MIT licensed.">
 <meta property="og:image" content="img/qh-grid.webp">
 <meta name="theme-color" content="#f3f2ee">
 <link rel="icon" href="img/favicon.svg" type="image/svg+xml">
@@ -120,32 +120,6 @@ kbd.press{transform:translateY(2px);border-bottom-width:1px;background:var(--sig
 .steps .n{opacity:.55}.steps .who{font-weight:500}
 @media (max-width:640px){.ends>span:first-child{display:flex;flex-direction:column;gap:6px}.ends em{margin-left:0}.steps li{grid-template-columns:2em minmax(0,1fr)}.steps .tx{grid-column:2}}
 
-/* 2 proof */
-.weight{padding:22vh var(--pr) 10vh var(--pl)}
-.weight .hl{margin-bottom:9vh}
-.row{display:grid;grid-template-columns:minmax(110px,1fr) 5fr;column-gap:24px;align-items:end;margin-top:4vh}
-.row .lbl{font:400 12px var(--mono);color:var(--ink2);padding-bottom:.9em}
-.row .num{font:500 clamp(64px,13.5vw,240px)/.8 var(--sans);letter-spacing:-.065em;font-variant-numeric:tabular-nums}
-.r1 .num{color:var(--ink3)}
-.row .track{grid-column:2;margin-top:18px;height:12px;display:flex;align-items:center}
-.row .bar{display:block;height:2px;width:100%;background:var(--ink3);transform-origin:0 50%}
-.r2 .bar{height:12px;width:calc(100% * 1200 / 14000);background:var(--signal)}
-.weight .cap{margin-top:7vh;max-width:56ch}
-.stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:28px;padding:8vh var(--pr) 6vh var(--pl)}
-.stat{position:relative;padding-top:20px}
-.stat .rule{position:absolute;top:0;left:0;right:0;height:1px;background:var(--ink);transform-origin:0 50%}
-.stat b{display:block;font:500 clamp(54px,7vw,120px)/.85 var(--sans);letter-spacing:-.06em;font-variant-numeric:tabular-nums}
-.stat b small{font-size:.38em;letter-spacing:-.02em;margin-left:.12em}
-.stat h3{margin:22px 0 8px;font:500 17px/1.2 var(--sans);letter-spacing:-.015em}
-.stat p{margin:0;font:400 15px/1.5 var(--sans);color:var(--ink2);max-width:30ch}
-.foot-note{padding:0 var(--pr) 4vh var(--pl);max-width:none}
-@media (max-width:640px){.row{grid-template-columns:1fr}.row .track,.row .num{grid-column:1}.row .lbl{padding:0 0 6px}.stats{grid-template-columns:1fr;gap:48px}}
-
-/* ribbon */
-.rib{padding:2vh 0 10vh;overflow:hidden}
-.rib svg{display:block;width:118%;margin-left:-9%;height:auto;overflow:visible}
-#ribBand{fill:none;stroke:var(--signal);stroke-width:112}
-#ribText{font:600 58px var(--sans);letter-spacing:-.015em;fill:#111;text-transform:uppercase}
 
 /* 3 sessions */
 .sess-in{height:100%;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.55fr);gap:5vw;align-items:center;padding:calc(12vh + env(safe-area-inset-top,0px)) var(--pr) 6vh var(--pl)}
@@ -236,7 +210,7 @@ kbd.press{transform:translateY(2px);border-bottom-width:1px;background:var(--sig
   <section class="hero full" id="top">
     <h1 class="intro"><span class="ln"><span>A coding agent for your terminal.</span></span><span class="ln"><span>Many sessions. Any model. Your whole team.</span></span></h1>
     <p class="ctas"><a class="lk go" href="#install">Get qh</a><a class="lk" href="docs/">Read the docs</a></p>
-    <ul class="meta"><li>v0.2.9</li><li>Windows, macOS, Linux</li><li>One 4.6 MB file</li></ul>
+    <ul class="meta"><li>v0.2.9</li><li>Windows, macOS, Linux</li><li>One file, about 8 MB</li></ul>
     <p class="word" aria-hidden="true"><span class="ch q">q</span><span class="ch h">h</span><i class="bl"></i></p>
     <div class="eye" id="eye1" aria-hidden="true"><b></b></div>
     <div class="hint" aria-hidden="true">Scroll<i></i></div>
@@ -278,34 +252,11 @@ kbd.press{transform:translateY(2px);border-bottom-width:1px;background:var(--sig
     </div>
   </section>
 
-  <!-- 2 proof -->
-  <section class="weight" id="proof">
-    <p class="idx">02 Proof</p>
-    <h2 class="hl md"><span class="ln"><span>Light enough</span></span><span class="ln"><span>for a 9B model.</span></span></h2>
-    <div class="row r1"><span class="lbl">a popular agent CLI</span><b class="num" id="nA">14,000</b><span class="track"><i class="bar"></i></span></div>
-    <div class="row r2"><span class="lbl">qh</span><b class="num" id="nB">1,200</b><span class="track"><i class="bar"></i></span></div>
-    <p class="cap">Tokens sent to the model before you say hello. Same scale, both bars: 12 times less overhead.</p>
-  </section>
-  <div class="stats">
-    <div class="stat"><i class="rule"></i><b><span class="cu" data-to="4.6" data-dp="1">4.6</span><small>MB</small></b><h3>The whole thing</h3><p>One Rust binary, 5 MB of memory when idle. The GPU and RAM go to the model.</p></div>
-    <div class="stat"><i class="rule"></i><b><span class="cu" data-to="96" data-dp="0">96</span><small>%</small></b><h3>On a 9B model</h3><p>18 tasks, 3 runs each. A change stays only if this number goes up.</p></div>
-    <div class="stat"><i class="rule"></i><b><span class="cu" data-to="12" data-dp="0">12</span><small>×</small></b><h3>Less overhead</h3><p>About 1,200 tokens before you say hello, against about 14,000.</p></div>
-  </div>
-  <p class="cap foot-note">Measured 2026-10-09 and 10 on a laptop with an 8 GB NVIDIA GPU, qwen3.5:9b on Ollama. Your numbers will vary. This is weight, not capability.</p>
-
-  <section class="rib" aria-label="18 tasks, 3 runs each, on qwen3.5:9b: 52 of 54 passed">
-    <svg viewBox="0 0 1600 480" aria-hidden="true">
-      <defs><path id="ribPath" d="M -200 140 Q 800 440 1800 140"/></defs>
-      <use href="#ribPath" id="ribBand"/>
-      <text id="ribText" dy="20"><textPath href="#ribPath" id="ribTp" startOffset="0">Small model, real work &#8226; 52 of 54 runs passed &#8226; qwen3.5:9b on an 8 GB GPU &#8226; Small model, real work &#8226; 52 of 54 runs passed &#8226; qwen3.5:9b on an 8 GB GPU &#8226; Small model, real work &#8226; 52 of 54 runs passed &#8226; qwen3.5:9b on an 8 GB GPU &#8226; </textPath></text>
-    </svg>
-  </section>
-
-  <!-- 3 sessions -->
+  <!-- 2 sessions -->
   <section class="sess full" id="sessions">
     <div class="sess-in">
       <div>
-        <p class="idx">03 Sessions</p>
+        <p class="idx">02 Sessions</p>
         <h2 class="hl md"><span class="ln"><span>Four lines,</span></span><span class="ln"><span>one operator.</span></span></h2>
         <ul class="keys">
           <li><kbd>Ctrl</kbd><kbd id="kN">N</kbd><span>new line</span></li>
@@ -356,7 +307,7 @@ kbd.press{transform:translateY(2px);border-bottom-width:1px;background:var(--sig
       </div>
       <div class="safe-foot">
         <div>
-          <p class="idx">04 Safety</p>
+          <p class="idx">03 Safety</p>
           <h2 class="hl md"><span class="ln"><span>Nothing runs</span></span><span class="ln"><span>without your yes.</span></span></h2>
         </div>
         <p class="cap">Every command runs in your system's own sandbox,<br>so auto mode is safe to leave on.</p>
@@ -378,7 +329,7 @@ kbd.press{transform:translateY(2px);border-bottom-width:1px;background:var(--sig
 
   <!-- 5 install -->
   <section class="install" id="install">
-    <p class="idx">05 Install</p>
+    <p class="idx">04 Install</p>
     <h2 class="hl"><span class="ln"><span>Try it.</span></span></h2>
     <div class="panel">
       <div class="os" role="group" aria-label="Operating system"><button type="button" id="osUnix" aria-pressed="true">Linux / macOS</button><button type="button" id="osWin" aria-pressed="false">Windows</button></div>
@@ -515,21 +466,6 @@ function look(now) {
   requestAnimationFrame(look);
 }
 
-/* the ribbon bends with scroll speed */
-const ribPath = $('#ribPath'), ribTp = $('#ribTp');
-let ribOn = false, ribOff = 0, bend = 0, unit = 0;
-new IntersectionObserver(es => es.forEach(x => ribOn = x.isIntersecting)).observe($('.rib'));
-function ribbon(dt) {
-  if (!ribOn) return;
-  if (!unit) unit = $('#ribText').getComputedTextLength() / 3;
-  const v = lenis ? lenis.velocity : 0;
-  bend = lerp(bend, clamp(v * 7, -150, 150), .08);
-  ribOff -= (1.1 + Math.min(6, Math.abs(v) * .35)) * dt / 16.7;
-  if (unit && ribOff < -unit) ribOff += unit;
-  ribTp.setAttribute('startOffset', ribOff.toFixed(1));
-  ribPath.setAttribute('d', `M -200 140 Q 800 ${(440 + bend).toFixed(1)} 1800 140`);
-}
-
 /* typed text: any .tx with data-t, plus the safety command */
 const typeTo = (el, p) => { const t = el.dataset.t; el.textContent = t.slice(0, Math.round(t.length * p)); };
 
@@ -559,7 +495,6 @@ function motion() {
   const lines = s => $$(s + ' .ln > span');
   let inAsk = false, heroInv = false, past = false;
   const syncHd = () => { hd.classList.toggle('inv', inAsk || heroInv); hd.classList.toggle('sc', past && !inAsk && !heroInv); };
-  gsap.ticker.add((t, dt) => ribbon(dt));
   const reveal = (sel, trigger, start = 'top 70%') => gsap.to(lines(sel), { yPercent: 0, duration: 1.1, stagger: .09, ease: 'expo.out', scrollTrigger: { trigger, start, toggleActions: 'play none none reverse' } });
   // a scrubbed typing tween for one element
   const type = (tl, el, dur, pos) => { const o = { p: 0 }; typeTo(el, 0); return tl.to(o, { p: 1, duration: dur, ease: 'none', onUpdate: () => typeTo(el, o.p) }, pos); };
@@ -629,31 +564,16 @@ function motion() {
   ScrollTrigger.create({ trigger: '.ask', start: 'top 50px', end: 'bottom 50px', onToggle: s => { inAsk = s.isActive; syncHd(); } });
 
   /* detail grids: rules draw, then the words */
-  $$('.grid, .stats').forEach(g => {
+  $$('.grid').forEach(g => {
     gsap.set($$('.rule', g), { scaleX: 0 });
-    gsap.set($$('.cell > :not(.rule), .stat > :not(.rule)', g), { opacity: 0, y: 16 });
+    gsap.set($$('.cell > :not(.rule)', g), { opacity: 0, y: 16 });
     gsap.timeline({ scrollTrigger: { trigger: g, start: 'top 82%', toggleActions: 'play none none reverse' } })
       .to($$('.rule', g), { scaleX: 1, duration: 1.2, stagger: .1, ease: 'expo.out' })
-      .to($$('.cell > :not(.rule), .stat > :not(.rule)', g), { opacity: 1, y: 0, duration: .8, stagger: .035, ease: 'power2.out' }, '-=1');
+      .to($$('.cell > :not(.rule)', g), { opacity: 1, y: 0, duration: .8, stagger: .035, ease: 'power2.out' }, '-=1');
   });
   $$('.more .lead').forEach(l => gsap.from(l, { opacity: 0, y: 24, duration: 1, ease: 'expo.out', scrollTrigger: { trigger: l, start: 'top 85%', toggleActions: 'play none none reverse' } }));
 
-  /* 2 proof: both bars at one scale, numbers count with them */
-  const nA = $('#nA'), nB = $('#nB'), cnt = { a: 0, b: 0 }, fmt = v => (Math.round(v / 100) * 100).toLocaleString('en-US');
-  const renderN = () => { nA.textContent = fmt(cnt.a); nB.textContent = fmt(cnt.b); };
-  renderN();
-  gsap.set(lines('.weight'), { yPercent: 105 });
-  gsap.set('.weight .bar', { scaleX: 0 });
-  reveal('.weight', '.weight');
-  gsap.timeline({ scrollTrigger: { trigger: '.weight .r1', start: 'top 85%', end: 'bottom 35%', scrub: 1 } })
-    .to('.weight .r1 .bar', { scaleX: 1, ease: 'none', duration: 1 }, 0)
-    .to(cnt, { a: 14000, ease: 'none', duration: 1, onUpdate: renderN }, 0)
-    .to('.weight .r2 .bar', { scaleX: 1, ease: 'none', duration: .4 }, .55)
-    .to(cnt, { b: 1200, ease: 'none', duration: .4, onUpdate: renderN }, .55);
-  $$('.cu').forEach(el => { const to = +el.dataset.to, dp = +el.dataset.dp, o = { v: 0 }; el.textContent = (0).toFixed(dp);
-    gsap.to(o, { v: to, duration: 1.6, ease: 'expo.out', onUpdate: () => el.textContent = o.v.toFixed(dp), scrollTrigger: { trigger: el, start: 'top 85%', toggleActions: 'play none none reverse' } }); });
-
-  /* 3 sessions: split into four lines, then main asks tests */
+  /* 2 sessions: split into four lines, then main asks tests */
   gsap.set(lines('.sess'), { yPercent: 105 });
   gsap.set('.vl', { scaleY: 0 }); gsap.set('.hz', { scaleX: 0 });
   gsap.set('.p2, .p3, .p4, .hop, .ex li', { opacity: 0 });

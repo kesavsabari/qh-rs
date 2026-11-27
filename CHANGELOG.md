@@ -2,9 +2,14 @@
 
 Each version starts with a one-line summary; the website shows it once the version is no longer recent.
 
-## 0.2.9 — 2026-11-06
+## 0.2.9 — 2026-11-27
 
-qh now starts on a clean Windows, team mode gets through stalled networks and leftover git locks, and quitting never waits long on a stuck remote.
+qh now starts on a clean Windows, the sandbox and team mode are harder to misuse, releases are checked from build to install, and quitting never waits long on a stuck remote.
+
+- **Security fixes.** A sandboxed command could leave settings in the project's `.git` that later ran outside the sandbox. qh's own git calls now run hardened, and what a command leaves in `.git` is checked and cleaned. More credential files are kept out of the sandbox, and answers to teammates stay inside the project. Please update.
+- **Checked releases.** Each release file now carries a record of the GitHub build that made it, and is signed only after that record checks out. The install scripts check every download's size and SHA-256 against the signed list, and its signature where OpenSSL 3 is installed (`QH_REQUIRE_SIGNATURE=1` makes that required). `qh update` always checks it.
+- **Esc stops a running command.** Closing a tab or pressing Esc now stops its command and anything it started, instead of leaving it running for up to 120 seconds.
+- **A sturdier relay.** The relay copes with many idle or slow connections, and a teammate's old hello can't be played back after you restart qh.
 
 - **Windows: no Visual C++ runtime needed.** The exe stopped at once, with no message, on a machine without the runtime. It now carries what it needs.
 - **Quitting can't get stuck.** A stalled remote could hold up closing for 30 seconds. qh now leaves within 5 seconds, says it's going offline when it can, and leaves no git process behind.

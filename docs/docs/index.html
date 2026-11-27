@@ -6,16 +6,19 @@
 <title>qh docs</title>
 <meta name="description" content="How to install and use qh, a terminal coding agent for local and cloud models: setup, models, commands, team mode and configuration.">
 <link rel="icon" href="../favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="style.css?v=3">
 <script>try{var t=localStorage.getItem("qh-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
 </head>
 <body>
 <a class="skip" href="#start">Skip to content</a>
+<header class="hd" id="hd">
+  <a class="mark" href="../" aria-label="qh home">qh<small>0.2.8</small></a>
+  <nav class="nav" aria-label="Site"><a class="opt" href="../">Home</a><span class="opt">, </span><a href="./" aria-current="page">Docs</a>, <a href="updates/index.html">Updates</a>, <a href="https://github.com/kesavsabari/qh-rs">GitHub</a>, <a class="go" href="#install">Install</a></nav>
+  <button class="theme" id="theme" type="button">Dark</button>
+</header>
 <div class="wrap">
 
 <aside class="side" id="side">
-  <a class="brand" href="../"><b>qh</b><span>docs</span></a>
-  <p class="tag">A coding agent for your terminal. Local models, cloud models, and your team.</p>
   <button class="menu" type="button" aria-expanded="false" aria-controls="side">Contents</button>
   <nav aria-label="Contents">
     <div class="grp">Start</div>
@@ -49,14 +52,15 @@
     <div class="grp">Help</div>
     <a href="#trouble">Troubleshooting</a>
     <div class="grp">Updates</div>
-    <a href="updates/">Update history</a>
+    <a href="updates/index.html">Update history</a>
   </nav>
   <a class="gh" href="https://github.com/kesavsabari/qh-rs">Source on GitHub</a>
 </aside>
 
 <main id="start">
 <section>
-  <h1>qh docs</h1>
+  <p class="idx">qh docs</p>
+  <h1>Docs.</h1>
   <p class="lede">qh is a coding agent in your terminal. It reads and edits your files, runs commands, browses the web, and runs several agents side by side. It works with free local models, with your ChatGPT plan, or with an API key, and you can work on a project together with friends.</p>
   <div class="cards">
     <a class="card" href="#install"><b>Install</b><span>One command on Windows, Linux or Mac.</span></a>
@@ -430,6 +434,16 @@ trusted = false   <span class="c"># true: run its tools without asking</span></c
 </div>
 
 <script>
+// theme: the landing's toggle, same stored choice
+const root = document.documentElement, themeBtn = document.getElementById('theme');
+const isDark = () => root.dataset.theme ? root.dataset.theme === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
+const syncTheme = () => { themeBtn.textContent = isDark() ? 'Light' : 'Dark'; };
+syncTheme();
+themeBtn.addEventListener('click', () => { root.dataset.theme = isDark() ? 'light' : 'dark'; try { localStorage.setItem('qh-theme', root.dataset.theme); } catch (e) {} syncTheme(); });
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', syncTheme);
+// a hairline under the header once the page has scrolled
+const hd = document.getElementById('hd'), onScroll = () => hd.classList.toggle('sc', scrollY > 8);
+addEventListener('scroll', onScroll, { passive: true }); onScroll();
 // copy buttons on code blocks
 document.querySelectorAll('pre').forEach(pre => {
   const b = document.createElement('button');

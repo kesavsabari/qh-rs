@@ -6,21 +6,24 @@
 <title>qh update history</title>
 <meta name="description" content="Every qh release, newest first: what changed in each version of qh, the terminal coding agent.">
 <link rel="icon" href="../../favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="../style.css?v=2">
+<link rel="stylesheet" href="../style.css?v=3">
 <script>try{var t=localStorage.getItem("qh-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
 </head>
 <body>
 <a class="skip" href="#start">Skip to content</a>
+<header class="hd" id="hd">
+  <a class="mark" href="../../" aria-label="qh home">qh<small>0.2.8</small></a>
+  <nav class="nav" aria-label="Site"><a class="opt" href="../../">Home</a><span class="opt">, </span><a href="../index.html">Docs</a>, <a href="./" aria-current="page">Updates</a>, <a href="https://github.com/kesavsabari/qh-rs">GitHub</a>, <a class="go" href="../index.html#install">Install</a></nav>
+  <button class="theme" id="theme" type="button">Dark</button>
+</header>
 <div class="wrap">
 
-<aside class="side open" id="side">
-  <a class="brand" href="../"><b>qh</b><span>docs</span></a>
-  <p class="tag">Every release, newest first.</p>
+<aside class="side solo" id="side">
   <nav aria-label="Contents">
     <div class="grp">Updates</div>
-    <a class="on" href="./">Update history</a>
+    <a class="on" href="./" aria-current="page">Update history</a>
     <div class="grp">More</div>
-    <a href="../">All docs</a>
+    <a href="../index.html">All docs</a>
     <a href="../../">qh home</a>
   </nav>
   <a class="gh" href="https://github.com/kesavsabari/qh-rs/blob/main/CHANGELOG.md">Changelog on GitHub</a>
@@ -28,13 +31,26 @@
 
 <main id="start">
 <section>
-  <h1>Update history</h1>
+  <p class="idx">Updates</p>
+  <h1>What&rsquo;s new.</h1>
   <p class="lede">What changed in each qh release. Every version in full, newest first.</p>
   <p><code>qh update</code> installs the newest, and qh tells you when one is out.</p>
   <div data-updates="all"><p>Read <a href="https://github.com/kesavsabari/qh-rs/blob/main/CHANGELOG.md">the changelog on GitHub</a>.</p></div>
 </section>
 </main>
 </div>
-<script src="../../updates.js?v=2" defer></script>
+<script src="../../updates.js?v=3" defer></script>
+<script>
+// theme: the landing's toggle, same stored choice
+const root = document.documentElement, themeBtn = document.getElementById('theme');
+const isDark = () => root.dataset.theme ? root.dataset.theme === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
+const syncTheme = () => { themeBtn.textContent = isDark() ? 'Light' : 'Dark'; };
+syncTheme();
+themeBtn.addEventListener('click', () => { root.dataset.theme = isDark() ? 'light' : 'dark'; try { localStorage.setItem('qh-theme', root.dataset.theme); } catch (e) {} syncTheme(); });
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', syncTheme);
+// a hairline under the header once the page has scrolled
+const hd = document.getElementById('hd'), onScroll = () => hd.classList.toggle('sc', scrollY > 8);
+addEventListener('scroll', onScroll, { passive: true }); onScroll();
+</script>
 </body>
 </html>
